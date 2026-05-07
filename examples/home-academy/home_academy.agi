@@ -1,0 +1,188 @@
+// home_academy.agi
+// NovaSyn Home Academy - Agicore DSL Definition
+// A homeschool management application with AI-powered lesson generation
+
+APP home_academy {
+  TITLE   "NovaSyn Home Academy"
+  WINDOW  1200x800 frameless
+  DB      academy.db
+  PORT    5176
+  THEME   dark
+}
+
+AI_SERVICE {
+  PROVIDERS   anthropic, openai, google, xai
+  KEYS_FILE   "%APPDATA%/NovaSyn/api-keys.json"
+  DEFAULT     anthropic
+  STREAMING   true
+  MODELS {
+    anthropic  "claude-sonnet-4-20250514"
+    openai     "gpt-4o"
+    google     "gemini-2.0-flash"
+    xai        "grok-3"
+  }
+}
+
+// --- Data Models ---
+
+ENTITY Student {
+  name: string REQUIRED
+  date_of_birth: date
+  grade: string REQUIRED
+  notes: string
+  active: bool = true
+  TIMESTAMPS
+}
+
+ENTITY SchoolYear {
+  name: string REQUIRED UNIQUE
+  start_date: date REQUIRED
+  end_date: date REQUIRED
+  active: bool = true
+  TIMESTAMPS
+}
+
+ENTITY Enrollment {
+  status: string = "active"
+  BELONGS_TO Student
+  BELONGS_TO SchoolYear
+  TIMESTAMPS
+}
+
+ENTITY Subject {
+  name: string REQUIRED
+  description: string
+  color: string = "#3B82F6"
+  TIMESTAMPS
+}
+
+ENTITY Lesson {
+  title: string REQUIRED
+  content: json
+  subject_area: string
+  score: number
+  completed: bool = false
+  BELONGS_TO Student
+  BELONGS_TO Subject
+  TIMESTAMPS
+}
+
+ENTITY Assessment {
+  title: string REQUIRED
+  type: string REQUIRED
+  score: number
+  max_score: number = 100
+  notes: string
+  BELONGS_TO Student
+  BELONGS_TO Subject
+  TIMESTAMPS
+}
+
+// --- AI Actions ---
+
+ACTION generate_lesson {
+  INPUT   student_id: string, subject: string, difficulty: string = "medium"
+  OUTPUT  lesson: Lesson
+  AI      "You are a curriculum designer. Create a structured lesson plan for a {{difficulty}} level student on {{subject}}. Return JSON with title, content (array of sections with heading and body), and suggested assessment criteria."
+}
+
+ACTION analyze_progress {
+  INPUT   student_id: string, subject_id: string
+  OUTPUT  analysis: string
+  AI      "Analyze this student's academic progress in the given subject based on their lesson scores and assessment results. Identify strengths, areas for improvement, and recommend next steps. Be specific and actionable."
+  STREAM  true
+}
+
+ACTION generate_assessment {
+  INPUT   student_id: string, subject_id: string, type: string = "quiz"
+  OUTPUT  assessment: Assessment
+  AI      "Generate a {{type}} assessment for this student in the given subject. Include 10 questions appropriate to their grade level. Return as JSON with title, questions array, and answer key."
+}
+
+// --- Views ---
+
+VIEW Dashboard {
+  LAYOUT   custom
+  SIDEBAR  icon: Home
+  TITLE    "Dashboard"
+}
+
+VIEW StudentList {
+  ENTITY   Student
+  LAYOUT   split
+  ACTIONS  create, edit, delete
+  SIDEBAR  icon: Users
+  FIELDS   name, grade, active
+}
+
+VIEW LessonView {
+  ENTITY   Lesson
+  LAYOUT   cards
+  ACTIONS  create, generate_lesson
+  SIDEBAR  icon: BookOpen
+  FIELDS   title, subject_area, score, completed, created_at
+}
+
+VIEW SubjectList {
+  ENTITY   Subject
+  LAYOUT   table
+  ACTIONS  create, edit, delete
+  SIDEBAR  icon: Layers
+}
+
+VIEW AssessmentView {
+  ENTITY   Assessment
+  LAYOUT   table
+  ACTIONS  create, generate_assessment
+  SIDEBAR  icon: ClipboardCheck
+  FIELDS   title, type, score, max_score, created_at
+}
+
+VIEW SchoolYearView {
+  ENTITY   SchoolYear
+  LAYOUT   table
+  ACTIONS  create, edit
+  SIDEBAR  icon: Calendar
+}
+
+// --- Tests ---
+
+TEST student_crud {
+  GIVEN Student { name: "Alice Chen", grade: "5th", active: true }
+
+  EXPECT create -> id IS NOT NULL
+  EXPECT create -> name == "Alice Chen"
+  EXPECT create -> active == true
+  EXPECT list -> HAS_LENGTH > 0
+  EXPECT get_by_id -> grade == "5th"
+  EXPECT update { grade: "6th" } -> grade == "6th"
+  EXPECT delete -> get_by_id IS NULL
+}
+
+TEST subject_crud {
+  GIVEN Subject { name: "Mathematics", description: "Core math curriculum", color: "#EF4444" }
+
+  EXPECT create -> id IS NOT NULL
+  EXPECT create -> name == "Mathematics"
+  EXPECT create -> color == "#EF4444"
+}
+
+TEST enrollment_cascade {
+  GIVEN Student { name: "Bob", grade: "3rd" }
+  GIVEN SchoolYear { name: "2025-2026", start_date: "2025-08-15", end_date: "2026-06-01" }
+  GIVEN Enrollment { status: "active", BELONGS_TO Student, BELONGS_TO SchoolYear }
+
+  EXPECT create -> student_id IS NOT NULL
+  EXPECT create -> school_year_id IS NOT NULL
+  EXPECT delete -> list HAS_LENGTH == 0
+}
+
+TEST lesson_belongs_to_student {
+  GIVEN Student { name: "Charlie", grade: "4th" }
+  GIVEN Subject { name: "Science" }
+  GIVEN Lesson { title: "Photosynthesis", subject_area: "Biology", BELONGS_TO Student, BELONGS_TO Subject }
+
+  EXPECT create -> id IS NOT NULL
+  EXPECT create -> student_id IS NOT NULL
+  EXPECT delete -> list HAS_LENGTH == 0
+}

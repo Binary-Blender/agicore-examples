@@ -1,0 +1,246 @@
+// babyai_router.agi
+// BabyAI Cooperative Intelligence Engine
+// Demonstrates ROUTER, SKILL, LIFECYCLE, and BREED declarations
+// A self-improving AI routing system that gets cheaper and smarter with every interaction
+
+APP babyai {
+  TITLE   "BabyAI Co-Op Intelligence"
+  WINDOW  1200x800 frameless
+  DB      babyai.db
+  PORT    5195
+  THEME   dark
+}
+
+// --- Intelligent Model Router ---
+
+ROUTER BabyAI {
+  DESCRIPTION "Cooperative intelligence router with progressive learning"
+
+  TIER 1 free {
+    qwen3_8b: huggingface "Qwen/Qwen3-8B" {
+      STRENGTHS   general, math, coding
+      CONTEXT     32768
+      DEFAULT
+    }
+    llama_8b: huggingface "meta-llama/Llama-3.1-8B-Instruct" {
+      STRENGTHS   general, conversation, education
+      CONTEXT     131072
+    }
+    deepseek_r1: huggingface "deepseek-ai/DeepSeek-R1-Distill-Qwen-7B" {
+      STRENGTHS   math, analysis
+      CONTEXT     32768
+    }
+    qwen_coder: huggingface "Qwen/Qwen2.5-Coder-7B-Instruct" {
+      STRENGTHS   coding
+      CONTEXT     32768
+    }
+  }
+
+  TIER 2 mid {
+    haiku: anthropic "claude-haiku-4-5-20251001" {
+      STRENGTHS   coding, analysis
+      COST        0.1
+      CONTEXT     200000
+    }
+    gpt4mini: openai "gpt-4o-mini" {
+      STRENGTHS   general, coding, creative_writing
+      COST        0.015
+      CONTEXT     128000
+    }
+    gemini_flash: google "gemini-2.5-flash-preview-05-20" {
+      STRENGTHS   general, coding, research, math
+      COST        0.05
+      CONTEXT     1048576
+    }
+  }
+
+  TIER 3 premium {
+    sonnet: anthropic "claude-sonnet-4-6" {
+      STRENGTHS   coding, analysis, creative_writing
+      COST        0.3
+      CONTEXT     200000
+    }
+    opus: anthropic "claude-opus-4-6" {
+      STRENGTHS   coding, analysis, research
+      COST        1.5
+      CONTEXT     200000
+    }
+    grok: xai "grok-3-latest" {
+      STRENGTHS   general, coding, research
+      COST        0.3
+      CONTEXT     131072
+    }
+  }
+
+  TASK_TYPES    coding, creative_writing, analysis, math, conversation, research, education, farming, general
+  MOSH_PIT      3
+  CALIBRATION   true
+}
+
+// --- Skill Documents (Domain Expertise) ---
+
+SKILL corn_missouri {
+  DESCRIPTION  "Missouri corn farming expertise including Amish traditional knowledge"
+  KEYWORDS     corn, maize, missouri, soil, planting, harvest, rotation, cover_crop, amish
+  DOMAIN       "farming"
+  PRIORITY     10
+}
+
+SKILL typescript_patterns {
+  DESCRIPTION  "TypeScript design patterns and NovaSyn coding standards"
+  KEYWORDS     typescript, react, zustand, tauri, electron, ipc, schema, component
+  DOMAIN       "coding"
+  PRIORITY     5
+}
+
+SKILL socratic_tutor {
+  DESCRIPTION  "Socratic teaching method for project-based education"
+  KEYWORDS     teach, learn, student, project, curriculum, homework, lesson, quiz
+  DOMAIN       "education"
+  PRIORITY     8
+}
+
+SKILL creative_voice {
+  DESCRIPTION  "Author voice matching and creative writing techniques"
+  KEYWORDS     write, story, novel, chapter, character, plot, voice, narrative, fiction
+  DOMAIN       "creative_writing"
+  PRIORITY     7
+}
+
+// --- Temporal Lifecycle (Geological Strata) ---
+
+LIFECYCLE BabyAILifecycle {
+  DESCRIPTION       "Temporal graduation with elder escalation chain"
+  STALENESS_WINDOW  7
+  STALENESS_DROP    0.15
+  MIN_LIFETIME      14
+  MAX_INSTANCES     10
+
+  ESCALATION {
+    current: "Active instance — routing queries NOW"
+    recent: "Recent elder — last generation's knowledge"
+    historical: "Historical elder — older context, still accessible"
+    founding: "Founding instance — never deleted, deepest knowledge"
+  }
+}
+
+// --- Evolutionary Reproduction (15/15/70 Knowledge Inheritance) ---
+
+BREED BabyAIEvolution {
+  DESCRIPTION       "Cross-domain evolutionary reproduction with lineage tracking"
+  INHERITANCE       15 / 15 / 70
+  MIN_FITNESS       0.5
+  COOLDOWN          30
+
+  FITNESS {
+    prediction_accuracy: 0.4
+    domain_depth: 0.3
+    cost_efficiency: 0.2
+    judge_quality: 0.1
+  }
+
+  PAIRING {
+    PREFER          complementary_domains, generational_diversity
+    DIVERSITY_MIN   0.4
+  }
+
+  TRAITS {
+    PERSIST_AFTER   3
+    EXTINCT_AFTER   1
+  }
+}
+
+// --- Data Models ---
+
+ENTITY Prediction {
+  prompt_hash: string REQUIRED
+  predicted_tier: string REQUIRED
+  predicted_model: string REQUIRED
+  task_type: string REQUIRED
+  complexity: float REQUIRED
+  winner_correct: bool
+  latency_ms: float
+  total_tokens: number
+  cost_cents: float
+  TIMESTAMPS
+}
+
+ENTITY CalibrationEntry {
+  task_type: string REQUIRED
+  model_key: string REQUIRED
+  wins: float = 0
+  losses: float = 0
+  total_calls: number = 0
+  avg_latency_ms: float = 0
+  avg_confidence: float = 0.5
+  TIMESTAMPS
+}
+
+ENTITY SkillDocUsage {
+  skill_name: string REQUIRED
+  times_matched: number = 0
+  accuracy_boost: float = 0
+  TIMESTAMPS
+}
+
+ENTITY Instance {
+  domain: string REQUIRED
+  generation: number = 0
+  fitness_score: float = 0
+  status: string = "active"
+  parent_a_id: string
+  parent_b_id: string
+  inherited_entries: number = 0
+  TIMESTAMPS
+}
+
+// --- Views ---
+
+VIEW Dashboard {
+  LAYOUT   custom
+  SIDEBAR  icon: Home
+  TITLE    "Dashboard"
+}
+
+VIEW CalibrationView {
+  ENTITY   CalibrationEntry
+  LAYOUT   table
+  SIDEBAR  icon: BarChart3
+  FIELDS   task_type, model_key, wins, losses, avg_confidence
+}
+
+VIEW InstanceView {
+  ENTITY   Instance
+  LAYOUT   split
+  SIDEBAR  icon: GitBranch
+  FIELDS   domain, generation, fitness_score, status
+}
+
+VIEW SkillsView {
+  ENTITY   SkillDocUsage
+  LAYOUT   table
+  SIDEBAR  icon: BookOpen
+  FIELDS   skill_name, times_matched, accuracy_boost
+}
+
+// --- Tests ---
+
+TEST prediction_tracking {
+  GIVEN Prediction { prompt_hash: "abc123", predicted_tier: "1", predicted_model: "qwen3_8b", task_type: "coding", complexity: 0.3 }
+  EXPECT create -> id IS NOT NULL
+  EXPECT create -> task_type == "coding"
+  EXPECT create -> complexity == 0.3
+}
+
+TEST calibration_tracking {
+  GIVEN CalibrationEntry { task_type: "coding", model_key: "qwen3_8b", wins: 5, losses: 1 }
+  EXPECT create -> id IS NOT NULL
+  EXPECT create -> wins == 5
+}
+
+TEST instance_lifecycle {
+  GIVEN Instance { domain: "coding", generation: 0, status: "active", fitness_score: 0.75 }
+  EXPECT create -> id IS NOT NULL
+  EXPECT create -> status == "active"
+  EXPECT create -> generation == 0
+}

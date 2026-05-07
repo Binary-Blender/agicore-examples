@@ -1,0 +1,161 @@
+// invoice_approval.agi
+// Invoice Approval Expert System - Agicore DSL Definition
+// Demonstrates the expert system / RULE capabilities
+
+APP invoice_approval {
+  TITLE   "Invoice Approval Engine"
+  WINDOW  1000x700 frameless
+  DB      invoices.db
+  PORT    5180
+  THEME   dark
+}
+
+// --- Data Models ---
+
+ENTITY Vendor {
+  name: string REQUIRED
+  trust_level: string = "standard"
+  total_invoices: number = 0
+  TIMESTAMPS
+}
+
+ENTITY Invoice {
+  amount: float REQUIRED
+  description: string REQUIRED
+  status: string = "pending"
+  approved_by: string
+  rejection_reason: string
+  BELONGS_TO Vendor
+  TIMESTAMPS
+}
+
+ENTITY ApprovalLog {
+  decision: string REQUIRED
+  rule_fired: string REQUIRED
+  reason: string
+  BELONGS_TO Invoice
+  TIMESTAMPS
+}
+
+// --- Business Rules ---
+
+RULE auto_approve_small {
+  WHEN    invoice.amount <= 500
+  UNLESS  vendor.trust_level == "low"
+  THEN    auto_approve
+  PRIORITY 5
+}
+
+RULE manager_approval_medium {
+  WHEN    invoice.amount > 500
+  AND     invoice.amount <= 10000
+  THEN    require_manager_approval
+  PRIORITY 10
+}
+
+RULE director_approval_large {
+  WHEN    invoice.amount > 10000
+  THEN    require_director_approval
+  PRIORITY 15
+}
+
+RULE block_untrusted_high_value {
+  WHEN    invoice.amount > 5000
+  AND     vendor.trust_level == "low"
+  THEN    reject_and_flag
+  PRIORITY 20
+}
+
+RULE expedite_trusted_vendor {
+  WHEN    vendor.trust_level == "premium"
+  AND     invoice.amount <= 25000
+  THEN    auto_approve
+  PRIORITY 25
+}
+
+// --- Approval Workflow ---
+
+WORKFLOW InvoiceReview {
+  STEP validate_invoice {
+    ACTION  validate_invoice_data
+    INPUT   invoice_id: workflow.invoice_id
+    ON_FAIL stop
+  }
+
+  STEP evaluate_rules {
+    ACTION  run_rule_engine
+    INPUT   invoice_id: workflow.invoice_id
+  }
+
+  STEP route_decision {
+    ACTION  route_approval
+    INPUT   invoice_id: workflow.invoice_id, decision: evaluate_rules.result
+  }
+
+  STEP log_decision {
+    ACTION  create_approval_log
+    INPUT   invoice_id: workflow.invoice_id, decision: route_decision.decision, rule: evaluate_rules.rule_fired
+    ON_FAIL skip
+  }
+
+  STEP notify {
+    ACTION  send_notification
+    INPUT   message: "Invoice {{invoice.description}} has been {{route_decision.decision}}"
+    ON_FAIL skip
+  }
+}
+
+// --- Views ---
+
+VIEW InvoiceDashboard {
+  LAYOUT   custom
+  SIDEBAR  icon: Home
+  TITLE    "Dashboard"
+}
+
+VIEW InvoiceList {
+  ENTITY   Invoice
+  LAYOUT   split
+  ACTIONS  create, edit, delete
+  SIDEBAR  icon: FileText
+  FIELDS   amount, description, status, created_at
+}
+
+VIEW VendorList {
+  ENTITY   Vendor
+  LAYOUT   table
+  ACTIONS  create, edit
+  SIDEBAR  icon: Building
+  FIELDS   name, trust_level, total_invoices
+}
+
+VIEW AuditLog {
+  ENTITY   ApprovalLog
+  LAYOUT   table
+  SIDEBAR  icon: Shield
+  FIELDS   decision, rule_fired, reason, created_at
+}
+
+// --- Tests ---
+
+TEST auto_approve_small_invoice {
+  GIVEN Vendor { name: "Office Supplies Co", trust_level: "standard" }
+  GIVEN Invoice { amount: 250, description: "Printer paper", BELONGS_TO Vendor }
+
+  EXPECT create -> id IS NOT NULL
+  EXPECT create -> status == "pending"
+}
+
+TEST block_untrusted_vendor {
+  GIVEN Vendor { name: "Sketchy LLC", trust_level: "low" }
+  GIVEN Invoice { amount: 7500, description: "Consulting services", BELONGS_TO Vendor }
+
+  EXPECT create -> id IS NOT NULL
+}
+
+TEST expedite_premium_vendor {
+  GIVEN Vendor { name: "Trusted Partner Inc", trust_level: "premium" }
+  GIVEN Invoice { amount: 15000, description: "Annual license", BELONGS_TO Vendor }
+
+  EXPECT create -> id IS NOT NULL
+}
