@@ -1,0 +1,269 @@
+// creator_network.agi
+// P2P Semantic Creator Network
+// Demonstrates IDENTITY, FEED, PACKET, AUTHORITY, and CHANNEL
+// working together to create a creator-owned semantic publishing network
+// Retro-web inspired, AI-native, local-first, no algorithmic manipulation
+
+APP creator_network {
+  TITLE   "Semantic Creator Network"
+  WINDOW  1200x800 frameless
+  DB      creator.db
+  PORT    5210
+  THEME   dark
+}
+
+AI_SERVICE {
+  PROVIDERS   anthropic, openai
+  KEYS_FILE   "%APPDATA%/NovaSyn/api-keys.json"
+  DEFAULT     anthropic
+  STREAMING   true
+}
+
+// --- Creator Identities ---
+
+IDENTITY CreatorProfile {
+  DESCRIPTION    "Human creator identity for the semantic publishing network"
+  SIGNING_KEY    ed25519
+  DOMAINS        farming, coding, education, creative_writing, general
+  DISCOVERABLE   true
+  PORTABLE       true
+
+  PROFILE {
+    display_name: string REQUIRED
+    bio: string
+    avatar_url: string
+    website: string
+    interests: json
+    location: string
+    joined_at: datetime
+  }
+}
+
+IDENTITY SystemNode {
+  DESCRIPTION    "Automated pipeline node identity"
+  SIGNING_KEY    ed25519
+  DOMAINS        orchestration
+  DISCOVERABLE   false
+  PORTABLE       false
+
+  PROFILE {
+    node_name: string REQUIRED
+    node_type: string REQUIRED
+    capabilities: json
+  }
+}
+
+// --- Content Packets ---
+
+PACKET BlogPost {
+  DESCRIPTION "Creator blog post with full semantic metadata"
+
+  PAYLOAD {
+    title: string REQUIRED
+    content: string REQUIRED
+    summary: string
+    tags: json
+    category: string
+    media_urls: json
+  }
+
+  METADATA {
+    PROVENANCE    true
+    LINEAGE       true
+    SIGNATURES    true
+    ADMISSIBILITY true
+    TTL           0
+  }
+
+  VALIDATION {
+    has_title: title IS NOT NULL
+    has_content: content IS NOT NULL
+  }
+}
+
+PACKET WorkflowShare {
+  DESCRIPTION "Shared workflow definition for creator collaboration"
+
+  PAYLOAD {
+    workflow_name: string REQUIRED
+    workflow_definition: json REQUIRED
+    description: string
+    skill_docs_required: json
+  }
+
+  METADATA {
+    PROVENANCE    true
+    LINEAGE       true
+    SIGNATURES    true
+    ADMISSIBILITY true
+    TTL           0
+  }
+
+  VALIDATION {
+    has_name: workflow_name IS NOT NULL
+    has_definition: workflow_definition IS NOT NULL
+  }
+}
+
+// --- Authority ---
+
+AUTHORITY CreatorTrust {
+  DESCRIPTION "Trust framework for creator content publishing"
+
+  LEVELS {
+    creator: "Content creator and publisher"
+    moderator: "Community moderator with content review authority"
+    admin: "Network administrator"
+  }
+
+  SIGNING {
+    REQUIRED       true
+    ALGORITHM      "ed25519"
+    VERIFY_CHAIN   true
+  }
+
+  ADMISSIBILITY {
+    signed: signature IS NOT NULL
+    valid_identity: creator_id IS NOT NULL
+  }
+}
+
+// --- Channels ---
+
+CHANNEL public_feed {
+  DESCRIPTION  "Public content distribution channel"
+  PROTOCOL     http
+  DIRECTION    outbound
+  PACKET       BlogPost
+  AUTHORITY    CreatorTrust
+  ENDPOINT     "/v1/feed"
+  TIMEOUT      15000
+}
+
+CHANNEL peer_sync {
+  DESCRIPTION  "P2P content synchronization between nodes"
+  PROTOCOL     websocket
+  DIRECTION    bidirectional
+  PACKET       BlogPost
+  AUTHORITY    CreatorTrust
+  RETRY        3
+  TIMEOUT      30000
+}
+
+CHANNEL workflow_exchange {
+  DESCRIPTION  "Share workflows between creators"
+  PROTOCOL     http
+  DIRECTION    bidirectional
+  PACKET       WorkflowShare
+  AUTHORITY    CreatorTrust
+  ENDPOINT     "/v1/workflows"
+  TIMEOUT      15000
+}
+
+// --- Feeds ---
+
+FEED creator_blog {
+  DESCRIPTION  "Creator's personal semantic blog feed"
+  IDENTITY     CreatorProfile
+  PACKET       BlogPost
+  CHANNEL      public_feed
+  SUBSCRIBE    open
+  SYNDICATE    true
+  MAX_ITEMS    500
+  DISCOVERY    true
+}
+
+FEED premium_content {
+  DESCRIPTION  "Subscriber-only premium content"
+  IDENTITY     CreatorProfile
+  PACKET       BlogPost
+  SUBSCRIBE    approved
+  SYNDICATE    false
+  MAX_ITEMS    100
+  DISCOVERY    false
+}
+
+FEED shared_workflows {
+  DESCRIPTION  "Community workflow sharing feed"
+  IDENTITY     CreatorProfile
+  PACKET       WorkflowShare
+  CHANNEL      workflow_exchange
+  SUBSCRIBE    open
+  SYNDICATE    true
+  MAX_ITEMS    200
+  DISCOVERY    true
+}
+
+// --- Data Models ---
+
+ENTITY Creator {
+  display_name: string REQUIRED
+  public_key: string REQUIRED UNIQUE
+  bio: string
+  avatar_url: string
+  domain_tags: json
+  subscriber_count: number = 0
+  TIMESTAMPS
+}
+
+ENTITY Post {
+  title: string REQUIRED
+  content: string REQUIRED
+  summary: string
+  category: string
+  tags: json
+  signature: string
+  BELONGS_TO Creator
+  TIMESTAMPS
+}
+
+ENTITY Subscription {
+  status: string = "active"
+  BELONGS_TO Creator
+  TIMESTAMPS
+}
+
+// --- Views ---
+
+VIEW FeedView {
+  LAYOUT   custom
+  SIDEBAR  icon: Rss
+  TITLE    "Semantic Feed"
+}
+
+VIEW CreatorSpace {
+  ENTITY   Creator
+  LAYOUT   split
+  ACTIONS  create, edit
+  SIDEBAR  icon: User
+  FIELDS   display_name, domain_tags, subscriber_count
+}
+
+VIEW PublishView {
+  ENTITY   Post
+  LAYOUT   custom
+  SIDEBAR  icon: PenTool
+  TITLE    "Publish"
+}
+
+VIEW DiscoverView {
+  LAYOUT   custom
+  SIDEBAR  icon: Compass
+  TITLE    "Discover"
+}
+
+// --- Tests ---
+
+TEST creator_crud {
+  GIVEN Creator { display_name: "Alice", public_key: "ed25519:abc123", bio: "Farmer and coder" }
+  EXPECT create -> id IS NOT NULL
+  EXPECT create -> display_name == "Alice"
+  EXPECT create -> subscriber_count == 0
+}
+
+TEST post_publishing {
+  GIVEN Creator { display_name: "Bob", public_key: "ed25519:def456" }
+  GIVEN Post { title: "First Post", content: "Hello world", category: "general", BELONGS_TO Creator }
+  EXPECT create -> id IS NOT NULL
+  EXPECT create -> title == "First Post"
+}
