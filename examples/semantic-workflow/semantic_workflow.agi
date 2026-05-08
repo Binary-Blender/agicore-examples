@@ -1,0 +1,199 @@
+// semantic_workflow.agi
+// Semantic Session Transitions & Operational Compilation
+// Demonstrates SESSION and COMPILER declarations
+// Turn conversations into skill docs, requirements into DSL,
+// discussions into blog posts — one click, no copy-paste
+
+APP semantic_workflow {
+  TITLE   "Semantic Workflow"
+  WINDOW  1200x800 frameless
+  DB      workflow.db
+  PORT    5230
+  THEME   dark
+}
+
+AI_SERVICE {
+  PROVIDERS   anthropic, openai
+  KEYS_FILE   "%APPDATA%/NovaSyn/api-keys.json"
+  DEFAULT     anthropic
+  STREAMING   true
+}
+
+// ===================================================================
+// SESSION MODES — Constrained cognitive environments
+// ===================================================================
+
+SESSION brainstorm {
+  DESCRIPTION  "Open-ended ideation, exploration, and requirements discovery"
+  TOOLS        chat, search, vault_browse, web_search
+  CONTEXT      conversation
+  MEMORY       session
+  OUTPUT       text, notes, ideas
+}
+
+SESSION skilldoc_editor {
+  DESCRIPTION  "Structured behavioral specification authoring"
+  TOOLS        chat, template, validate, publish
+  CONTEXT      structured
+  MEMORY       persistent
+  OUTPUT       skilldoc
+  PERSIST      true
+}
+
+SESSION requirements {
+  DESCRIPTION  "Implementation requirements and architecture planning"
+  TOOLS        chat, template, validate
+  CONTEXT      structured
+  MEMORY       persistent
+  OUTPUT       requirements, architecture
+  PERSIST      true
+}
+
+SESSION coding {
+  DESCRIPTION  "Implementation with repo awareness and verification"
+  TOOLS        chat, terminal, file_edit, test_run, type_check
+  CONTEXT      structured
+  MEMORY       persistent
+  OUTPUT       code, tests, dsl
+  PERSIST      true
+}
+
+SESSION publishing {
+  DESCRIPTION  "Content creation, editing, and distribution"
+  TOOLS        chat, editor, media, feed_publish
+  CONTEXT      structured
+  MEMORY       persistent
+  OUTPUT       post, packet
+  PERSIST      true
+}
+
+SESSION novel_creation {
+  DESCRIPTION  "Long-form creative writing with continuity tracking"
+  TOOLS        chat, outline, character_manager, timeline
+  CONTEXT      structured
+  MEMORY       persistent
+  OUTPUT       chapter, worldbuilding, character
+  PERSIST      true
+}
+
+// ===================================================================
+// COMPILERS — "Send To" semantic transformations
+// ===================================================================
+
+COMPILER chat_to_skilldoc {
+  DESCRIPTION  "Extract behavioral specs from brainstorming into a skill document"
+  FROM         brainstorm
+  TO           skilldoc_editor
+  EXTRACT      policies, constraints, behaviors, triggers, patterns
+  AI           "Analyze this conversation and extract all behavioral specifications, runtime policies, operational constraints, orchestration patterns, and trigger conditions. Output as a structured skill document with ## sections for each policy area."
+  VALIDATE     true
+}
+
+COMPILER chat_to_requirements {
+  DESCRIPTION  "Extract implementation requirements from discussion"
+  FROM         brainstorm
+  TO           requirements
+  EXTRACT      features, workflows, entities, dependencies, architecture
+  AI           "Analyze this conversation and extract all features, entity definitions, workflow descriptions, architecture decisions, dependencies, and implementation requirements. Output as a structured requirements document organized by priority."
+  VALIDATE     true
+}
+
+COMPILER requirements_to_dsl {
+  DESCRIPTION  "Generate Agicore DSL from structured requirements"
+  FROM         requirements
+  TO           coding
+  EXTRACT      entities, workflows, rules, pipelines, tests
+  AI           "Convert these requirements into Agicore DSL declarations. Generate ENTITY, ACTION, WORKFLOW, RULE, PIPELINE, and TEST declarations that implement the specified architecture. Output valid .agi syntax."
+  VALIDATE     true
+}
+
+COMPILER chat_to_post {
+  DESCRIPTION  "Transform discussion into publishable blog post"
+  FROM         brainstorm
+  TO           publishing
+  EXTRACT      structure, key_points, narrative, examples
+  AI           "Transform this conversation into a well-structured blog post. Extract key insights, organize into sections with headers, add introduction and conclusion. Maintain the original voice and depth."
+  VALIDATE     false
+}
+
+COMPILER chat_to_novel_outline {
+  DESCRIPTION  "Extract worldbuilding and story structure from creative discussion"
+  FROM         brainstorm
+  TO           novel_creation
+  EXTRACT      characters, settings, plot_points, themes, conflicts
+  AI           "Analyze this conversation and extract all story elements: characters (with descriptions and motivations), settings, plot points, themes, conflicts, and narrative arc. Output as a structured outline."
+  VALIDATE     false
+}
+
+COMPILER skilldoc_to_dsl {
+  DESCRIPTION  "Generate DSL declarations from a skill document"
+  FROM         skilldoc_editor
+  TO           coding
+  EXTRACT      rules, patterns, states, scores, modules
+  AI           "Convert this skill document into Agicore expert system DSL declarations. Generate RULE, PATTERN, STATE, SCORE, and MODULE declarations that implement the behavioral specifications. Output valid .agi syntax."
+  VALIDATE     true
+}
+
+// ===================================================================
+// DATA MODELS
+// ===================================================================
+
+ENTITY SessionRecord {
+  session_type: string REQUIRED
+  title: string REQUIRED
+  content: json REQUIRED
+  artifact_type: string
+  source_session_id: string
+  compiler_used: string
+  TIMESTAMPS
+}
+
+ENTITY Artifact {
+  name: string REQUIRED
+  content: string REQUIRED
+  artifact_type: string REQUIRED
+  source_session_id: string
+  tags: json
+  version: number = 1
+  TIMESTAMPS
+}
+
+// ===================================================================
+// VIEWS
+// ===================================================================
+
+VIEW SessionSwitcher {
+  LAYOUT   custom
+  SIDEBAR  icon: Layers
+  TITLE    "Sessions"
+}
+
+VIEW ArtifactBrowser {
+  ENTITY   Artifact
+  LAYOUT   split
+  ACTIONS  create, edit, delete
+  SIDEBAR  icon: FileText
+  FIELDS   name, artifact_type, version, created_at
+}
+
+VIEW CompilerView {
+  LAYOUT   custom
+  SIDEBAR  icon: ArrowRightLeft
+  TITLE    "Send To"
+}
+
+// ===================================================================
+// TESTS
+// ===================================================================
+
+TEST session_tracking {
+  GIVEN SessionRecord { session_type: "brainstorm", title: "Product Ideas", content: "[]" }
+  EXPECT create -> id IS NOT NULL
+  EXPECT create -> session_type == "brainstorm"
+}
+
+TEST artifact_creation {
+  GIVEN Artifact { name: "API Skill Doc", content: "# API Patterns", artifact_type: "skilldoc", version: 1 }
+  EXPECT create -> id IS NOT NULL
+  EXPECT create -> version == 1
+}
