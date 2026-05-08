@@ -1,0 +1,284 @@
+// distributed_orchestration.agi
+// Distributed Semantic Orchestration Demo
+// Demonstrates PACKET, AUTHORITY, and CHANNEL declarations
+// Semantic packets as the TCP/IP of AI-native organizational coordination
+
+APP distributed_orchestration {
+  TITLE   "Distributed Orchestration"
+  WINDOW  1200x800 frameless
+  DB      orchestration.db
+  PORT    5200
+  THEME   dark
+}
+
+AI_SERVICE {
+  PROVIDERS   anthropic, openai
+  KEYS_FILE   "%APPDATA%/NovaSyn/api-keys.json"
+  DEFAULT     anthropic
+  STREAMING   true
+}
+
+// --- Semantic Packets ---
+
+PACKET AnalysisRequest {
+  DESCRIPTION "Portable analysis request with full operational context"
+
+  PAYLOAD {
+    intent: string REQUIRED
+    context: json REQUIRED
+    constraints: json
+    source_documents: json
+    priority: string
+    optimization_attempts: number
+  }
+
+  METADATA {
+    PROVENANCE    true
+    LINEAGE       true
+    SIGNATURES    false
+    ADMISSIBILITY true
+    TTL           86400
+  }
+
+  VALIDATION {
+    has_intent: intent IS NOT NULL
+    has_context: context IS NOT NULL
+  }
+}
+
+PACKET AnalysisResult {
+  DESCRIPTION "Structured analysis output with critique and governance state"
+
+  PAYLOAD {
+    findings: json REQUIRED
+    confidence: float REQUIRED
+    recommendations: json
+    critic_score: float
+    governance_status: string
+    execution_summary: string
+  }
+
+  METADATA {
+    PROVENANCE    true
+    LINEAGE       true
+    SIGNATURES    true
+    ADMISSIBILITY true
+    TTL           0
+  }
+
+  VALIDATION {
+    has_findings: findings IS NOT NULL
+    minimum_confidence: confidence >= 0.3
+    governance_passed: governance_status != "rejected"
+  }
+}
+
+PACKET WorkflowHandoff {
+  DESCRIPTION "Cross-system workflow state for organizational coordination"
+
+  PAYLOAD {
+    workflow_id: string REQUIRED
+    stage: string REQUIRED
+    context: json REQUIRED
+    decisions_made: json
+    pending_actions: json
+    authority_chain: json
+  }
+
+  METADATA {
+    PROVENANCE    true
+    LINEAGE       true
+    SIGNATURES    true
+    ADMISSIBILITY true
+    TTL           604800
+  }
+
+  VALIDATION {
+    has_workflow: workflow_id IS NOT NULL
+    has_stage: stage IS NOT NULL
+    has_context: context IS NOT NULL
+  }
+}
+
+// --- Authority Chains ---
+
+AUTHORITY SystemGovernance {
+  DESCRIPTION "Trust framework for distributed AI coordination"
+
+  LEVELS {
+    automated: "System-level automated decisions"
+    analyst: "Human analyst review authority"
+    manager: "Management override authority"
+    executive: "Executive-level authority for high-impact decisions"
+  }
+
+  SIGNING {
+    REQUIRED       true
+    ALGORITHM      "sha256"
+    VERIFY_CHAIN   true
+  }
+
+  ADMISSIBILITY {
+    valid_source: source_system IS NOT NULL
+    within_ttl: packet_age < ttl
+    governance_clear: governance_status != "blocked"
+  }
+}
+
+AUTHORITY PartnerTrust {
+  DESCRIPTION "Trust framework for cross-organization packet exchange"
+
+  LEVELS {
+    internal: "Same organization"
+    partner: "Trusted partner with shared agreements"
+    external: "External system with verification required"
+  }
+
+  SIGNING {
+    REQUIRED       true
+    ALGORITHM      "sha256"
+    VERIFY_CHAIN   true
+  }
+
+  ADMISSIBILITY {
+    authenticated: auth_token IS NOT NULL
+    authorized: trust_level != "blocked"
+  }
+}
+
+// --- Communication Channels ---
+
+CHANNEL analysis_intake {
+  DESCRIPTION  "Receives analysis requests from upstream systems"
+  PROTOCOL     http
+  DIRECTION    inbound
+  PACKET       AnalysisRequest
+  AUTHORITY    SystemGovernance
+  ENDPOINT     "/v1/analyze"
+  TIMEOUT      30000
+}
+
+CHANNEL analysis_output {
+  DESCRIPTION  "Sends analysis results to downstream consumers"
+  PROTOCOL     http
+  DIRECTION    outbound
+  PACKET       AnalysisResult
+  AUTHORITY    SystemGovernance
+  ENDPOINT     "/v1/results"
+  RETRY        3
+  TIMEOUT      15000
+}
+
+CHANNEL partner_exchange {
+  DESCRIPTION  "Bidirectional workflow coordination with partner systems"
+  PROTOCOL     websocket
+  DIRECTION    bidirectional
+  PACKET       WorkflowHandoff
+  AUTHORITY    PartnerTrust
+  RETRY        5
+  TIMEOUT      60000
+}
+
+CHANNEL babyai_specialist {
+  DESCRIPTION  "Route to BabyAI domain specialist nodes"
+  PROTOCOL     http
+  DIRECTION    outbound
+  PACKET       AnalysisRequest
+  ENDPOINT     "/v1/chat/completions"
+  TIMEOUT      90000
+}
+
+// --- Analysis Pipeline (uses semantic packets) ---
+
+PIPELINE AnalysisPipeline {
+  DESCRIPTION "Multi-stage analysis with semantic packet flow"
+
+  ROW intake {
+    parser: ai_action {
+      MODEL       "anthropic"
+      PROMPT      "Parse and structure the analysis request: {{input}}"
+    }
+  }
+
+  ROW analysis {
+    primary: ai_action {
+      MODEL       "anthropic"
+      PROMPT      "Perform detailed analysis based on: {{parsed_input}}"
+    }
+    critic: ai_action {
+      MODEL       "openai"
+      PROMPT      "Critique the analysis. Score confidence 0-1. Identify gaps."
+    }
+  }
+
+  ROW quality {
+    review: qc_checkpoint {
+      DESCRIPTION "Review analysis quality and completeness"
+      SPC         "analysis_quality"
+    }
+  }
+
+  CONNECTION parser.output -> primary.parsed_input
+  CONNECTION parser.output -> critic.parsed_input
+  CONNECTION primary.output -> review.input
+}
+
+QC analysis_quality {
+  YOUNG_THRESHOLD     25
+  MATURING_THRESHOLD  50
+  MATURE_PASS_RATE    0.90
+  MATURE_SAMPLE       0.10
+}
+
+// --- Data Models ---
+
+ENTITY PacketLog {
+  packet_type: string REQUIRED
+  packet_id: string REQUIRED INDEX
+  direction: string REQUIRED
+  source_system: string
+  payload_hash: string
+  validation_passed: bool
+  authority_level: string
+  TIMESTAMPS
+}
+
+ENTITY ChannelMetrics {
+  channel_name: string REQUIRED
+  messages_sent: number = 0
+  messages_received: number = 0
+  avg_latency_ms: float = 0
+  error_count: number = 0
+  TIMESTAMPS
+}
+
+// --- Views ---
+
+VIEW Dashboard {
+  LAYOUT   custom
+  SIDEBAR  icon: Home
+  TITLE    "Orchestration Dashboard"
+}
+
+VIEW PacketLog {
+  ENTITY   PacketLog
+  LAYOUT   table
+  SIDEBAR  icon: Package
+  FIELDS   packet_type, direction, source_system, validation_passed, created_at
+}
+
+VIEW ChannelStatus {
+  ENTITY   ChannelMetrics
+  LAYOUT   table
+  SIDEBAR  icon: Radio
+  FIELDS   channel_name, messages_sent, messages_received, avg_latency_ms, error_count
+}
+
+// --- Tests ---
+
+TEST packet_logging {
+  GIVEN PacketLog { packet_type: "AnalysisRequest", packet_id: "pkt-001", direction: "inbound", validation_passed: true }
+  EXPECT create -> id IS NOT NULL
+  EXPECT create -> packet_type == "AnalysisRequest"
+  EXPECT create -> validation_passed == true
+}
