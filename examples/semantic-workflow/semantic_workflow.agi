@@ -85,7 +85,13 @@ COMPILER chat_to_skilldoc {
   FROM         brainstorm
   TO           skilldoc_editor
   EXTRACT      policies, constraints, behaviors, triggers, patterns
-  AI           "Analyze this conversation and extract all behavioral specifications, runtime policies, operational constraints, orchestration patterns, and trigger conditions. Output as a structured skill document with ## sections for each policy area."
+  ENRICH {
+    INFER       implicit_constraints
+    DETECT      policy_gaps
+    SUGGEST     orchestration_patterns
+    PRESERVE    original_intent
+  }
+  AI           "Analyze this conversation and extract all behavioral specifications, runtime policies, operational constraints, orchestration patterns, and trigger conditions. Infer implicit constraints, detect policy gaps, and suggest orchestration patterns. Output as a structured skill document with ## sections for each policy area."
   VALIDATE     true
 }
 
@@ -94,7 +100,15 @@ COMPILER chat_to_requirements {
   FROM         brainstorm
   TO           requirements
   EXTRACT      features, workflows, entities, dependencies, architecture
-  AI           "Analyze this conversation and extract all features, entity definitions, workflow descriptions, architecture decisions, dependencies, and implementation requirements. Output as a structured requirements document organized by priority."
+  ENRICH {
+    INFER       missing_dependencies
+    SUGGEST     architecture_patterns
+    GENERATE    test_scenarios
+    DETECT      gaps
+    DETECT      contradictions
+    PRESERVE    original_intent
+  }
+  AI           "Analyze this conversation and extract all features, entity definitions, workflow descriptions, architecture decisions, dependencies, and implementation requirements. Infer missing dependencies, suggest architecture patterns, generate test scenarios, and detect gaps or contradictions. Output as a structured requirements document organized by priority."
   VALIDATE     true
 }
 
@@ -103,7 +117,14 @@ COMPILER requirements_to_dsl {
   FROM         requirements
   TO           coding
   EXTRACT      entities, workflows, rules, pipelines, tests
-  AI           "Convert these requirements into Agicore DSL declarations. Generate ENTITY, ACTION, WORKFLOW, RULE, PIPELINE, and TEST declarations that implement the specified architecture. Output valid .agi syntax."
+  ENRICH {
+    INFER       relationships
+    GENERATE    validation_rules
+    GENERATE    test_declarations
+    SUGGEST     pipeline_structure
+    DETECT      missing_entities
+  }
+  AI           "Convert these requirements into Agicore DSL declarations. Generate ENTITY, ACTION, WORKFLOW, RULE, PIPELINE, and TEST declarations that implement the specified architecture. Infer entity relationships, generate validation rules and tests, and detect any missing entities. Output valid .agi syntax."
   VALIDATE     true
 }
 
