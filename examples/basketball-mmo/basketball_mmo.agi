@@ -1,0 +1,390 @@
+// basketball_mmo.agi
+// Real World MMO: AI-Powered Basketball Challenge
+// Demonstrates the Ambient Intelligence layer (NODE, SENSOR, ZONE)
+// composed with Expert System (SCORE, RULE, STATE), Identity (IDENTITY, FEED),
+// Orchestration (QC), and Semantic Infrastructure (PACKET, CHANNEL)
+//
+// A $200 hoop + $40 camera + Agicore = a system that scores shots, tracks
+// streaks, runs leaderboards, adjusts difficulty dynamically, and feeds
+// SPC quality control on detection accuracy.
+//
+// This is the reference implementation for "Thin the Veil" real world MMOs.
+
+APP basketball_mmo {
+  TITLE   "Hoops: Real World MMO"
+  WINDOW  1000x700 frameless
+  DB      hoops.db
+  PORT    5220
+  THEME   dark
+}
+
+AI_SERVICE {
+  PROVIDERS   anthropic, openai
+  KEYS_FILE   "%APPDATA%/NovaSyn/api-keys.json"
+  DEFAULT     anthropic
+  STREAMING   true
+}
+
+// ===================================================================
+// AMBIENT INTELLIGENCE LAYER — Physical World
+// ===================================================================
+
+SENSOR court_camera {
+  DESCRIPTION  "Side-angle camera for basketball shot detection and tracking"
+  TYPE         camera
+  MODEL        "USB 1080p webcam"
+  CAPABILITY   shot_detection, player_tracking, pose_estimation, distance_estimation
+  LATENCY      150
+  ACCURACY     0.95
+  FAILURE      "flag_unknown"
+}
+
+SENSOR hoop_vibration {
+  DESCRIPTION  "Piezo vibration sensor on hoop rim for shot confirmation"
+  TYPE         custom
+  MODEL        "Piezo vibration disc"
+  CAPABILITY   impact_detection, swish_detection
+  LATENCY      10
+  ACCURACY     0.99
+}
+
+SENSOR court_microphone {
+  DESCRIPTION  "Ambient microphone for crowd noise and callouts"
+  TYPE         microphone
+  MODEL        "USB condenser mic"
+  CAPABILITY   ambient_noise, voice_command
+  LATENCY      50
+  ACCURACY     0.90
+}
+
+NODE court_scorer {
+  DESCRIPTION  "Court-side Raspberry Pi running shot detection and scoring"
+  TYPE         environment
+  HARDWARE     "rpi5"
+  AI_TIER      edge
+  COMMS        mqtt, wifi, ble
+  SENSORS      court_camera, hoop_vibration, court_microphone
+  ZONE         MainCourt
+  OFFLINE      true
+  SAFETY       low
+}
+
+NODE player_phone {
+  DESCRIPTION  "Player's smartphone — identity, leaderboard, challenge selection"
+  TYPE         personal
+  HARDWARE     "android"
+  AI_TIER      hybrid
+  COMMS        ble, mqtt
+  OFFLINE      true
+}
+
+ZONE MainCourt {
+  DESCRIPTION  "Outdoor basketball court with AI-powered scoring and challenges"
+  BOUNDS       "28x15m"
+  NODES        court_scorer
+  AMBIENT      true
+  CAPACITY     20
+  HOURS        "06:00-22:00"
+}
+
+// ===================================================================
+// PLAYER IDENTITY & FEEDS
+// ===================================================================
+
+IDENTITY PlayerProfile {
+  DESCRIPTION    "Player identity for the basketball MMO"
+  SIGNING_KEY    ed25519
+  DOMAINS        basketball, fitness, gaming
+  DISCOVERABLE   true
+  PORTABLE       true
+
+  PROFILE {
+    display_name: string REQUIRED
+    avatar_url: string
+    home_court: string
+    skill_level: string
+    faction: string
+    joined_at: datetime
+  }
+}
+
+PACKET ShotEvent {
+  DESCRIPTION "Individual shot attempt with full context"
+
+  PAYLOAD {
+    player_id: string REQUIRED
+    made: bool REQUIRED
+    distance: float
+    shot_type: string
+    streak_count: number
+    confidence: float
+    timestamp: datetime REQUIRED
+  }
+
+  METADATA {
+    PROVENANCE    true
+    LINEAGE       false
+    SIGNATURES    false
+    ADMISSIBILITY true
+    TTL           0
+  }
+
+  VALIDATION {
+    has_player: player_id IS NOT NULL
+    valid_confidence: confidence >= 0.5
+  }
+}
+
+CHANNEL shot_feed {
+  DESCRIPTION  "Real-time shot event stream for leaderboard updates"
+  PROTOCOL     mqtt
+  DIRECTION    outbound
+  PACKET       ShotEvent
+  TIMEOUT      5000
+}
+
+FEED leaderboard {
+  DESCRIPTION  "Public leaderboard feed for the basketball MMO"
+  IDENTITY     PlayerProfile
+  PACKET       ShotEvent
+  CHANNEL      shot_feed
+  SUBSCRIBE    open
+  SYNDICATE    true
+  MAX_ITEMS    10000
+  DISCOVERY    true
+}
+
+// ===================================================================
+// GAME MECHANICS — Composed from Expert System primitives
+// ===================================================================
+
+// --- Player Progression ---
+
+SCORE player_xp {
+  INITIAL   0
+  MIN       0
+  MAX       100000
+  THRESHOLD level_2 AT 100 THEN unlock_streak_challenges
+  THRESHOLD level_5 AT 500 THEN unlock_distance_challenges
+  THRESHOLD level_10 AT 2000 THEN unlock_faction_play
+  THRESHOLD level_25 AT 10000 THEN unlock_creator_mode
+}
+
+SCORE shooting_accuracy {
+  INITIAL   0
+  MIN       0
+  MAX       100
+  THRESHOLD cold AT 20 THEN show_encouragement
+  THRESHOLD warming_up AT 40 THEN normal_difficulty
+  THRESHOLD hot AT 70 THEN increase_difficulty
+  THRESHOLD on_fire AT 90 THEN legendary_challenge
+}
+
+SCORE streak_counter {
+  INITIAL   0
+  MIN       0
+  MAX       999
+  THRESHOLD nice AT 3 THEN streak_bonus_1
+  THRESHOLD hot_streak AT 5 THEN streak_bonus_2
+  THRESHOLD unstoppable AT 10 THEN streak_bonus_3
+  THRESHOLD legendary AT 25 THEN legendary_announcement
+}
+
+// --- Shot Scoring Rules ---
+
+RULE made_shot {
+  WHEN    shot.made == true
+  AND     shot.confidence >= 0.8
+  THEN    award_points
+  PRIORITY 10
+}
+
+RULE missed_shot {
+  WHEN    shot.made == false
+  THEN    reset_streak
+  PRIORITY 5
+}
+
+RULE distance_bonus {
+  WHEN    shot.made == true
+  AND     shot.distance > 6.75
+  THEN    award_three_pointer_bonus
+  PRIORITY 15
+}
+
+RULE swish_bonus {
+  WHEN    shot.made == true
+  AND     shot.type == "swish"
+  THEN    award_swish_bonus
+  PRIORITY 12
+}
+
+// --- Dynamic Difficulty ---
+
+RULE easy_mode {
+  WHEN    shooting_accuracy < 30
+  THEN    reduce_challenge_difficulty
+  PRIORITY 20
+}
+
+RULE hard_mode {
+  WHEN    shooting_accuracy > 70
+  THEN    increase_challenge_difficulty
+  PRIORITY 20
+}
+
+// --- Game State ---
+
+STATE GamePhase {
+  INITIAL idle
+
+  idle {
+    ON_ENTER reset_session
+    TRANSITION warmup WHEN player_detected == true
+  }
+
+  warmup {
+    ON_ENTER start_warmup_timer
+    TRANSITION active WHEN warmup_shots >= 3
+    TRANSITION idle WHEN no_activity_timeout == true
+  }
+
+  active {
+    ON_ENTER start_challenge
+    TRANSITION cooldown WHEN challenge_complete == true
+    TRANSITION idle WHEN no_activity_timeout == true
+  }
+
+  cooldown {
+    ON_ENTER show_results
+    TRANSITION active WHEN new_challenge_selected == true
+    TRANSITION idle WHEN session_end == true
+  }
+}
+
+// ===================================================================
+// QUALITY CONTROL — SPC on detection accuracy
+// ===================================================================
+
+QC shot_detection_accuracy {
+  YOUNG_THRESHOLD     50
+  MATURING_THRESHOLD  200
+  YOUNG_PASS_RATE     0.90
+  MATURE_PASS_RATE    0.95
+  MATURING_SAMPLE     0.30
+  MATURE_SAMPLE       0.05
+}
+
+// ===================================================================
+// DATA MODELS
+// ===================================================================
+
+ENTITY Player {
+  display_name: string REQUIRED
+  public_key: string UNIQUE
+  skill_level: string = "beginner"
+  faction: string
+  total_shots: number = 0
+  total_made: number = 0
+  best_streak: number = 0
+  xp: number = 0
+  level: number = 1
+  TIMESTAMPS
+}
+
+ENTITY Session {
+  shots_taken: number = 0
+  shots_made: number = 0
+  best_streak: number = 0
+  duration_seconds: number = 0
+  challenge_type: string
+  difficulty: string = "normal"
+  BELONGS_TO Player
+  TIMESTAMPS
+}
+
+ENTITY Shot {
+  made: bool REQUIRED
+  distance: float
+  shot_type: string
+  confidence: float REQUIRED
+  streak_at_time: number = 0
+  BELONGS_TO Session
+  TIMESTAMPS
+}
+
+ENTITY Challenge {
+  name: string REQUIRED
+  description: string
+  type: string REQUIRED
+  target_makes: number
+  target_streak: number
+  time_limit: number
+  min_level: number = 1
+  xp_reward: number = 10
+  TIMESTAMPS
+}
+
+// ===================================================================
+// VIEWS
+// ===================================================================
+
+VIEW CourtView {
+  LAYOUT   custom
+  SIDEBAR  icon: Target
+  TITLE    "Live Court"
+}
+
+VIEW LeaderboardView {
+  ENTITY   Player
+  LAYOUT   table
+  SIDEBAR  icon: Trophy
+  FIELDS   display_name, level, total_made, best_streak, xp
+}
+
+VIEW ChallengeView {
+  ENTITY   Challenge
+  LAYOUT   cards
+  ACTIONS  create
+  SIDEBAR  icon: Zap
+  FIELDS   name, type, target_makes, xp_reward, min_level
+}
+
+VIEW SessionHistory {
+  ENTITY   Session
+  LAYOUT   table
+  SIDEBAR  icon: History
+  FIELDS   shots_taken, shots_made, best_streak, duration_seconds, created_at
+}
+
+VIEW PlayerProfile {
+  ENTITY   Player
+  LAYOUT   detail
+  SIDEBAR  icon: User
+}
+
+// ===================================================================
+// TESTS
+// ===================================================================
+
+TEST player_registration {
+  GIVEN Player { display_name: "Jordan", skill_level: "beginner" }
+  EXPECT create -> id IS NOT NULL
+  EXPECT create -> total_shots == 0
+  EXPECT create -> level == 1
+}
+
+TEST shot_tracking {
+  GIVEN Player { display_name: "LeBron" }
+  GIVEN Session { shots_taken: 0, BELONGS_TO Player }
+  GIVEN Shot { made: true, distance: 5.5, confidence: 0.95, BELONGS_TO Session }
+  EXPECT create -> id IS NOT NULL
+  EXPECT create -> made == true
+  EXPECT create -> confidence == 0.95
+}
+
+TEST challenge_creation {
+  GIVEN Challenge { name: "Three Point Rain", type: "accuracy", target_makes: 5, xp_reward: 50, min_level: 5 }
+  EXPECT create -> id IS NOT NULL
+  EXPECT create -> xp_reward == 50
+}
