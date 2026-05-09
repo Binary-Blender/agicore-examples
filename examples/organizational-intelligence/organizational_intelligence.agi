@@ -1,0 +1,288 @@
+// organizational_intelligence.agi
+// The Organizational Intelligence Engine pattern, expressed in Agicore.
+//
+// Inspired by the OIE (Organizational Intelligence Engine) — a "company brain"
+// that observes activity, turns it into telemetry, and reasons about it
+// periodically to surface bottlenecks, automation candidates, and risks.
+//
+// In Agicore terms, this is Meridian Level 2 made first-class:
+// "AI noticed a pattern the humans hadn't seen."
+//
+// Layers in this file:
+//   - APP with TELEMETRY auto              -> every action emits a telemetry packet
+//   - PACKET TelemetryEvent                -> the canonical activity event
+//   - PACKET OrgInsight                    -> the canonical reasoning output
+//   - CHANNEL telemetry_stream             -> where activity flows
+//   - CHANNEL insight_stream               -> where insights flow
+//   - SKILLDOC organization_analysis       -> the signed cognition module
+//   - REASONER organization_reasoner       -> the periodic AI loop
+
+APP organizational_intelligence {
+  TITLE     "Organizational Intelligence Engine"
+  WINDOW    1400x900 frameless
+  DB        oie.db
+  PORT      5260
+  THEME     dark
+  TELEMETRY auto
+}
+
+// ===================================================================
+// AUTHORITY — Who can sign insights and access them
+// ===================================================================
+
+AUTHORITY OrgAuthority {
+  DESCRIPTION "Organizational signing authority for insights and analysis modules"
+
+  LEVELS {
+    employee:     "Standard employee"
+    team_lead:    "Team lead — can see team-level insights"
+    analyst:      "Analyst — can trigger on-demand reasoning"
+    admin:        "Admin — sees global insights"
+  }
+
+  SIGNING {
+    REQUIRED      true
+    ALGORITHM     "ed25519"
+    VERIFY_CHAIN  true
+  }
+
+  ADMISSIBILITY {
+    valid_signature: signature IS NOT NULL
+  }
+}
+
+// ===================================================================
+// EXECUTION ENVIRONMENT — Where the reasoner runs
+// ===================================================================
+
+NODE analytics_node {
+  DESCRIPTION "Dedicated analytics node with access to telemetry stream"
+  TYPE        environment
+  HARDWARE    "server"
+  AI_TIER     hybrid
+  COMMS       wifi, mqtt
+  OFFLINE     false
+  SAFETY      high
+}
+
+// ===================================================================
+// TELEMETRY PACKET — Canonical shape for every recorded action
+// ===================================================================
+
+PACKET TelemetryEvent {
+  DESCRIPTION "Normalized record of significant actions in the system"
+
+  PAYLOAD {
+    user_id:           string
+    roles:             string
+    source:            string REQUIRED
+    event_type:        string REQUIRED
+    tool_or_service:   string
+    input_summary:     string
+    outcome_summary:   string
+    success:           bool   REQUIRED
+    duration_ms:       number
+    correlation_id:    string
+    tenant_id:         string
+  }
+
+  METADATA {
+    PROVENANCE    true
+    LINEAGE       true
+    SIGNATURES    false
+    ADMISSIBILITY true
+    TTL           90
+  }
+
+  VALIDATION {
+    has_source: source IS NOT NULL
+    has_event:  event_type IS NOT NULL
+    has_status: success IS NOT NULL
+  }
+}
+
+// ===================================================================
+// INSIGHT PACKET — Canonical shape for reasoner output
+// ===================================================================
+
+PACKET OrgInsight {
+  DESCRIPTION "Structured insight produced by the organizational reasoner"
+
+  PAYLOAD {
+    category:      string REQUIRED
+    scope:         string REQUIRED
+    target_id:     string
+    title:         string REQUIRED
+    detail:        string REQUIRED
+    confidence:    float
+    impact_score:  float
+    payload_json:  string
+  }
+
+  METADATA {
+    PROVENANCE    true
+    LINEAGE       true
+    SIGNATURES    true
+    ADMISSIBILITY true
+    TTL           30
+  }
+
+  VALIDATION {
+    valid_category: category IS NOT NULL
+    valid_scope:    scope IS NOT NULL
+    has_title:      title IS NOT NULL
+  }
+}
+
+// ===================================================================
+// CHANNELS — Where activity and insights flow
+// ===================================================================
+
+CHANNEL telemetry_stream {
+  DESCRIPTION  "Firehose of every recorded action across services, chat, workflows"
+  PROTOCOL     mqtt
+  DIRECTION    bidirectional
+  PACKET       TelemetryEvent
+  AUTHORITY    OrgAuthority
+  ENDPOINT     "/telemetry/events"
+}
+
+CHANNEL insight_stream {
+  DESCRIPTION  "Tamper-evident stream of organizational insights produced by reasoners"
+  PROTOCOL     mqtt
+  DIRECTION    outbound
+  PACKET       OrgInsight
+  AUTHORITY    OrgAuthority
+  ENDPOINT     "/intelligence/insights"
+}
+
+// ===================================================================
+// SKILLDOC — The signed cognition module that drives the analysis
+// ===================================================================
+
+SKILLDOC organization_analysis {
+  DESCRIPTION  "Signed cognition for analyzing telemetry — bottlenecks, automation, risks, training needs"
+  VERSION      "1.0.0"
+  DOMAIN       "operations"
+  CONTENT      "skilldocs/organization_analysis.md"
+  KEYWORDS     telemetry, bottleneck, automation, risk, training, operations
+  PRIORITY     20
+
+  GOVERNANCE {
+    SIGNED_BY      OrgAuthority
+    REQUIRE        analyst
+    EXECUTE_ONLY   analytics_node
+    DISALLOW       export, log_external
+    AUDIT          all_actions
+  }
+
+  COMPRESSION {
+    SEMANTIC_DENSITY      0.85
+    INTENT_PRESERVATION   0.95
+    TOKEN_EFFICIENCY      0.7
+  }
+}
+
+// ===================================================================
+// REASONER — The periodic AI analysis loop
+// ===================================================================
+
+REASONER organization_reasoner {
+  DESCRIPTION  "Daily reasoning over telemetry: surfaces bottlenecks, automation candidates, risks"
+
+  INPUT {
+    CHANNEL    telemetry_stream
+    WINDOW     "7d"
+    FILTER     "success IS NOT NULL"
+  }
+
+  USES         organization_analysis
+  TIER         2
+
+  OUTPUT {
+    PACKET     OrgInsight
+    CHANNEL    insight_stream
+  }
+
+  SCHEDULE     daily
+
+  GOVERNANCE {
+    SIGNED_BY      OrgAuthority
+    EXECUTE_ONLY   analytics_node
+    REQUIRE        analyst
+    AUDIT          all_actions
+  }
+}
+
+// On-demand variant: leadership can trigger from chat
+REASONER on_demand_summary {
+  DESCRIPTION  "Triggered by 'summarize org health' chat command"
+
+  INPUT {
+    CHANNEL    telemetry_stream
+    WINDOW     "24h"
+  }
+
+  USES         organization_analysis
+  TIER         2
+
+  OUTPUT {
+    PACKET     OrgInsight
+    CHANNEL    insight_stream
+  }
+
+  SCHEDULE     on_demand
+
+  GOVERNANCE {
+    SIGNED_BY      OrgAuthority
+    REQUIRE        admin
+    AUDIT          all_access
+  }
+}
+
+// ===================================================================
+// DATA MODELS — Insight history & dashboard
+// ===================================================================
+
+ENTITY InsightRecord {
+  category:     string REQUIRED
+  scope:        string REQUIRED
+  target_id:    string
+  title:        string REQUIRED
+  detail:       string REQUIRED
+  confidence:   float
+  impact_score: float
+  signed_by:    string
+  is_archived:  bool = false
+  TIMESTAMPS
+}
+
+VIEW InsightDashboard {
+  ENTITY    InsightRecord
+  LAYOUT    table
+  ACTIONS   archive
+  SIDEBAR   icon: BarChart
+  FIELDS    title, category, scope, impact_score, created_at
+}
+
+VIEW BottleneckBoard {
+  ENTITY    InsightRecord
+  LAYOUT    cards
+  SIDEBAR   icon: AlertTriangle
+  FIELDS    title, detail, impact_score
+}
+
+// ===================================================================
+// TESTS
+// ===================================================================
+
+TEST insight_capture {
+  GIVEN InsightRecord { category: "BOTTLENECK", scope: "GLOBAL", title: "Approval queue depth growing", detail: "Avg approval latency 4.2x baseline", impact_score: 0.85 }
+  EXPECT create -> id IS NOT NULL
+  EXPECT create -> is_archived == false
+}
+
+TEST insight_archive {
+  GIVEN InsightRecord { category: "AUTOMATION", scope: "TEAM", target_id: "team_finance", title: "Repeated invoice rework", detail: "Pattern detected 12x/week", impact_score: 0.72 }
+  EXPECT create -> id IS NOT NULL
+}
