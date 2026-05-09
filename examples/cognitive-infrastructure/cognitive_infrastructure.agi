@@ -1,0 +1,344 @@
+// cognitive_infrastructure.agi
+// SKILLDOC as Governed Operational Cognition Infrastructure
+// Demonstrates how organizational expertise becomes deployable, signed,
+// auditable cognition modules — not just metadata pointers.
+//
+// SKILL = "here are some keywords for routing"
+// SKILLDOC = "here is a complete deployable cognition module with provenance,
+//            signing, clearance requirements, audit trail, and execution constraints"
+
+APP cognitive_infrastructure {
+  TITLE   "Cognitive Infrastructure"
+  WINDOW  1200x800 frameless
+  DB      cognition.db
+  PORT    5240
+  THEME   dark
+}
+
+// ===================================================================
+// AUTHORITY CHAINS — Who can sign and execute skilldocs
+// ===================================================================
+
+AUTHORITY CorporateAuthority {
+  DESCRIPTION "Corporate signing authority for proprietary cognition modules"
+
+  LEVELS {
+    employee:           "General employee access"
+    engineer:           "Engineering staff"
+    qc_certified:       "Certified quality control personnel"
+    manufacturing_certified: "Manufacturing certified personnel"
+    clearance_level_4:  "Level 4 security clearance"
+    executive:          "Executive override authority"
+  }
+
+  SIGNING {
+    REQUIRED       true
+    ALGORITHM      "ed25519"
+    VERIFY_CHAIN   true
+  }
+
+  ADMISSIBILITY {
+    valid_signature:  signature IS NOT NULL
+    not_expired:      packet_age < ttl
+  }
+}
+
+AUTHORITY OpenCommunity {
+  DESCRIPTION "Open-source community authority for public cognition modules"
+
+  LEVELS {
+    public:    "Anyone can read and execute"
+    contributor: "Approved contributor"
+    maintainer:  "Project maintainer"
+  }
+
+  SIGNING {
+    REQUIRED       false
+    ALGORITHM      "ed25519"
+    VERIFY_CHAIN   false
+  }
+
+  ADMISSIBILITY {
+    public_or_signed: signature IS NOT NULL
+  }
+}
+
+// ===================================================================
+// EXECUTION ENVIRONMENTS — Where skilldocs can run
+// ===================================================================
+
+NODE secure_factory_floor {
+  DESCRIPTION  "Air-gapped manufacturing floor with certified hardware"
+  TYPE         environment
+  HARDWARE     "industrial_pi"
+  AI_TIER      edge
+  COMMS        local_only
+  OFFLINE      true
+  SAFETY       critical
+}
+
+NODE certified_qc_node {
+  DESCRIPTION  "Certified QC inspection node — secure execution only"
+  TYPE         environment
+  HARDWARE     "rpi5"
+  AI_TIER      edge
+  COMMS        mqtt
+  OFFLINE      true
+  SAFETY       high
+}
+
+NODE general_workstation {
+  DESCRIPTION  "Standard developer workstation"
+  TYPE         personal
+  HARDWARE     "desktop"
+  AI_TIER      hybrid
+  COMMS        wifi, mqtt
+  OFFLINE      false
+  SAFETY       low
+}
+
+ZONE FactoryFloor {
+  DESCRIPTION  "Secured factory floor — authorized personnel only"
+  BOUNDS       "100x60m"
+  NODES        secure_factory_floor, certified_qc_node
+  AMBIENT      true
+}
+
+// ===================================================================
+// GOVERNED SKILLDOCS — Enterprise (signed, restricted, audited)
+// ===================================================================
+
+SKILLDOC aerospace_qc {
+  DESCRIPTION  "Aerospace manufacturing quality control procedures and inspection rubrics"
+  VERSION      "2.4.1"
+  DOMAIN       "manufacturing"
+  CONTENT      "skilldocs/aerospace_qc.md"
+  KEYWORDS     aerospace, manufacturing, quality, qc, inspection, compliance, ndt
+  PRIORITY     20
+
+  GOVERNANCE {
+    SIGNED_BY      CorporateAuthority
+    REQUIRE        clearance_level_4, manufacturing_certified
+    EXECUTE_ONLY   secure_factory_floor, certified_qc_node
+    DISALLOW       export, redistribute, log_external, modify
+    AUDIT          all_access
+  }
+
+  COMPRESSION {
+    SEMANTIC_DENSITY      0.85
+    INTENT_PRESERVATION   0.95
+    TOKEN_EFFICIENCY      0.7
+  }
+}
+
+SKILLDOC compliance_workflows {
+  DESCRIPTION  "FAA/FDA compliance workflows and documentation requirements"
+  VERSION      "1.3.0"
+  DOMAIN       "compliance"
+  CONTENT      "skilldocs/compliance_workflows.md"
+  KEYWORDS     faa, fda, compliance, audit, certification, documentation
+  PRIORITY     15
+
+  GOVERNANCE {
+    SIGNED_BY      CorporateAuthority
+    REQUIRE        qc_certified
+    EXECUTE_ONLY   certified_qc_node
+    DISALLOW       export, modify
+    AUDIT          all_actions
+  }
+
+  COMPRESSION {
+    SEMANTIC_DENSITY      0.80
+    INTENT_PRESERVATION   1.0
+    TOKEN_EFFICIENCY      0.65
+  }
+}
+
+SKILLDOC supply_chain_logic {
+  DESCRIPTION  "Internal supply chain coordination and vendor scoring"
+  VERSION      "3.1.2"
+  DOMAIN       "logistics"
+  CONTENT      "skilldocs/supply_chain.md"
+  KEYWORDS     supply, vendor, logistics, sourcing, inventory
+  PRIORITY     12
+
+  GOVERNANCE {
+    SIGNED_BY      CorporateAuthority
+    REQUIRE        engineer
+    DISALLOW       export
+    AUDIT          errors
+  }
+}
+
+// ===================================================================
+// OPEN SKILLDOCS — Community (public, lightweight governance)
+// ===================================================================
+
+SKILLDOC novasyn_dev_stack_v2 {
+  DESCRIPTION  "Open NovaSyn dev stack patterns, conventions, and architecture"
+  VERSION      "2.0.0"
+  DOMAIN       "coding"
+  CONTENT      "skilldocs/novasyn_dev_stack.md"
+  KEYWORDS     typescript, react, zustand, tauri, agicore, schema, patterns
+  PRIORITY     10
+
+  GOVERNANCE {
+    SIGNED_BY      OpenCommunity
+    AUDIT          errors
+  }
+}
+
+SKILLDOC tao_orchestration_basics {
+  DESCRIPTION  "Tactical AI Orchestration fundamentals — open methodology"
+  VERSION      "1.0.0"
+  DOMAIN       "methodology"
+  CONTENT      "skilldocs/tao_basics.md"
+  KEYWORDS     tao, orchestration, ai, workflow, methodology, tps
+  PRIORITY     8
+}
+
+SKILLDOC creative_voice_writing {
+  DESCRIPTION  "Author voice matching and creative writing techniques"
+  VERSION      "1.2.0"
+  DOMAIN       "creative_writing"
+  KEYWORDS     write, story, novel, voice, narrative, character
+  PRIORITY     7
+}
+
+// ===================================================================
+// ROUTING — How skilldocs connect to the AI router
+// ===================================================================
+
+ROUTER CognitionRouter {
+  DESCRIPTION "Routes queries to specialist nodes with skilldoc-enriched context"
+
+  TIER 1 free {
+    qwen_coder: huggingface "Qwen/Qwen2.5-Coder-7B-Instruct" {
+      STRENGTHS   coding
+      CONTEXT     32768
+    }
+    qwen3_8b: huggingface "Qwen/Qwen3-8B" {
+      STRENGTHS   general
+      CONTEXT     32768
+      DEFAULT
+    }
+  }
+
+  TIER 2 mid {
+    haiku: anthropic "claude-haiku-4-5-20251001" {
+      STRENGTHS   coding, analysis, manufacturing, compliance
+      COST        0.1
+      CONTEXT     200000
+    }
+  }
+
+  TIER 3 premium {
+    opus: anthropic "claude-opus-4-6" {
+      STRENGTHS   coding, analysis, research, manufacturing, compliance
+      COST        1.5
+      CONTEXT     200000
+    }
+  }
+
+  TASK_TYPES    coding, manufacturing, compliance, logistics, creative_writing, methodology, general
+  MOSH_PIT      3
+  CALIBRATION   true
+}
+
+// ===================================================================
+// AUDIT TRAIL — Where access logs go
+// ===================================================================
+
+PACKET SkillDocAccessAudit {
+  DESCRIPTION "Audit packet emitted whenever a governed skilldoc is accessed"
+
+  PAYLOAD {
+    skilldoc_name: string REQUIRED
+    skilldoc_version: string
+    accessed_by: string REQUIRED
+    node_id: string
+    clearance_used: string
+    action: string REQUIRED
+    granted: bool REQUIRED
+    reason: string
+  }
+
+  METADATA {
+    PROVENANCE    true
+    LINEAGE       true
+    SIGNATURES    true
+    ADMISSIBILITY true
+    TTL           0
+  }
+
+  VALIDATION {
+    has_skilldoc: skilldoc_name IS NOT NULL
+    has_actor: accessed_by IS NOT NULL
+    has_action: action IS NOT NULL
+  }
+}
+
+CHANNEL audit_stream {
+  DESCRIPTION  "Tamper-evident audit log stream for governed skilldoc access"
+  PROTOCOL     mqtt
+  DIRECTION    outbound
+  PACKET       SkillDocAccessAudit
+  AUTHORITY    CorporateAuthority
+  ENDPOINT     "/audit/skilldocs"
+}
+
+// ===================================================================
+// DATA MODELS
+// ===================================================================
+
+ENTITY SkillDocRegistry {
+  name: string REQUIRED UNIQUE
+  version: string REQUIRED
+  domain: string
+  signed_by: string
+  signature: string
+  content_hash: string REQUIRED
+  is_active: bool = true
+  TIMESTAMPS
+}
+
+ENTITY DeploymentRecord {
+  skilldoc_name: string REQUIRED
+  skilldoc_version: string REQUIRED
+  deployed_to: string REQUIRED
+  deployed_by: string
+  deployed_at: datetime
+  status: string = "active"
+  TIMESTAMPS
+}
+
+VIEW SkillDocLibrary {
+  ENTITY   SkillDocRegistry
+  LAYOUT   table
+  ACTIONS  create, edit, delete
+  SIDEBAR  icon: BookOpen
+  FIELDS   name, version, domain, signed_by, is_active
+}
+
+VIEW DeploymentDashboard {
+  ENTITY   DeploymentRecord
+  LAYOUT   table
+  SIDEBAR  icon: Activity
+  FIELDS   skilldoc_name, deployed_to, status, deployed_at
+}
+
+// ===================================================================
+// TESTS
+// ===================================================================
+
+TEST registry_crud {
+  GIVEN SkillDocRegistry { name: "test_skilldoc", version: "1.0.0", domain: "test", content_hash: "abc123" }
+  EXPECT create -> id IS NOT NULL
+  EXPECT create -> is_active == true
+}
+
+TEST deployment_tracking {
+  GIVEN DeploymentRecord { skilldoc_name: "aerospace_qc", skilldoc_version: "2.4.1", deployed_to: "secure_factory_floor", status: "active" }
+  EXPECT create -> id IS NOT NULL
+  EXPECT create -> status == "active"
+}
