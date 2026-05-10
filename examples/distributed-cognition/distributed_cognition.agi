@@ -1,0 +1,333 @@
+// distributed_cognition.agi
+// Distributed-systems patterns applied to AI-native cognition.
+//
+// Demonstrates:
+//   - TRIGGER         — reactive event binding (packet -> workflow/reasoner/session)
+//   - CHANNEL queue   — ORDERING + DEAD_LETTER + RETRY for resilient transport
+//   - ROUTER          — CIRCUIT_BREAKER with FALLBACK tier on provider failure
+//   - IDEMPOTENT      — safe retries on REASONER/WORKFLOW/PIPELINE
+//   - APP TELEMETRY   — auto-emit so the reactive loop has events to react to
+//
+// This is what microservices give us in the deterministic world,
+// adapted for probabilistic semantic cognition.
+
+APP distributed_cognition {
+  TITLE     "Distributed Cognition"
+  WINDOW    1400x900 frameless
+  DB        cognition.db
+  PORT      5270
+  THEME     dark
+  TELEMETRY auto
+}
+
+// ===================================================================
+// AUTHORITY & EXECUTION
+// ===================================================================
+
+AUTHORITY OpsAuthority {
+  DESCRIPTION "Operations signing authority"
+
+  LEVELS {
+    operator: "Standard operator"
+    admin:    "Administrator"
+  }
+
+  SIGNING {
+    REQUIRED      true
+    ALGORITHM     "ed25519"
+    VERIFY_CHAIN  true
+  }
+
+  ADMISSIBILITY {
+    valid_signature: signature IS NOT NULL
+  }
+}
+
+NODE worker_pool {
+  DESCRIPTION "Pool of cognitive workers"
+  TYPE        environment
+  HARDWARE    "server"
+  AI_TIER     hybrid
+  COMMS       wifi, mqtt
+  OFFLINE     false
+  SAFETY      medium
+}
+
+// ===================================================================
+// PACKETS — Event shapes
+// ===================================================================
+
+PACKET ImageBatchRejected {
+  DESCRIPTION "Emitted when an image batch fails QC"
+
+  PAYLOAD {
+    batch_id:      string REQUIRED
+    rejected_by:   string REQUIRED
+    reason:        string
+    confidence:    float
+    rework_hint:   string
+  }
+
+  METADATA {
+    PROVENANCE    true
+    LINEAGE       true
+    SIGNATURES    true
+    ADMISSIBILITY true
+    TTL           7
+  }
+
+  VALIDATION {
+    has_batch:  batch_id IS NOT NULL
+    has_actor:  rejected_by IS NOT NULL
+  }
+}
+
+PACKET RefinementResult {
+  DESCRIPTION "Output of prompt refinement after rejection"
+
+  PAYLOAD {
+    batch_id:        string REQUIRED
+    new_prompt_set:  string
+    iteration:       number
+  }
+
+  METADATA {
+    PROVENANCE    true
+    LINEAGE       true
+    SIGNATURES    true
+    ADMISSIBILITY true
+    TTL           7
+  }
+
+  VALIDATION {
+    has_batch: batch_id IS NOT NULL
+  }
+}
+
+// ===================================================================
+// CHANNELS — With queue semantics
+// ===================================================================
+
+CHANNEL rejection_queue {
+  DESCRIPTION  "Resilient queue of rejected image batches awaiting refinement"
+  PROTOCOL     queue
+  DIRECTION    bidirectional
+  PACKET       ImageBatchRejected
+  AUTHORITY    OpsAuthority
+  ENDPOINT     "/queues/rejections"
+  RETRY        3
+  TIMEOUT      30000
+  ORDERING     fifo
+  DEAD_LETTER  rejection_dlq
+}
+
+CHANNEL rejection_dlq {
+  DESCRIPTION  "Dead-letter queue for rejections that failed all retries"
+  PROTOCOL     queue
+  DIRECTION    inbound
+  PACKET       ImageBatchRejected
+  AUTHORITY    OpsAuthority
+  ENDPOINT     "/queues/rejections-dlq"
+  ORDERING     unordered
+}
+
+CHANNEL refinement_results {
+  DESCRIPTION  "Refined prompt sets emitted by the refinement pipeline"
+  PROTOCOL     mqtt
+  DIRECTION    outbound
+  PACKET       RefinementResult
+  AUTHORITY    OpsAuthority
+  ENDPOINT     "/results/refinement"
+}
+
+// ===================================================================
+// ROUTER — With circuit breaker + tier fallback
+// ===================================================================
+
+ROUTER VisionRouter {
+  DESCRIPTION "Routes image-related cognition with resilience to provider outages"
+
+  TIER 1 free {
+    qwen_vl: huggingface "Qwen/Qwen2-VL-7B" {
+      STRENGTHS   image_analysis
+      CONTEXT     32768
+      DEFAULT
+    }
+
+    CIRCUIT_BREAKER {
+      THRESHOLD   0.5
+      WINDOW      "60s"
+      FALLBACK    2
+    }
+  }
+
+  TIER 2 mid {
+    haiku: anthropic "claude-haiku-4-5-20251001" {
+      STRENGTHS   image_analysis, refinement
+      COST        0.1
+      CONTEXT     200000
+    }
+
+    CIRCUIT_BREAKER {
+      THRESHOLD   0.3
+      WINDOW      "120s"
+      FALLBACK    3
+    }
+  }
+
+  TIER 3 premium {
+    opus: anthropic "claude-opus-4-6" {
+      STRENGTHS   image_analysis, refinement, reasoning
+      COST        1.5
+      CONTEXT     200000
+    }
+  }
+
+  TASK_TYPES    image_analysis, refinement
+  MOSH_PIT      3
+  CALIBRATION   true
+}
+
+// ===================================================================
+// SKILLDOC — Refinement cognition
+// ===================================================================
+
+SKILLDOC refinement_analysis {
+  DESCRIPTION  "Cognition for analyzing rejection patterns and proposing refined prompts"
+  VERSION      "1.0.0"
+  DOMAIN       "creative"
+  KEYWORDS     refinement, rejection, prompt, iteration
+  PRIORITY     15
+
+  GOVERNANCE {
+    SIGNED_BY   OpsAuthority
+    REQUIRE     operator
+    AUDIT       errors
+  }
+}
+
+// ===================================================================
+// REASONER — Idempotent refinement loop
+// ===================================================================
+
+REASONER refinement_reasoner {
+  DESCRIPTION  "Triggered per rejection: analyzes failure mode and proposes refined prompts"
+
+  INPUT {
+    CHANNEL    rejection_queue
+    WINDOW     "1h"
+  }
+
+  USES         refinement_analysis
+  TIER         2
+
+  OUTPUT {
+    PACKET     RefinementResult
+    CHANNEL    refinement_results
+  }
+
+  SCHEDULE     event_triggered
+  IDEMPOTENT   true
+
+  GOVERNANCE {
+    SIGNED_BY      OpsAuthority
+    EXECUTE_ONLY   worker_pool
+    REQUIRE        operator
+    AUDIT          all_actions
+  }
+}
+
+// ===================================================================
+// TRIGGERS — The reactive bindings
+// ===================================================================
+
+// When a rejection lands on the queue, fire the refinement reasoner
+TRIGGER on_rejection {
+  DESCRIPTION  "Fire refinement reasoner whenever a batch rejection lands"
+
+  WHEN {
+    CHANNEL    rejection_queue
+    PACKET     ImageBatchRejected
+    FILTER     "confidence > 0.6"
+  }
+
+  FIRES        REASONER refinement_reasoner
+
+  DEBOUNCE     "2s"
+  RATE_LIMIT   "30/min"
+  IDEMPOTENT   true
+
+  GOVERNANCE {
+    SIGNED_BY    OpsAuthority
+    AUDIT        all_actions
+  }
+}
+
+// When refinement completes, fire the regeneration workflow
+TRIGGER on_refinement_complete {
+  DESCRIPTION  "Fire regeneration workflow when a refined prompt set is emitted"
+
+  WHEN {
+    CHANNEL    refinement_results
+    PACKET     RefinementResult
+  }
+
+  FIRES        WORKFLOW regenerate_batch
+  IDEMPOTENT   true
+}
+
+// ===================================================================
+// WORKFLOW — Idempotent regeneration
+// ===================================================================
+
+ENTITY ImageBatch {
+  prompt_set:   string REQUIRED
+  status:       string = "pending"
+  iteration:    number = 0
+  rejected:     bool = false
+  TIMESTAMPS
+}
+
+ACTION enqueue_regenerate {
+  INPUT   batch_id: string, prompt_set: string
+  OUTPUT  enqueued: bool
+  AI      "Validate the refined prompt set and enqueue regeneration for {{batch_id}}."
+}
+
+ACTION mark_regenerating {
+  INPUT   batch_id: string
+  OUTPUT  marked: bool
+}
+
+WORKFLOW regenerate_batch {
+  IDEMPOTENT true
+
+  STEP enqueue {
+    ACTION   enqueue_regenerate
+  }
+  STEP mark {
+    ACTION   mark_regenerating
+  }
+}
+
+// ===================================================================
+// VIEWS
+// ===================================================================
+
+VIEW BatchDashboard {
+  ENTITY    ImageBatch
+  LAYOUT    table
+  ACTIONS   create
+  SIDEBAR   icon: Image
+  FIELDS    prompt_set, status, iteration, rejected
+}
+
+// ===================================================================
+// TESTS
+// ===================================================================
+
+TEST batch_creation {
+  GIVEN ImageBatch { prompt_set: "test prompt", status: "pending" }
+  EXPECT create -> id IS NOT NULL
+  EXPECT create -> iteration == 0
+}
