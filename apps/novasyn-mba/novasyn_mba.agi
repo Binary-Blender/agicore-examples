@@ -774,32 +774,178 @@ ACTION import_csv_contacts {
   }
 }
 
-## TODO(agicore): WORKFLOW for business onboarding sequence
-## Desired: run strategy_advisor -> operations_advisor -> finance_advisor in sequence
-## and synthesize a unified "First 30 Days" plan for a newly added business.
-## Requires REASONER or WORKFLOW with multi-step AI chaining support.
+ACTION synthesize_first_30_days {
+  AI
+  INPUT {
+    business_id  INTEGER  REQUIRED
+  }
+  OUTPUT {
+    day_1_to_10    TEXT
+    day_11_to_20   TEXT
+    day_21_to_30   TEXT
+    top_priority   TEXT
+    full_plan      TEXT
+  }
+  PROMPT """
+You have just completed a full diagnostic of a new business: strategy positioning, operations audit, and financial health review. Your task is to synthesize these findings into a concrete First 30 Days action plan.
+
+Structure your plan into three 10-day sprints:
+Days 1-10: Foundation — stop the bleeding, identify the single most critical constraint
+Days 11-20: Systems — put the first key system in place to address that constraint
+Days 21-30: Momentum — establish the first repeatable cycle (sales, delivery, or content)
+
+For each sprint, provide 2-3 specific, actionable steps. Not vague advice. Specific actions this founder can take this week.
+
+Identify the single top priority for Day 1.
+"""
+}
+
+## ---------------------------------------------------------------------------
+## WORKFLOW — Business Onboarding Sequence
+## ---------------------------------------------------------------------------
+
+WORKFLOW business_onboarding {
+  STEP analyze_strategy {
+    ACTION strategy_advisor
+    ON_FAIL stop
+  }
+  STEP audit_operations {
+    ACTION operations_advisor
+    ON_FAIL skip
+  }
+  STEP review_financials {
+    ACTION finance_advisor
+    ON_FAIL skip
+  }
+  STEP synthesize_plan {
+    ACTION synthesize_first_30_days
+    ON_FAIL stop
+  }
+}
+
+## ---------------------------------------------------------------------------
+## SKILL — Discipline Knowledge Frameworks
+## ---------------------------------------------------------------------------
+
+SKILL finance_frameworks {
+  DESCRIPTION "Core financial frameworks for evaluating business unit economics and capital efficiency"
+  DOMAIN "finance"
+  CONTENT "LTV:CAC Ratio: Healthy 3:1+, Warning 2:1, Critical below 2:1. Gross Margin targets: SaaS 70%+, Services 50%+. Cash Runway: Critical <3 months, Warning <6 months. MRR Growth: healthy 10%+ MoM. Break-even: Revenue = Fixed Costs / Gross Margin. Burn multiple: Net Burn / Net New ARR < 1 = efficient."
+  APPLIES_TO [finance_advisor]
+  KEYWORDS finance, ltv, cac, mrr, runway, gross_margin, burn_rate
+  PRIORITY 8
+}
+
+SKILL strategy_frameworks {
+  DESCRIPTION "Strategic positioning frameworks for competitive moat analysis and market differentiation"
+  DOMAIN "strategy"
+  CONTENT "Value Proposition: What do you do, for whom, better than who. Moat types: network_effect, switching_cost, cost_advantage, intangible_asset, system. Positioning: Category x Differentiator x Target. The 3 uniques: unique mechanism, unique proof, unique offer. Jobs-to-be-done: functional, social, emotional. Crossing the Chasm: focus on the beachhead."
+  APPLIES_TO [strategy_advisor]
+  KEYWORDS strategy, positioning, moat, value_proposition, competitive_advantage
+  PRIORITY 8
+}
+
+SKILL operations_frameworks {
+  DESCRIPTION "Operational bottleneck analysis and delegation frameworks for solo founders"
+  DOMAIN "operations"
+  CONTENT "6 Bottleneck Types: knowledge (only you know), quality (only you can judge), coordination (only you can align), communication (only you relay), creative (only you create), decision (only you decide). Dollar Audit: $20/hr tasks (AI-transferable), $200/hr tasks (founder-only). Systemization sequence: document, delegate, automate. Score 0-4 per bottleneck; total >18 = critical."
+  APPLIES_TO [operations_advisor]
+  KEYWORDS operations, bottleneck, delegation, systemization, dollar_audit
+  PRIORITY 8
+}
+
+SKILL marketing_frameworks {
+  DESCRIPTION "B2B authority marketing and content strategy frameworks for professional services"
+  DOMAIN "marketing"
+  CONTENT "Authority Stages: aware -> credible -> authoritative -> dominant. Content ladder: social posts -> articles -> case studies -> speaking -> media. Distribution: owned (list, site), earned (PR, referrals), paid (ads). Positioning before promotion. Specificity drives conversion: name the niche, name the problem, name the outcome."
+  APPLIES_TO [marketing_advisor]
+  KEYWORDS marketing, authority, content, positioning, distribution, b2b
+  PRIORITY 7
+}
+
+SKILL sales_frameworks {
+  DESCRIPTION "Consultative B2B sales and pipeline management frameworks"
+  DOMAIN "sales"
+  CONTENT "Pipeline stages: aware, engaged, qualified, proposal, negotiation, closed_won, closed_lost. LTV calculation: avg_deal_size x avg_duration x margin. CAC: total_sales_marketing_spend / new_customers. Qualification: BANT (Budget, Authority, Need, Timing). Follow-up cadence: 24h, 3d, 7d, 14d. Referral triggers: at close, at first result, at 90 days."
+  APPLIES_TO [sales_advisor]
+  KEYWORDS sales, pipeline, ltv, cac, qualification, referral
+  PRIORITY 7
+}
+
+SKILL leadership_frameworks {
+  DESCRIPTION "Founder energy management and leadership development frameworks"
+  DOMAIN "leadership"
+  CONTENT "Energy management: physical (sleep, exercise, nutrition), mental (focus blocks, deep work), emotional (relationships, meaning). CEO time audit: strategic planning, business development, team/systems. Energy score 1-5: 1-2 = burnout risk, 3 = baseline, 4-5 = high performance. Weekly review cadence: accomplishments, learnings, next week focus. Vision-to-action: 3yr, 1yr, 90-day, weekly."
+  APPLIES_TO [leadership_advisor]
+  KEYWORDS leadership, energy, ceo_time, focus, weekly_review
+  PRIORITY 7
+}
+
+## ---------------------------------------------------------------------------
+## RULE — Automated Business Health Checks
+## ---------------------------------------------------------------------------
+
+RULE ltv_cac_critical {
+  IF FinancialSnapshot.ltv_cac_ratio < 2
+  THEN FLAG "finance_risk"
+  SEVERITY critical
+  PRIORITY 10
+}
+
+RULE cash_runway_danger {
+  IF FinancialSnapshot.cash_runway_months < 3
+  THEN FLAG "existential_risk"
+  SEVERITY critical
+  PRIORITY 10
+}
+
+RULE operations_bottlenecked {
+  IF OperationsAudit.overall_score > 24
+  THEN FLAG "operations_critical"
+  SEVERITY high
+  PRIORITY 8
+}
+
+RULE low_energy_warning {
+  IF WeeklyReview.energy_level < 3
+  THEN FLAG "founder_burnout_risk"
+  SEVERITY high
+  PRIORITY 8
+}
+
+RULE missed_revenue_target {
+  IF FinancialSnapshot.gross_margin_pct < 50
+  THEN FLAG "margin_pressure"
+  SEVERITY medium
+  PRIORITY 5
+}
+
+## ---------------------------------------------------------------------------
+## EVENT — Time-Based and Data-Driven Triggers
+## ---------------------------------------------------------------------------
+
+EVENT weekly_review_reminder {
+  DESCRIPTION "Monday morning reminder to complete the weekly business review"
+  SCHEDULE "0 9 * * 1"
+  SUBSCRIBERS [leadership_advisor]
+}
+
+EVENT monthly_financial_snapshot {
+  DESCRIPTION "First day of month prompt to record financial snapshot and review unit economics"
+  SCHEDULE "0 8 1 * *"
+  SUBSCRIBERS [finance_advisor]
+}
+
+EVENT quarterly_strategy_review {
+  DESCRIPTION "Quarterly reminder to reassess strategic position, moat, and competitors"
+  SCHEDULE "0 8 1 1,4,7,10 *"
+  SUBSCRIBERS [strategy_advisor]
+}
 
 ## TODO(agicore): ROUTER for AI advisor routing by active business tab
-## Desired: route to the correct discipline advisor based on current UI context
-## without requiring the user to manually select the action.
-
-## TODO(agicore): SKILL declarations for each discipline
-## Desired: SKILL finance_frameworks { CONTENT "..." APPLIES_TO [finance_advisor] }
-## Each advisor should have a SKILL with the relevant textbook frameworks
-## injected at prompt-time from a structured knowledge document.
-
-## TODO(agicore): RULE + FACT for automated business health checks
-## Desired:
-##   RULE ltv_cac_critical { IF FinancialSnapshot.ltv_cac_ratio < 2 THEN FLAG "finance_risk" SEVERITY critical }
-##   RULE cash_runway_danger { IF FinancialSnapshot.cash_runway_months < 3 THEN FLAG "existential_risk" SEVERITY critical }
-##   RULE operations_bottlenecked { IF OperationsAudit.overall_score > 24 THEN FLAG "operations_critical" SEVERITY high }
-##   RULE stale_pipeline { IF SalesContact.next_action_date < TODAY - 14 THEN FLAG "stale_contact" SEVERITY medium }
-
-## TODO(agicore): EVENT + TRIGGER for time-based and data-driven triggers
-## Desired:
-##   EVENT weekly_review_reminder { SCHEDULE "0 9 * * 1" TRIGGER WeeklyReview.open }
-##   EVENT stale_contact_alert { WHEN SalesContact.next_action_date < TODAY - 7 TRIGGER sales_advisor }
-##   EVENT low_energy_alert { WHEN WeeklyReview.energy_level < 3 TRIGGER leadership_advisor }
+## This requires a new ACTION_ROUTER declaration type (not model-tier routing).
+## Route: strategy tab -> strategy_advisor, finance tab -> finance_advisor, etc.
+## See DESIGN.md > Feature Requests for specification.
 
 ## ---------------------------------------------------------------------------
 ## VIEWS
