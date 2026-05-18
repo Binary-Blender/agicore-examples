@@ -1,0 +1,1081 @@
+## NovaSyn MBA — Portfolio OS for Solo Founders
+## Built on Agicore 4G Dev Stack
+## Author: Christopher Bender / NovaSyn (MIT License, 2026)
+##
+## This file is the source of truth for the entire application.
+## The Agicore compiler generates: SQL migrations, Rust commands,
+## TypeScript types, Zustand store slices, and React components from this DSL.
+##
+## TODO(agicore) markers indicate features awaiting compiler support.
+## See DESIGN.md > Feature Requests for Agicore for full specifications.
+
+## ---------------------------------------------------------------------------
+## APP
+## ---------------------------------------------------------------------------
+
+APP novasyn_mba {
+  TITLE  "NovaSyn MBA"
+  WINDOW 1400x900 frameless
+  DB     novasyn_mba.db
+  THEME  dark
+}
+
+## ---------------------------------------------------------------------------
+## AI_SERVICE
+## ---------------------------------------------------------------------------
+
+AI_SERVICE {
+  PROVIDERS  anthropic, openai
+  KEYS_FILE  "%APPDATA%/NovaSyn/api-keys.json"
+  DEFAULT    anthropic
+  STREAMING  true
+  MODELS {
+    anthropic  "claude-sonnet-4-5-20251001"  DEFAULT
+    openai     "gpt-4o"                      DEFAULT
+  }
+}
+
+## ---------------------------------------------------------------------------
+## PREFERENCES
+## ---------------------------------------------------------------------------
+
+PREFERENCE default_model {
+  KEY     "default_model"
+  DEFAULT "claude-sonnet-4-5"
+  TYPE    string
+}
+
+PREFERENCE theme {
+  KEY     "theme"
+  DEFAULT "dark"
+  TYPE    string
+}
+
+PREFERENCE weekly_review_reminder {
+  KEY     "weekly_review_reminder_enabled"
+  DEFAULT "true"
+  TYPE    bool
+}
+
+PREFERENCE ceo_time_target_hours {
+  KEY     "ceo_time_target_hours"
+  DEFAULT "20"
+  TYPE    number
+}
+
+## ---------------------------------------------------------------------------
+## ENTITIES
+## ---------------------------------------------------------------------------
+
+ENTITY Business {
+  FIELDS {
+    name              TEXT     REQUIRED
+    tagline           TEXT
+    description       TEXT
+    stage             TEXT     DEFAULT "Idea"
+    category          TEXT
+    market_niche      TEXT
+    business_model    TEXT
+    revenue_target    REAL     DEFAULT 0
+    launch_date       DATE
+    exit_date         DATE
+    notes             TEXT
+  }
+  HAS_MANY StrategicPosition
+  HAS_MANY OperationsAudit
+  HAS_MANY DollarAudit
+  HAS_MANY FinancialSnapshot
+  HAS_MANY MarketingAsset
+  HAS_MANY SalesContact
+  HAS_MANY ContentPipelineItem
+  HAS_MANY AIStackDecision
+  HAS_MANY WeeklyReview
+  TIMESTAMPS
+  CRUD
+  ORDER name ASC
+}
+
+## TODO(agicore): COMPILER state machine for Business.stage
+## Desired transition rules (see DESIGN.md > Business Lifecycle):
+##   Idea -> Validated  REQUIRES StrategicPosition.value_proposition + target_market + 1 SalesContact
+##   Validated -> Building  REQUIRES SalesContact with notes indicating customer conversation
+##   Building -> Active  REQUIRES FinancialSnapshot.revenue > 0 OR 3 SalesContact.stage = closed_won
+##   Active -> Scaling  REQUIRES 2+ FinancialSnapshot records AND OperationsAudit.overall_score < 20
+## For now, stage transitions are handled as IMPL actions with manual validation.
+
+ENTITY StrategicPosition {
+  FIELDS {
+    business_id         INTEGER  REQUIRED
+    target_market       TEXT
+    value_proposition   TEXT
+    primary_moat        TEXT     DEFAULT "reputation"
+    competitors         TEXT
+    unfair_advantages   TEXT
+    moat_score          INTEGER  DEFAULT 5
+  }
+  BELONGS_TO Business
+  TIMESTAMPS
+  CRUD
+  ORDER business_id ASC
+}
+
+ENTITY OperationsAudit {
+  FIELDS {
+    business_id              INTEGER  REQUIRED
+    knowledge_bottleneck     INTEGER  DEFAULT 3
+    quality_bottleneck       INTEGER  DEFAULT 3
+    coordination_bottleneck  INTEGER  DEFAULT 3
+    communication_bottleneck INTEGER  DEFAULT 3
+    creative_bottleneck      INTEGER  DEFAULT 3
+    decision_bottleneck      INTEGER  DEFAULT 3
+    overall_score            INTEGER  DEFAULT 18
+    audit_date               DATE
+  }
+  BELONGS_TO Business
+  TIMESTAMPS
+  CRUD
+  ORDER audit_date DESC
+}
+
+ENTITY DollarAudit {
+  FIELDS {
+    business_id      INTEGER  REQUIRED
+    activity_name    TEXT     REQUIRED
+    tier             TEXT     DEFAULT "twenty"
+    hours_per_week   REAL     DEFAULT 0
+    ai_transferable  INTEGER  DEFAULT 0
+    transfer_status  TEXT     DEFAULT "not_started"
+    notes            TEXT
+  }
+  BELONGS_TO Business
+  TIMESTAMPS
+  CRUD
+  ORDER tier ASC, activity_name ASC
+}
+
+ENTITY FinancialSnapshot {
+  FIELDS {
+    business_id        INTEGER  REQUIRED
+    period             TEXT     REQUIRED
+    revenue            REAL     DEFAULT 0
+    cac                REAL     DEFAULT 0
+    ltv                REAL     DEFAULT 0
+    ltv_cac_ratio      REAL     DEFAULT 0
+    gross_margin_pct   REAL     DEFAULT 0
+    mrr                REAL     DEFAULT 0
+    cash_runway_months REAL     DEFAULT 0
+    recorded_at        DATETIME
+  }
+  BELONGS_TO Business
+  TIMESTAMPS
+  CRUD
+  ORDER recorded_at DESC
+}
+
+ENTITY MarketingAsset {
+  FIELDS {
+    business_id              INTEGER  REQUIRED
+    asset_type               TEXT     DEFAULT "content"
+    title                    TEXT     REQUIRED
+    url                      TEXT
+    platform                 TEXT
+    published_at             DATE
+    authority_stage_impact   TEXT
+  }
+  BELONGS_TO Business
+  TIMESTAMPS
+  CRUD
+  ORDER published_at DESC
+}
+
+ENTITY SalesContact {
+  FIELDS {
+    business_id      INTEGER  REQUIRED
+    name             TEXT     REQUIRED
+    company          TEXT
+    stage            TEXT     DEFAULT "prospect"
+    ltv_potential    REAL     DEFAULT 0
+    source           TEXT     DEFAULT "inbound"
+    next_action      TEXT
+    next_action_date DATE
+    notes            TEXT
+  }
+  BELONGS_TO Business
+  TIMESTAMPS
+  CRUD
+  ORDER next_action_date ASC
+}
+
+ENTITY ContentPipelineItem {
+  FIELDS {
+    business_id              INTEGER  REQUIRED
+    idea                     TEXT     REQUIRED
+    status                   TEXT     DEFAULT "idea"
+    platform                 TEXT
+    published_at             DATE
+    inbound_leads_generated  INTEGER  DEFAULT 0
+  }
+  BELONGS_TO Business
+  TIMESTAMPS
+  CRUD
+  ORDER status ASC, created_at DESC
+}
+
+ENTITY AIStackDecision {
+  FIELDS {
+    business_id         INTEGER  REQUIRED
+    capability          TEXT     REQUIRED
+    decision            TEXT     DEFAULT "buy"
+    tool_or_approach    TEXT
+    cost_per_month      REAL     DEFAULT 0
+    is_core_capability  INTEGER  DEFAULT 0
+    review_date         DATE
+  }
+  BELONGS_TO Business
+  TIMESTAMPS
+  CRUD
+  ORDER is_core_capability DESC, capability ASC
+}
+
+## BoardMember is portfolio-level (no business_id foreign key)
+ENTITY BoardMember {
+  FIELDS {
+    name              TEXT  REQUIRED
+    expertise_domain  TEXT
+    relationship_type TEXT  DEFAULT "mentor"
+    last_consulted    DATE
+    notes             TEXT
+  }
+  TIMESTAMPS
+  CRUD
+  ORDER expertise_domain ASC, name ASC
+}
+
+## PortfolioSynergy references two businesses
+ENTITY PortfolioSynergy {
+  FIELDS {
+    business_a_id    INTEGER  REQUIRED
+    business_b_id    INTEGER  REQUIRED
+    synergy_type     TEXT     DEFAULT "audience"
+    description      TEXT
+    potential_value  TEXT
+    status           TEXT     DEFAULT "identified"
+  }
+  BELONGS_TO Business
+  TIMESTAMPS
+  CRUD
+  ORDER status ASC, created_at DESC
+}
+
+ENTITY WeeklyReview {
+  FIELDS {
+    business_id       INTEGER
+    week_of           DATE     REQUIRED
+    accomplishments   TEXT
+    learnings         TEXT
+    next_week_focus   TEXT
+    energy_level      INTEGER  DEFAULT 3
+    ceo_time_hours    REAL     DEFAULT 0
+  }
+  BELONGS_TO Business
+  TIMESTAMPS
+  CRUD
+  ORDER week_of DESC
+}
+
+## ---------------------------------------------------------------------------
+## AI ACTIONS — DISCIPLINE ADVISORS
+## ---------------------------------------------------------------------------
+
+ACTION strategy_advisor {
+  AI
+  INPUT {
+    business_id       INTEGER  REQUIRED
+    business_name     TEXT     REQUIRED
+    target_market     TEXT
+    value_proposition TEXT
+    primary_moat      TEXT
+    competitors       TEXT
+    unfair_advantages TEXT
+    moat_score        INTEGER
+  }
+  OUTPUT {
+    moat_assessment        TEXT
+    market_risks           TEXT
+    recommended_next_move  TEXT
+    question_to_ask        TEXT
+    full_briefing          TEXT
+  }
+  PROMPT """
+You are the Strategy Advisor in the NovaSyn MBA system, a portfolio OS for solo founders built on frameworks from "The One-Person Enterprise."
+
+You are reviewing the strategic position of: {{business_name}}
+
+STRATEGIC POSITION DATA:
+- Target Market: {{target_market}}
+- Value Proposition: {{value_proposition}}
+- Primary Moat: {{primary_moat}} (options: reputation, system, network, content)
+- Competitors: {{competitors}}
+- Unfair Advantages: {{unfair_advantages}}
+- Self-Assessed Moat Score: {{moat_score}}/10
+
+FRAMEWORK CONTEXT:
+The four compounding moats a solo founder can build are:
+1. Reputation — trust built through consistent delivery and public expertise over time
+2. System — a proprietary methodology, process, or framework that produces better results than alternatives
+3. Network — relationships, community, and referral infrastructure that compounds with each new connection
+4. Content — a body of work (writing, video, courses, tools) that attracts and qualifies buyers without the founder's active involvement
+
+The Compounding Operator principle: every action should build an asset, not just complete an activity. A one-time client engagement is an activity. A case study from that engagement is an asset.
+
+Sovereign Intelligence: you surface analysis, flag risks, and offer options. The founder decides. Never prescribe a single path as the only answer.
+
+YOUR TASK:
+1. Assess the strength and coherence of the current moat strategy. Is the stated primary moat actually present in the competitive advantages described? Does the value proposition differentiate, or is it generic?
+2. Identify the top 2-3 market risks given the competitive landscape and target market. Be specific — not "competition is a risk" but "three direct competitors offer similar positioning, which means price pressure is likely without a stronger system moat."
+3. Recommend the single highest-leverage next move to strengthen the primary moat. This should be something the founder can begin this week.
+4. Pose the one strategic question the founder is probably not asking but should be.
+
+Return your analysis in the four OUTPUT fields plus a full_briefing that synthesizes all four into a coherent strategic memo the founder can act on.
+"""
+}
+
+ACTION operations_advisor {
+  AI
+  INPUT {
+    business_id              INTEGER  REQUIRED
+    business_name            TEXT     REQUIRED
+    knowledge_bottleneck     INTEGER
+    quality_bottleneck       INTEGER
+    coordination_bottleneck  INTEGER
+    communication_bottleneck INTEGER
+    creative_bottleneck      INTEGER
+    decision_bottleneck      INTEGER
+    overall_score            INTEGER
+    dollar_audit_summary     TEXT
+  }
+  OUTPUT {
+    highest_leverage_bottleneck  TEXT
+    bottleneck_fix_recommendation TEXT
+    dollar_ratio_analysis        TEXT
+    top_transfer_candidates      TEXT
+    full_briefing                TEXT
+  }
+  PROMPT """
+You are the Operations Advisor in the NovaSyn MBA system for solo founders.
+
+You are reviewing the operational health of: {{business_name}}
+
+OPERATIONS AUDIT (scores 1-5, higher = worse bottleneck):
+- Knowledge Bottleneck: {{knowledge_bottleneck}}/5 (Am I the only one who knows how this works?)
+- Quality Bottleneck: {{quality_bottleneck}}/5 (Does everything need my approval before it goes out?)
+- Coordination Bottleneck: {{coordination_bottleneck}}/5 (Do people wait on me to coordinate between functions?)
+- Communication Bottleneck: {{communication_bottleneck}}/5 (Am I the only voice of the business?)
+- Creative Bottleneck: {{creative_bottleneck}}/5 (Does all creative work require my involvement?)
+- Decision Bottleneck: {{decision_bottleneck}}/5 (Can nothing be decided without me?)
+- Overall Score: {{overall_score}}/30 (6=fully systemized, 30=fully bottlenecked)
+
+$20/$200 AUDIT SUMMARY:
+{{dollar_audit_summary}}
+
+FRAMEWORK CONTEXT:
+The $20/$200 Audit: every task the founder performs is either $20/hr execution (scheduling, formatting, research, transcription, data entry, social posting, inbox triage) or $200/hr judgment (client diagnosis, strategic positioning, offer design, relationship management, creative direction). The goal is to transfer $20 tasks to AI or systems, freeing capacity for $200 work.
+
+The self-running business ideal: a business that can generate revenue for 2 weeks without the founder's active involvement. The six bottleneck scores measure how far the current business is from this ideal.
+
+The Delegation Ladder: (1) I do it, (2) I do it with documentation, (3) AI/system does it with my oversight, (4) AI/system does it autonomously. Every $20 task should be climbing this ladder.
+
+YOUR TASK:
+1. Identify the single highest-scoring bottleneck. Explain specifically why this bottleneck is the most costly for a solo founder and what the second-order effects are if it remains unaddressed.
+2. Give a specific, actionable recommendation to address that bottleneck using AI or a system. Be concrete — name a specific type of tool, template, or process.
+3. Analyze the $20/$200 ratio. What percentage of the founder's work hours are currently at each tier? What is the target, and what is the gap?
+4. List the top 3 $20-tier tasks from the audit that are AI-transferable and not yet transferred. Explain why these are the highest-value transfers.
+
+Return findings in the OUTPUT fields plus a full_briefing memo.
+"""
+}
+
+ACTION finance_advisor {
+  AI
+  INPUT {
+    business_id        INTEGER  REQUIRED
+    business_name      TEXT     REQUIRED
+    period             TEXT
+    revenue            REAL
+    cac                REAL
+    ltv                REAL
+    ltv_cac_ratio      REAL
+    gross_margin_pct   REAL
+    mrr                REAL
+    cash_runway_months REAL
+  }
+  OUTPUT {
+    unit_economics_diagnosis  TEXT
+    red_flag_metrics          TEXT
+    pricing_recommendation    TEXT
+    runway_assessment         TEXT
+    full_briefing             TEXT
+  }
+  PROMPT """
+You are the Finance Advisor in the NovaSyn MBA system for solo founders.
+
+You are reviewing the unit economics of: {{business_name}}
+
+FINANCIAL SNAPSHOT — Period: {{period}}
+- Revenue: ${{revenue}}
+- Customer Acquisition Cost (CAC): ${{cac}}
+- Lifetime Value (LTV): ${{ltv}}
+- LTV:CAC Ratio: {{ltv_cac_ratio}} (target: >3, watch: 2-3, critical: <2)
+- Gross Margin: {{gross_margin_pct}}% (target: >50% for services, >60% for digital)
+- Monthly Recurring Revenue (MRR): ${{mrr}}
+- Cash Runway: {{cash_runway_months}} months (target: >6 months, critical: <3 months)
+
+FRAMEWORK CONTEXT:
+Value-based pricing, never hourly. The price charged should reflect the value delivered to the client, not the time spent by the founder. A founder who charges $150/hr for work that saves the client $50,000/year is leaving 99% of the value on the table.
+
+Key thresholds from "The One-Person Enterprise":
+- LTV:CAC < 2: the acquisition model is broken — the business is paying too much to get customers who don't stay long enough
+- Gross margin < 50%: the business is not scalable — too much of revenue goes to direct costs
+- Cash runway < 6 months: existential risk — the 6-month runway rule is a non-negotiable operating constraint
+- MRR > $10K: proof of recurring demand and a fundable, scalable model
+
+YOUR TASK:
+1. Provide a plain-language unit economics diagnosis. What do these numbers say about the health of the business model? What is working, what is not?
+2. Flag every metric that is below the target thresholds. For each red flag, explain the specific risk it creates for the business.
+3. If gross margin is below 50%, give a concrete pricing recommendation. What should change — the price point, the offer structure, or the delivery model?
+4. Assess the cash runway. Is the business in a safe, watch, or critical position? What specific action should the founder take in the next 30 days given the runway situation?
+
+Return findings in the OUTPUT fields plus a full_briefing memo the founder can act on this week.
+"""
+}
+
+ACTION marketing_advisor {
+  AI
+  INPUT {
+    business_id           INTEGER  REQUIRED
+    business_name         TEXT     REQUIRED
+    asset_summary         TEXT
+    content_pipeline_summary TEXT
+    total_assets          INTEGER
+    published_content_count INTEGER
+    total_inbound_leads   INTEGER
+  }
+  OUTPUT {
+    authority_ladder_position TEXT
+    gap_analysis              TEXT
+    top_three_content_moves   TEXT
+    platform_risk_assessment  TEXT
+    full_briefing             TEXT
+  }
+  PROMPT """
+You are the Marketing Advisor in the NovaSyn MBA system for solo founders.
+
+You are reviewing the marketing position of: {{business_name}}
+
+MARKETING ASSETS SUMMARY:
+{{asset_summary}}
+
+CONTENT PIPELINE SUMMARY:
+{{content_pipeline_summary}}
+- Total published pieces: {{published_content_count}}
+- Total inbound leads attributed: {{total_inbound_leads}}
+
+FRAMEWORK CONTEXT:
+Authority-first marketing: the goal is to become the obvious authority in a specific niche, so that buyers come to the founder already pre-sold. This is the only marketing model that compounds over time. Paid advertising stops when the spend stops. Authority compounds.
+
+The Authority Ladder — five stages every buyer moves through:
+1. Unknown: the target market has never heard of this founder
+2. Aware: they know the founder exists
+3. Credible: they believe the founder knows what they are talking about
+4. Authoritative: they consider the founder one of the best in the field
+5. Referred: they actively send other people to the founder
+
+Each stage requires different content moves:
+- Unknown → Aware: reach content (short-form, social posts, podcast guest spots, SEO articles)
+- Aware → Credible: depth content (long-form guides, case studies, frameworks with the founder's name attached)
+- Credible → Authoritative: proof content (published testimonials, documented results, a distinctive point of view the founder owns)
+- Authoritative → Referred: community content (cohorts, events, a referral system, founder-to-founder relationships)
+
+The content-to-client pipeline: Idea → Drafted → Reviewed → Published → Attributed Lead → Closed Client. Every piece of content is a sales asset with a measurable conversion rate.
+
+YOUR TASK:
+1. Based on the asset mix and content history, assess where this business currently sits on the authority ladder. Be specific — cite the evidence.
+2. Identify the gap: what content types or platforms are missing for the next ladder stage?
+3. Recommend the top 3 specific content moves the founder should make in the next 30 days to advance to the next authority stage. Be concrete — not "write more content" but "publish one 2,000-word case study documenting a client result, optimized for the search term [specific niche term]."
+4. Assess platform concentration risk. Is the founder too dependent on one platform? What is the backup plan if that platform's reach drops?
+
+Return findings in the OUTPUT fields plus a full_briefing memo.
+"""
+}
+
+ACTION sales_advisor {
+  AI
+  INPUT {
+    business_id              INTEGER  REQUIRED
+    business_name            TEXT     REQUIRED
+    pipeline_summary         TEXT
+    stale_contacts_summary   TEXT
+    referral_pct             REAL
+    total_pipeline_value     REAL
+  }
+  OUTPUT {
+    pipeline_health_score   TEXT
+    stale_contact_actions   TEXT
+    top_follow_up_actions   TEXT
+    referral_architecture   TEXT
+    full_briefing           TEXT
+  }
+  PROMPT """
+You are the Sales Advisor in the NovaSyn MBA system for solo founders.
+
+You are reviewing the sales pipeline of: {{business_name}}
+
+PIPELINE SUMMARY:
+{{pipeline_summary}}
+
+STALE CONTACTS (next_action_date in the past):
+{{stale_contacts_summary}}
+
+PIPELINE METRICS:
+- Referral-sourced contacts: {{referral_pct}}% (target: >50% for a healthy referral flywheel)
+- Total pipeline value (LTV potential): ${{total_pipeline_value}}
+
+FRAMEWORK CONTEXT:
+Sales conversation architecture for solo founders:
+1. Qualify first — before any discovery call, establish that the prospect has the problem, the budget, and the authority to decide. Time-box unqualified prospects aggressively.
+2. Diagnose before prescribing — the sales conversation is a diagnostic. The founder's job is to understand the problem well enough to know whether this is the right client, not to pitch.
+3. Prescribe with confidence — once the diagnosis is clear, the recommendation should be specific and direct. Wishy-washy proposals lose.
+
+The qualification gate: any contact that has been in the "prospect" stage for more than 14 days without a qualification conversation is either not a real prospect or is being handled incorrectly. Stale prospects are a signal of a qualification problem, not a follow-up problem.
+
+The referral flywheel: the best source of new clients is closed clients. A referral-sourced prospect arrives pre-sold, with a shorter sales cycle and lower CAC. If less than 50% of pipeline is referral-sourced, the founder needs a deliberate referral architecture — not hope.
+
+Referral architecture components: (1) ask at the right moment (immediately after a win), (2) make it specific ("do you know another [target market descriptor] who has [specific problem]?"), (3) make it easy (a shareable one-page overview of who you help), (4) close the loop (report back on what happened with the referral).
+
+YOUR TASK:
+1. Score the pipeline health. Is the stage distribution healthy (enough prospects to feed the funnel, proposals converting at a reasonable rate)? What is the most critical pipeline problem right now?
+2. For each stale contact, recommend a specific follow-up action. Rank by LTV potential. Be direct — if a contact should be removed from the pipeline, say so.
+3. List the top 3 follow-up actions the founder should take this week, ranked by expected value.
+4. Assess the referral architecture. Given that {{referral_pct}}% of pipeline is referral-sourced, what specific step should the founder take to improve the referral flywheel?
+
+Return findings in the OUTPUT fields plus a full_briefing memo.
+"""
+}
+
+ACTION tech_advisor {
+  AI
+  INPUT {
+    business_id              INTEGER  REQUIRED
+    business_name            TEXT     REQUIRED
+    stack_summary            TEXT
+    total_monthly_tool_spend REAL
+    core_capability_spend    REAL
+  }
+  OUTPUT {
+    spend_analysis              TEXT
+    core_capability_risk        TEXT
+    dependency_concentration    TEXT
+    top_automation_opportunities TEXT
+    full_briefing               TEXT
+  }
+  PROMPT """
+You are the Technology Advisor in the NovaSyn MBA system for solo founders.
+
+You are reviewing the tech stack decisions of: {{business_name}}
+
+CURRENT STACK:
+{{stack_summary}}
+
+FINANCIAL SUMMARY:
+- Total monthly tool spend: ${{total_monthly_tool_spend}}
+- Spend on core-capability tools (is_core_capability = true): ${{core_capability_spend}}
+
+FRAMEWORK CONTEXT:
+The build/buy/automate decision matrix:
+- BUILD when the capability is a source of competitive differentiation and no existing tool can replicate the advantage. Build only what is truly core.
+- BUY when a good tool exists for a commodity capability. Buying a CRM is not a strategic decision; it is an operating decision.
+- AUTOMATE when a task is repetitive, rule-based, and currently done manually by the founder. Automation is often the highest-ROI investment a solo founder can make.
+
+Warning signs in a solo founder's tech stack:
+1. Paying for a commodity capability (e.g. an expensive custom-built email system when Mailchimp exists)
+2. Paying for a core-capability tool that could be built with a one-time investment (buying a competitive advantage)
+3. Too many critical capabilities on one vendor (single point of failure)
+4. Manual processes that exist only because no one has set up the automation yet
+
+The Sovereign Intelligence frame applies to tech decisions: the founder's judgment about what to build, buy, and automate is itself $200/hr work. Defaulting to "just buy a tool" without strategic thinking is $20/hr behavior.
+
+YOUR TASK:
+1. Analyze the monthly spend. Is the total reasonable for the revenue stage? Are there obvious cuts?
+2. For each core-capability tool (is_core_capability = true), assess whether the build/buy decision is correct. Is this founder paying for a competitive advantage they should own, or correctly buying a commodity?
+3. Identify dependency concentration risks. Is there a single vendor or platform that would create a crisis if it disappeared or raised prices 10x?
+4. List the top 3 automation opportunities — things the founder is currently doing manually that could be automated with existing tools or simple AI scripting.
+
+Return findings in the OUTPUT fields plus a full_briefing memo.
+"""
+}
+
+ACTION leadership_advisor {
+  AI
+  INPUT {
+    business_id          INTEGER
+    founder_name         TEXT
+    recent_reviews       TEXT
+    avg_energy_level     REAL
+    avg_ceo_time_hours   REAL
+    review_count         INTEGER
+  }
+  OUTPUT {
+    energy_trend_assessment  TEXT
+    ceo_time_ratio           TEXT
+    pattern_identification   TEXT
+    accountability_question  TEXT
+    full_briefing            TEXT
+  }
+  PROMPT """
+You are the Leadership Advisor in the NovaSyn MBA system for solo founders.
+
+You are reviewing the leadership and self-accountability data for: {{founder_name}}
+
+RECENT WEEKLY REVIEWS (last {{review_count}} weeks):
+{{recent_reviews}}
+
+AGGREGATE METRICS:
+- Average energy level: {{avg_energy_level}}/5 (watch: <3.5, burnout risk: <3.0 for 3+ consecutive weeks)
+- Average CEO-time hours per week: {{avg_ceo_time_hours}} (target: 20+ hours/week on $200/hr judgment work)
+
+FRAMEWORK CONTEXT:
+The CEO discipline: a solo founder wears many hats, but the CEO hat is the most important and most neglected. CEO time is time spent on strategy, positioning, high-value relationships, offer design, and self-development. Every hour the founder spends on $20 execution tasks is an hour not spent on the CEO role.
+
+Energy management principle: output quality degrades before the founder notices it. A founder running at 2/5 energy for three weeks is making worse strategic decisions, having worse client conversations, and producing worse creative work — even if they believe they are functioning normally. The energy level score is not a mood tracker; it is a performance leading indicator.
+
+The mental board of directors: a curated set of perspectives the founder actively consults when facing decisions. This might include a mentor, a peer, an author, or an archetype (e.g. "what would the version of me who has solved this problem think?"). Decisions made without consulting the board tend to be reactive; decisions made after consulting the board tend to be strategic.
+
+Patterns in weekly reviews: recurring learnings that appear in multiple reviews but do not result in changed behavior are the most important signal. If the founder writes "I need to protect my mornings for deep work" three weeks in a row but the next_week_focus never includes a concrete mechanism to protect mornings, the review process is not working.
+
+YOUR TASK:
+1. Assess the energy trend. Is the founder recovering, stable, or declining? If the average energy level is below 3.5, flag burnout risk and recommend a specific recovery action.
+2. Assess the CEO-time ratio. Is the founder spending enough time on $200/hr judgment work? What is the gap, and what specific $20 task should be transferred this week to create the space?
+3. Identify the most important pattern in the recent reviews. Look for recurring themes in learnings, recurring next_week_focus items that never get resolved, and any disconnects between stated priorities and actual accomplishments.
+4. Ask the one accountability question the founder should sit with this week. Make it specific and uncomfortable — not "are you taking care of yourself?" but a question that cuts to the actual pattern you observed.
+
+Return findings in the OUTPUT fields plus a full_briefing memo.
+"""
+}
+
+ACTION portfolio_synergy_detector {
+  AI
+  INPUT {
+    founder_name       TEXT
+    portfolio_summary  TEXT
+    existing_synergies TEXT
+  }
+  OUTPUT {
+    top_synergies     TEXT
+    synergy_actions   TEXT
+    full_briefing     TEXT
+  }
+  PROMPT """
+You are the Portfolio Synergy Detector in the NovaSyn MBA system.
+
+You are analyzing the full portfolio of: {{founder_name}}
+
+PORTFOLIO SUMMARY (all active businesses with their strategic positions, content assets, and tech stacks):
+{{portfolio_summary}}
+
+EXISTING SYNERGIES ALREADY IDENTIFIED:
+{{existing_synergies}}
+
+FRAMEWORK CONTEXT:
+The Compounding Operator principle: an asset that serves multiple businesses simultaneously is exponentially more valuable than an asset that serves one. A piece of content that builds authority for two businesses at once is worth twice as much as one that builds for only one. A distribution channel that sells two products simultaneously has double the leverage.
+
+Five synergy types:
+1. Audience: two businesses serve the same target customer. The audience built in one business can be leveraged by the other.
+2. Tech: two businesses use the same underlying technology or infrastructure. Consolidation could reduce cost or increase capability.
+3. Distribution: two businesses could share a platform, channel, or partnership.
+4. Content: content produced for one business builds authority for another (shared expertise domain, shared problem territory).
+5. Supplier: two businesses could negotiate with the same vendor together, or share access to the same resource.
+
+The portfolio lens: a solo founder managing multiple businesses is in a position no corporate business unit ever occupies — they can see across all their businesses simultaneously and make decisions that optimize the whole portfolio, not just each individual business. This is a genuine competitive advantage if it is used deliberately.
+
+YOUR TASK:
+Review all businesses in the portfolio summary. Identify the top 3-5 unexploited synergies that are NOT already in the existing synergies list. For each synergy:
+1. Name the two businesses involved
+2. Identify the synergy type
+3. Describe specifically what the synergy is — not vaguely but concretely (e.g. "The audience of [Business A] — mid-size consulting firm owners — is the exact buyer profile for [Business B]'s SaaS product")
+4. Recommend a specific, actionable first step the founder can take this week to begin exploiting this synergy
+
+Rank your synergies by estimated value (time saved, revenue potential, or moat-building impact). Return the top 3-5 only — do not list every possible connection. Focus on the ones with the clearest near-term action.
+
+Return findings in the OUTPUT fields plus a full_briefing memo.
+"""
+}
+
+## ---------------------------------------------------------------------------
+## IMPL ACTIONS — DETERMINISTIC TOOLS
+## ---------------------------------------------------------------------------
+
+ACTION advance_business_stage {
+  IMPL
+  INPUT {
+    business_id  INTEGER  REQUIRED
+    new_stage    TEXT     REQUIRED
+  }
+  OUTPUT {
+    success  INTEGER
+    message  TEXT
+  }
+}
+
+ACTION calculate_ltv_cac {
+  IMPL
+  INPUT {
+    snapshot_id  INTEGER  REQUIRED
+    ltv          REAL     REQUIRED
+    cac          REAL     REQUIRED
+  }
+  OUTPUT {
+    ltv_cac_ratio  REAL
+    health_flag    TEXT
+  }
+}
+
+ACTION export_business_report {
+  IMPL
+  INPUT {
+    business_id  INTEGER  REQUIRED
+  }
+  OUTPUT {
+    file_path  TEXT
+    success    INTEGER
+  }
+}
+
+ACTION generate_pitch_deck_outline {
+  IMPL
+  INPUT {
+    business_id  INTEGER  REQUIRED
+  }
+  OUTPUT {
+    file_path  TEXT
+    success    INTEGER
+  }
+}
+
+ACTION import_csv_contacts {
+  IMPL
+  INPUT {
+    business_id  INTEGER  REQUIRED
+    csv_path     TEXT     REQUIRED
+  }
+  OUTPUT {
+    imported_count  INTEGER
+    skipped_count   INTEGER
+    error_summary   TEXT
+  }
+}
+
+## TODO(agicore): WORKFLOW for business onboarding sequence
+## Desired: run strategy_advisor -> operations_advisor -> finance_advisor in sequence
+## and synthesize a unified "First 30 Days" plan for a newly added business.
+## Requires REASONER or WORKFLOW with multi-step AI chaining support.
+
+## TODO(agicore): ROUTER for AI advisor routing by active business tab
+## Desired: route to the correct discipline advisor based on current UI context
+## without requiring the user to manually select the action.
+
+## TODO(agicore): SKILL declarations for each discipline
+## Desired: SKILL finance_frameworks { CONTENT "..." APPLIES_TO [finance_advisor] }
+## Each advisor should have a SKILL with the relevant textbook frameworks
+## injected at prompt-time from a structured knowledge document.
+
+## TODO(agicore): RULE + FACT for automated business health checks
+## Desired:
+##   RULE ltv_cac_critical { IF FinancialSnapshot.ltv_cac_ratio < 2 THEN FLAG "finance_risk" SEVERITY critical }
+##   RULE cash_runway_danger { IF FinancialSnapshot.cash_runway_months < 3 THEN FLAG "existential_risk" SEVERITY critical }
+##   RULE operations_bottlenecked { IF OperationsAudit.overall_score > 24 THEN FLAG "operations_critical" SEVERITY high }
+##   RULE stale_pipeline { IF SalesContact.next_action_date < TODAY - 14 THEN FLAG "stale_contact" SEVERITY medium }
+
+## TODO(agicore): EVENT + TRIGGER for time-based and data-driven triggers
+## Desired:
+##   EVENT weekly_review_reminder { SCHEDULE "0 9 * * 1" TRIGGER WeeklyReview.open }
+##   EVENT stale_contact_alert { WHEN SalesContact.next_action_date < TODAY - 7 TRIGGER sales_advisor }
+##   EVENT low_energy_alert { WHEN WeeklyReview.energy_level < 3 TRIGGER leadership_advisor }
+
+## ---------------------------------------------------------------------------
+## VIEWS
+## ---------------------------------------------------------------------------
+
+VIEW portfolio_dashboard {
+  ENTITY Business
+  LAYOUT list
+  ACTIONS [advance_business_stage]
+}
+
+VIEW business_detail {
+  ENTITY Business
+  LAYOUT detail
+  ACTIONS [
+    strategy_advisor
+    operations_advisor
+    finance_advisor
+    marketing_advisor
+    sales_advisor
+    tech_advisor
+    leadership_advisor
+    export_business_report
+    generate_pitch_deck_outline
+    advance_business_stage
+  ]
+}
+
+VIEW dollar_audit_tool {
+  ENTITY DollarAudit
+  LAYOUT list
+  ACTIONS []
+}
+
+VIEW unit_economics_dashboard {
+  ENTITY FinancialSnapshot
+  LAYOUT list
+  ACTIONS [calculate_ltv_cac]
+}
+
+## TODO(agicore): kanban LAYOUT needed for these two views
+## Desired: LAYOUT kanban GROUP_BY status
+## For now: list layout with manual status column sorting
+
+VIEW content_pipeline {
+  ENTITY ContentPipelineItem
+  LAYOUT list
+  ACTIONS []
+}
+
+VIEW sales_pipeline {
+  ENTITY SalesContact
+  LAYOUT list
+  ACTIONS [sales_advisor]
+}
+
+VIEW weekly_review_form {
+  ENTITY WeeklyReview
+  LAYOUT detail
+  ACTIONS [leadership_advisor]
+}
+
+VIEW synergy_board {
+  ENTITY PortfolioSynergy
+  LAYOUT list
+  ACTIONS [portfolio_synergy_detector]
+}
+
+VIEW board_members {
+  ENTITY BoardMember
+  LAYOUT list
+  ACTIONS []
+}
+
+## ---------------------------------------------------------------------------
+## SEED DATA — Sample portfolio for first-launch demonstrability
+## ---------------------------------------------------------------------------
+
+SEED Business {
+  name           "Clarity Consulting"
+  tagline        "We help mid-size professional services firms stop losing revenue to broken internal processes"
+  description    "A boutique operations consulting practice specializing in workflow audit and system design for law firms and accounting practices. Retainer-based, 5 active clients, referral-only intake."
+  stage          "Active"
+  category       "Consulting"
+  market_niche   "Operations consulting for professional services firms (law, accounting)"
+  business_model "retainer"
+  revenue_target 240000
+}
+
+SEED StrategicPosition {
+  business_id       1
+  target_market     "Managing partners at law firms and accounting practices with 10-50 employees experiencing growth-related operational chaos"
+  value_proposition "We audit and rebuild internal workflows so professional services firms can scale without the managing partner becoming the bottleneck for every decision"
+  primary_moat      "system"
+  competitors       "[\"Large consulting firms (too expensive, not specialized)\", \"Generic business coaches (no domain expertise)\", \"In-house ops hires (not available until the firm can afford a COO)\"]"
+  unfair_advantages "15 years of domain expertise in professional services operations. Proprietary 6-bottleneck audit methodology. Network of referral partners across the legal and accounting industries."
+  moat_score        7
+}
+
+SEED OperationsAudit {
+  business_id              1
+  knowledge_bottleneck     4
+  quality_bottleneck       3
+  coordination_bottleneck  2
+  communication_bottleneck 3
+  creative_bottleneck      2
+  decision_bottleneck      3
+  overall_score            17
+  audit_date               "2026-05-01"
+}
+
+SEED DollarAudit {
+  business_id     1
+  activity_name   "Client report formatting and delivery"
+  tier            "twenty"
+  hours_per_week  3
+  ai_transferable 1
+  transfer_status "in_progress"
+  notes           "Using Claude to generate first draft from audit notes. Review takes 30 min instead of 3 hours."
+}
+
+SEED DollarAudit {
+  business_id     1
+  activity_name   "Prospect qualification calls"
+  tier            "two_hundred"
+  hours_per_week  2
+  ai_transferable 0
+  transfer_status "not_started"
+  notes           "Must remain with founder — requires judgment about client fit and relationship quality."
+}
+
+SEED DollarAudit {
+  business_id     1
+  activity_name   "Scheduling and calendar management"
+  tier            "twenty"
+  hours_per_week  2
+  ai_transferable 1
+  transfer_status "not_started"
+  notes           "Could use Calendly + AI email responder. Not set up yet."
+}
+
+SEED DollarAudit {
+  business_id     1
+  activity_name   "Strategic roadmap design for each client"
+  tier            "two_hundred"
+  hours_per_week  6
+  ai_transferable 0
+  transfer_status "not_started"
+  notes           "Core $200 work. Should protect and expand, not delegate."
+}
+
+SEED FinancialSnapshot {
+  business_id        1
+  period             "2026-Q1"
+  revenue            52000
+  cac                800
+  ltv                24000
+  ltv_cac_ratio      30
+  gross_margin_pct   82
+  mrr                0
+  cash_runway_months 9
+  recorded_at        "2026-04-01"
+}
+
+SEED MarketingAsset {
+  business_id            1
+  asset_type             "case_study"
+  title                  "How Meridian Law Group Cut Partner Review Time by 60% in 90 Days"
+  url                    "https://clarityconsulting.co/case-studies/meridian-law"
+  platform               "website"
+  published_at           "2026-03-15"
+  authority_stage_impact "credible->authoritative"
+}
+
+SEED MarketingAsset {
+  business_id            1
+  asset_type             "content"
+  title                  "The 6 Operational Bottlenecks Killing Professional Services Firms"
+  url                    "https://clarityconsulting.co/articles/6-bottlenecks"
+  platform               "website"
+  published_at           "2026-02-01"
+  authority_stage_impact "aware->credible"
+}
+
+SEED SalesContact {
+  business_id      1
+  name             "Rachel Torres"
+  company          "Torres & Webb LLP"
+  stage            "proposal"
+  ltv_potential    18000
+  source           "referral"
+  next_action      "Send revised proposal with phased payment option"
+  next_action_date "2026-05-19"
+  notes            "Referred by Marcus Chen (Meridian Law). Managing partner. 22-person firm. Main objection is timing — wants to start after tax season ends. Proposal sent 2026-05-10, awaiting response."
+}
+
+SEED SalesContact {
+  business_id      1
+  name             "David Park"
+  company          "Park Holloway Accounting"
+  stage            "qualified"
+  ltv_potential    22000
+  source           "inbound"
+  next_action      "Schedule discovery call"
+  next_action_date "2026-05-20"
+  notes            "Found us via the 6-bottlenecks article. 35-person accounting firm. Said they have a 'coordination nightmare' — every workflow runs through the senior partner. Perfect fit."
+}
+
+SEED ContentPipelineItem {
+  business_id             1
+  idea                    "Why Professional Services Firms Plateau at 20 Employees (And How to Break Through)"
+  status                  "drafted"
+  platform                "LinkedIn + website"
+  inbound_leads_generated 0
+}
+
+SEED ContentPipelineItem {
+  business_id             1
+  idea                    "The Delegation Ladder: A Framework for Getting Work Off the Managing Partner's Plate"
+  status                  "idea"
+  platform                "website"
+  inbound_leads_generated 0
+}
+
+SEED AIStackDecision {
+  business_id        1
+  capability         "AI-assisted report drafting"
+  decision           "automate"
+  tool_or_approach   "Claude API via custom prompt template"
+  cost_per_month     40
+  is_core_capability 0
+  review_date        "2026-11-01"
+}
+
+SEED AIStackDecision {
+  business_id        1
+  capability         "6-bottleneck audit methodology"
+  decision           "build"
+  tool_or_approach   "NovaSyn MBA (this app) + proprietary scoring rubric"
+  cost_per_month     0
+  is_core_capability 1
+  review_date        "2027-01-01"
+}
+
+SEED AIStackDecision {
+  business_id        1
+  capability         "Client communication and scheduling"
+  decision           "buy"
+  tool_or_approach   "Calendly + Gmail"
+  cost_per_month     16
+  is_core_capability 0
+  review_date        "2026-12-01"
+}
+
+SEED BoardMember {
+  name              "Charlie Munger"
+  expertise_domain  "strategy"
+  relationship_type "archetype"
+  notes             "Mental model: invert. Ask 'what would make this business fail?' and eliminate those things. Think in base rates. Avoid being foolish rather than trying to be brilliant."
+}
+
+SEED BoardMember {
+  name              "Patrick McKenzie"
+  expertise_domain  "marketing"
+  relationship_type "author"
+  notes             "Key insight: positioning and pricing are the two highest-leverage decisions in a small business. Most founders under-charge and over-explain. Write for people who are already searching for your solution."
+}
+
+SEED WeeklyReview {
+  business_id      1
+  week_of          "2026-05-12"
+  accomplishments  "Sent Torres proposal. Published bottleneck article (47 LinkedIn shares). Completed Park Holloway qualification call."
+  learnings        "The phased payment option in the Torres proposal was my idea at the last minute — should be a standard offering from the start. Prospects respond much better to phased options."
+  next_week_focus  "Follow up Torres. Schedule Park discovery call. Outline delegation ladder article."
+  energy_level     4
+  ceo_time_hours   22
+}
+
+## End of novasyn_mba.agi
