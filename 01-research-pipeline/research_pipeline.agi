@@ -1,0 +1,225 @@
+// research_pipeline.agi
+// Research Pipeline — Agicore DSL Example 01
+//
+// A research assistant that takes a topic, runs parallel web searches,
+// summarizes each source individually, then synthesizes a final report.
+// Compiles to a deterministic Tauri desktop research tool.
+//
+// Declarations: APP, ENTITY, AI_SERVICE, ACTION, WORKFLOW, PIPELINE,
+//               VIEW, TEST, LOG
+
+APP research_pipeline {
+  TITLE  "Research Pipeline"
+  WINDOW 1300x850 frameless
+  DB     research_pipeline.db
+  THEME  dark
+}
+
+// ===================================================================
+// AI SERVICE — two models: capable for synthesis, fast for summarization
+// ===================================================================
+
+AI_SERVICE {
+  PROVIDERS  anthropic, openai
+  KEYS_FILE  "%APPDATA%/ResearchPipeline/api-keys.json"
+  DEFAULT    anthropic
+  STREAMING  true
+  MODELS {
+    anthropic  "claude-sonnet-4-20250514"  LABEL "Claude Sonnet 4"   DEFAULT
+    openai     "gpt-4o-mini"               LABEL "GPT-4o Mini"       DEFAULT
+  }
+}
+
+// ===================================================================
+// DATA MODELS
+// ===================================================================
+
+ENTITY ResearchTopic {
+  name:   string REQUIRED
+  query:  string REQUIRED
+  status: string = "pending"
+  TIMESTAMPS
+}
+
+ENTITY Source {
+  url:     string REQUIRED
+  title:   string
+  summary: string
+  BELONGS_TO ResearchTopic
+  TIMESTAMPS
+}
+
+ENTITY Report {
+  title:   string REQUIRED
+  content: string REQUIRED
+  BELONGS_TO ResearchTopic
+  TIMESTAMPS
+}
+
+// ===================================================================
+// AI ACTIONS
+// ===================================================================
+
+// Step 1: search the web for sources on a topic
+ACTION search_web {
+  INPUT  topic: string, query: string
+  OUTPUT results: json
+  AI     """You are a research assistant. Given the topic and query below, identify the 5 most relevant and authoritative sources a researcher should consult. For each source return a JSON array where each element has: url (string), title (string), relevance_reason (string). Return ONLY the JSON array, no prose.
+
+Topic: {{topic}}
+Query: {{query}}"""
+  STREAM false
+}
+
+// Step 2: read a source URL and produce a focused summary
+ACTION summarize_source {
+  INPUT  url: string, title: string, topic: string
+  OUTPUT summary: string
+  AI     """You are a research assistant summarizing a source for a research report.
+
+Source URL: {{url}}
+Source Title: {{title}}
+Research Topic: {{topic}}
+
+Write a focused 3-5 sentence summary of what this source contributes to understanding the research topic. Be specific about key findings, data points, or arguments. Do not include meta-commentary about the source itself."""
+  STREAM false
+}
+
+// Step 3: synthesize all summaries into a final structured report
+ACTION synthesize_report {
+  INPUT  topic: string, query: string, summaries: json
+  OUTPUT title: string, content: string
+  AI     """You are a senior research analyst synthesizing a final report.
+
+Research Topic: {{topic}}
+Research Query: {{query}}
+
+Source summaries (JSON):
+{{summaries}}
+
+Write a comprehensive research report with the following structure:
+1. Executive Summary (2-3 sentences)
+2. Key Findings (bullet points, drawn from the sources)
+3. Synthesis (how the sources connect, agree, or contradict)
+4. Gaps and Limitations (what the sources do not cover)
+5. Recommended Next Steps
+
+Return a JSON object with two fields: "title" (string) and "content" (string with the full report in markdown)."""
+  STREAM true
+}
+
+// ===================================================================
+// WORKFLOW — orchestrates the full research pipeline sequentially
+// ===================================================================
+
+WORKFLOW research_workflow {
+  STEP gather_sources {
+    ACTION  search_web
+    ON_FAIL stop
+  }
+  STEP run_parallel_summaries {
+    ACTION  summarize_source
+    ON_FAIL skip
+  }
+  STEP build_report {
+    ACTION  synthesize_report
+    ON_FAIL stop
+  }
+}
+
+// ===================================================================
+// PIPELINE — runs summarize_source in parallel across all sources
+// ===================================================================
+
+PIPELINE parallel_summarize {
+  DESCRIPTION "Fan-out summarization: one summarize_source invocation per source, collected before synthesis"
+  IDEMPOTENT  true
+
+  ROW fan_out {
+    search_results: ai_action {
+      action "search_web"
+      output "results"
+    }
+  }
+
+  ROW summarize {
+    per_source: ai_action {
+      action  "summarize_source"
+      foreach "search_results.results"
+    }
+  }
+
+  ROW collect {
+    merged: transform {
+      op      "collect"
+      input   "summarize.per_source"
+      output  "summaries"
+    }
+  }
+
+  CONNECTION fan_out.results -> summarize.per_source
+  CONNECTION summarize.per_source -> collect.input
+}
+
+// ===================================================================
+// VIEWS
+// ===================================================================
+
+VIEW TopicList {
+  ENTITY  ResearchTopic
+  LAYOUT  table
+  ACTIONS create, delete
+  FIELDS  name, query, status, created_at
+  TITLE   "Research Topics"
+}
+
+VIEW SourceList {
+  ENTITY  Source
+  LAYOUT  table
+  ACTIONS create, delete
+  FIELDS  title, url, created_at
+  TITLE   "Sources"
+}
+
+VIEW ReportView {
+  ENTITY  Report
+  LAYOUT  document_editor
+  ACTIONS create, delete
+  TITLE   "Reports"
+}
+
+// ===================================================================
+// LOGGING
+// ===================================================================
+
+LOG {
+  LEVEL   info
+  TARGET  file
+  PATH    "logs/research.log"
+  ROTATE  "daily"
+}
+
+// ===================================================================
+// TESTS
+// ===================================================================
+
+TEST topic_created {
+  GIVEN ResearchTopic { name: "Quantum Computing", query: "quantum computing enterprise adoption 2025" }
+  EXPECT create -> id IS NOT NULL
+  EXPECT create -> name == "Quantum Computing"
+  EXPECT create -> status == "pending"
+}
+
+TEST source_belongs_to_topic {
+  GIVEN ResearchTopic { name: "AI Safety", query: "AI safety alignment research 2025" }
+  GIVEN Source { url: "https://example.com/ai-safety", title: "AI Safety Overview", BELONGS_TO ResearchTopic }
+  EXPECT create -> id IS NOT NULL
+  EXPECT create -> url == "https://example.com/ai-safety"
+}
+
+TEST report_belongs_to_topic {
+  GIVEN ResearchTopic { name: "Climate Tech", query: "climate technology investment trends" }
+  GIVEN Report { title: "Climate Tech Report 2025", content: "Executive summary...", BELONGS_TO ResearchTopic }
+  EXPECT create -> id IS NOT NULL
+  EXPECT create -> title == "Climate Tech Report 2025"
+}

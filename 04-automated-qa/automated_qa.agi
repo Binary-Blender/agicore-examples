@@ -1,0 +1,170 @@
+// automated_qa.agi
+// Automated QA — Agicore DSL Example 04
+//
+// An AI-powered quality assurance system that evaluates generated content
+// against defined criteria using SPC-tracked quality control, with a
+// workflow that routes low-quality outputs back for revision.
+//
+// Declarations: APP, ENTITY, AI_SERVICE, QC, ACTION, WORKFLOW, VIEW, TEST, LOG
+// Status: STUB — key patterns shaped, QC integration pending
+
+APP automated_qa {
+  TITLE  "Automated QA"
+  WINDOW 1300x850 frameless
+  DB     automated_qa.db
+  THEME  dark
+}
+
+// ===================================================================
+// AI SERVICE
+// ===================================================================
+
+AI_SERVICE {
+  PROVIDERS  anthropic, openai
+  KEYS_FILE  "%APPDATA%/AutomatedQA/api-keys.json"
+  DEFAULT    anthropic
+  STREAMING  false
+  MODELS {
+    anthropic  "claude-sonnet-4-20250514"  LABEL "Claude Sonnet 4"  DEFAULT
+    openai     "gpt-4o-mini"               LABEL "GPT-4o Mini"      DEFAULT
+  }
+}
+
+// ===================================================================
+// QUALITY CONTROL — SPC-tracked pass/fail rates
+// ===================================================================
+
+QC content_quality {
+  YOUNG_THRESHOLD     30
+  MATURING_THRESHOLD  150
+  YOUNG_PASS_RATE     0.80
+  MATURE_PASS_RATE    0.92
+  MATURING_SAMPLE     0.40
+  MATURE_SAMPLE       0.10
+}
+
+// ===================================================================
+// DATA MODELS
+// ===================================================================
+
+ENTITY ContentItem {
+  title:    string REQUIRED
+  content:  string REQUIRED
+  status:   string = "pending"
+  revision: number = 0
+  TIMESTAMPS
+}
+
+ENTITY QAResult {
+  passed:   bool REQUIRED
+  score:    number REQUIRED
+  feedback: string REQUIRED
+  BELONGS_TO ContentItem
+  TIMESTAMPS
+}
+
+// ===================================================================
+// AI ACTIONS
+// ===================================================================
+
+// TODO: generate content from a brief
+ACTION generate_content {
+  INPUT  title: string, brief: string
+  OUTPUT content: string
+  AI     "Generate professional content based on the title and brief provided. Title: {{title}}. Brief: {{brief}}"
+  STREAM false
+}
+
+// TODO: evaluate content against quality criteria
+ACTION evaluate_content {
+  INPUT  content: string, criteria: string
+  OUTPUT passed: bool, score: number, feedback: string
+  AI     """Evaluate the following content against the given quality criteria. Return a JSON object with:
+- "passed": true if score >= 0.75, false otherwise
+- "score": float 0.0 to 1.0
+- "feedback": one paragraph explaining the score
+
+Criteria: {{criteria}}
+
+Content: {{content}}"""
+  STREAM false
+}
+
+// TODO: revise content based on QA feedback
+ACTION revise_content {
+  INPUT  content: string, feedback: string
+  OUTPUT revised_content: string
+  AI     """Revise the content below based on the quality feedback provided. Preserve the original intent and structure while addressing the specific issues raised.
+
+Feedback: {{feedback}}
+
+Original content: {{content}}"""
+  STREAM false
+}
+
+// ===================================================================
+// WORKFLOW — generate, evaluate, revise if needed
+// ===================================================================
+
+WORKFLOW qa_workflow {
+  STEP generate {
+    ACTION  generate_content
+    ON_FAIL stop
+  }
+  STEP evaluate {
+    ACTION  evaluate_content
+    ON_FAIL stop
+  }
+  STEP revise {
+    ACTION  revise_content
+    ON_FAIL skip
+  }
+}
+
+// ===================================================================
+// VIEWS
+// ===================================================================
+
+VIEW ContentList {
+  ENTITY  ContentItem
+  LAYOUT  table
+  ACTIONS create, delete
+  FIELDS  title, status, revision, created_at
+  TITLE   "Content Items"
+}
+
+VIEW QAResultList {
+  ENTITY  QAResult
+  LAYOUT  table
+  ACTIONS create, delete
+  FIELDS  passed, score, created_at
+  TITLE   "QA Results"
+}
+
+// ===================================================================
+// LOGGING
+// ===================================================================
+
+LOG {
+  LEVEL   info
+  TARGET  file
+  PATH    "logs/qa.log"
+  ROTATE  "daily"
+}
+
+// ===================================================================
+// TESTS
+// ===================================================================
+
+TEST content_created {
+  GIVEN ContentItem { title: "Product Launch Email", content: "We are excited to announce...", status: "pending" }
+  EXPECT create -> id IS NOT NULL
+  EXPECT create -> revision == 0
+}
+
+TEST qa_result_belongs_to_content {
+  GIVEN ContentItem { title: "Blog Post", content: "In today's fast-moving landscape..." }
+  GIVEN QAResult { passed: true, score: 85, feedback: "Clear and well-structured.", BELONGS_TO ContentItem }
+  EXPECT create -> id IS NOT NULL
+  EXPECT create -> score > 80
+}

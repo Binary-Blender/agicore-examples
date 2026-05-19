@@ -1,0 +1,167 @@
+// multi_model_council.agi
+// Multi-Model Council — Agicore DSL Example 03
+//
+// A council pattern: broadcast a question to multiple models simultaneously,
+// collect independent answers, then synthesize the best response.
+// Uses NBVE to promote the synthesis model only when quality metrics are met.
+//
+// Declarations: APP, ENTITY, AI_SERVICE, NBVE, ACTION, VIEW, TEST, LOG
+// Status: STUB — fully shaped, synthesis action pending implementation
+
+APP multi_model_council {
+  TITLE  "Multi-Model Council"
+  WINDOW 1300x850 frameless
+  DB     multi_model_council.db
+  THEME  dark
+}
+
+// ===================================================================
+// AI SERVICE — four models from three providers for genuine diversity
+// ===================================================================
+
+AI_SERVICE {
+  PROVIDERS  anthropic, openai, google
+  KEYS_FILE  "%APPDATA%/MultiModelCouncil/api-keys.json"
+  DEFAULT    anthropic
+  STREAMING  true
+  MODELS {
+    anthropic  "claude-sonnet-4-20250514"         LABEL "Claude Sonnet 4"     DEFAULT
+    anthropic  "claude-haiku-4-5-20251001"        LABEL "Claude Haiku 4.5"
+    openai     "gpt-4o"                           LABEL "GPT-4o"              DEFAULT
+    google     "gemini-2.5-flash-preview-05-20"   LABEL "Gemini 2.5 Flash"    DEFAULT
+  }
+}
+
+// ===================================================================
+// NBVE — no-blind-version-elevation for the synthesis model
+// Promotes a new synthesis model only after SPC quality gates pass
+// ===================================================================
+
+NBVE council_nbve {
+  DESCRIPTION  "Promotes synthesis model candidates only after quality thresholds are met"
+  PRODUCTION   "claude-sonnet-4-20250514"
+  SHADOW       "gpt-4o"
+  SPC {
+    WINDOW               50
+    CONFIDENCE           0.95
+    ACCURACY_THRESHOLD   0.85
+    STABILITY_THRESHOLD  0.90
+    DEFECT_RATE_MAX      0.05
+  }
+  METRICS    quality_score, user_rating, synthesis_coherence
+  PROMOTION  manual
+  FALLBACK   production
+}
+
+// ===================================================================
+// DATA MODELS
+// ===================================================================
+
+ENTITY Question {
+  text:    string REQUIRED
+  context: string
+  status:  string = "pending"
+  TIMESTAMPS
+}
+
+ENTITY CouncilResponse {
+  model:    string REQUIRED
+  provider: string REQUIRED
+  content:  string REQUIRED
+  BELONGS_TO Question
+  TIMESTAMPS
+}
+
+ENTITY Synthesis {
+  content:       string REQUIRED
+  model_count:   number REQUIRED
+  synthesis_model: string REQUIRED
+  BELONGS_TO Question
+  TIMESTAMPS
+}
+
+// ===================================================================
+// AI ACTIONS
+// ===================================================================
+
+// TODO: implement broadcast action — sends question to all council models concurrently
+ACTION broadcast_question {
+  INPUT  question_id: string, text: string, context: string, model_ids: json
+  OUTPUT responses: json
+  // AI prompt: fan out to each model, collect independent answers
+  // Each response is stored as a CouncilResponse entity
+}
+
+// TODO: implement synthesis action — reads all responses, produces best combined answer
+ACTION synthesize_council {
+  INPUT  question_id: string, responses: json
+  OUTPUT synthesis: string, confidence: number
+  AI     """You are a synthesis model in a multi-model council. Multiple AI models have independently answered the same question. Your job is to synthesize their responses into the single best answer — taking the strongest reasoning from each, noting disagreements, and producing a coherent, authoritative answer.
+
+Question: {{question}}
+
+Council responses (JSON):
+{{responses}}
+
+Produce a synthesis that:
+1. Captures the consensus where models agree
+2. Notes significant disagreements and explains which view is better supported
+3. Does not simply average or concatenate — produce genuinely better reasoning
+
+Return a JSON object with "synthesis" (string) and "confidence" (float 0-1)."""
+  STREAM true
+}
+
+// ===================================================================
+// VIEWS
+// ===================================================================
+
+VIEW QuestionList {
+  ENTITY  Question
+  LAYOUT  table
+  ACTIONS create, delete
+  FIELDS  text, status, created_at
+  TITLE   "Council Questions"
+}
+
+VIEW CouncilResponseList {
+  ENTITY  CouncilResponse
+  LAYOUT  table
+  ACTIONS create, delete
+  FIELDS  model, provider, created_at
+  TITLE   "Model Responses"
+}
+
+VIEW SynthesisView {
+  ENTITY  Synthesis
+  LAYOUT  document_editor
+  TITLE   "Council Synthesis"
+}
+
+// ===================================================================
+// LOGGING
+// ===================================================================
+
+LOG {
+  LEVEL   info
+  TARGET  file
+  PATH    "logs/council.log"
+  ROTATE  "daily"
+}
+
+// ===================================================================
+// TESTS
+// ===================================================================
+
+TEST question_created {
+  GIVEN Question { text: "What are the tradeoffs between eventual and strong consistency?", context: "distributed systems design" }
+  EXPECT create -> id IS NOT NULL
+  EXPECT create -> status == "pending"
+}
+
+TEST response_belongs_to_question {
+  GIVEN Question { text: "Explain the CAP theorem.", context: "" }
+  GIVEN CouncilResponse { model: "claude-sonnet-4-20250514", provider: "anthropic", content: "The CAP theorem states...", BELONGS_TO Question }
+  EXPECT create -> id IS NOT NULL
+  EXPECT create -> provider == "anthropic"
+}

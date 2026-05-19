@@ -1,0 +1,317 @@
+// moderation_loop.agi
+// Content Moderation Loop — Agicore DSL Example 10
+//
+// Content in → RULE-based pre-filter → AI classification → SCORE ranking →
+// ROUTER to appropriate action (approve/flag/reject) → SKILLDOC-governed
+// response → full audit trail.
+//
+// The anti-pattern this replaces: a single LLM call that both classifies and
+// decides, with no audit trail, no appeal path, and no quality control.
+//
+// Declarations: APP, TYPE, ENTITY, AI_SERVICE, RULE, SCORE, ROUTER,
+//               SKILLDOC, ACTION, WORKFLOW, VIEW, LOG, TEST
+
+APP moderation_loop {
+  TITLE  "Moderation Loop"
+  WINDOW 1400x900 frameless
+  DB     moderation_loop.db
+  THEME  dark
+}
+
+// ===================================================================
+// TYPE ALIASES
+// ===================================================================
+
+TYPE ContentStatus   = "pending" | "approved" | "flagged" | "rejected" | "appealed"
+TYPE ViolationType   = "spam" | "hate_speech" | "harassment" | "misinformation" | "explicit" | "none"
+TYPE ModerationTier  = "auto" | "human_review" | "legal"
+
+// ===================================================================
+// AI SERVICE — fast model for classification, capable for appeals
+// ===================================================================
+
+AI_SERVICE {
+  PROVIDERS  anthropic
+  KEYS_FILE  "%APPDATA%/ModerationLoop/api-keys.json"
+  DEFAULT    anthropic
+  STREAMING  false
+  MODELS {
+    anthropic  "claude-haiku-4-5-20251001"  LABEL "Claude Haiku 4.5"  DEFAULT
+    anthropic  "claude-sonnet-4-20250514"   LABEL "Claude Sonnet 4"
+  }
+}
+
+// ===================================================================
+// DATA MODELS
+// ===================================================================
+
+ENTITY Content {
+  text:       string REQUIRED
+  author_id:  string REQUIRED
+  platform:   string = "web"
+  status:     string = "pending"
+  TIMESTAMPS
+}
+
+ENTITY ModerationDecision {
+  violation_type: string REQUIRED
+  confidence:     number REQUIRED
+  tier:           string REQUIRED
+  reason:         string
+  reviewer_id:    string
+  BELONGS_TO Content
+  TIMESTAMPS
+}
+
+ENTITY Appeal {
+  reason:   string REQUIRED
+  resolved: bool = false
+  outcome:  string
+  BELONGS_TO Content
+  TIMESTAMPS
+}
+
+// ===================================================================
+// EXPERT SYSTEM RULES — deterministic pre-filter (no AI needed here)
+// ===================================================================
+
+RULE auto_reject_known_spam {
+  WHEN   content.text MATCHES "^(BUY NOW|CLICK HERE|FREE MONEY).{0,100}$"
+  THEN   auto_reject
+  PRIORITY 10
+}
+
+RULE flag_repeat_offender {
+  WHEN   author.violation_count >= 3
+  THEN   flag_for_review
+  PRIORITY 8
+}
+
+RULE escalate_legal_keywords {
+  WHEN   content.text CONTAINS "bomb|weapon|kill|threat"
+  THEN   escalate_to_legal
+  PRIORITY 10
+}
+
+// ===================================================================
+// SCORE MODEL — rates confidence of violation detection
+// ===================================================================
+
+SCORE violation_confidence {
+  DESCRIPTION "Scores moderation decisions on confidence and severity for routing"
+
+  METRICS {
+    classification_confidence: float
+    severity:                  float
+    context_clarity:           float
+    repeat_signal:             float
+  }
+
+  WEIGHTS {
+    classification_confidence: 0.40
+    severity:                  0.30
+    context_clarity:           0.20
+    repeat_signal:             0.10
+  }
+
+  THRESHOLDS {
+    AUTO_APPROVE   0.90
+    AUTO_REJECT    0.85
+    HUMAN_REVIEW   0.50
+    LEGAL_REVIEW   0.95
+  }
+}
+
+// ===================================================================
+// SKILL DOCUMENTS — governed cognition for moderation contexts
+// ===================================================================
+
+SKILLDOC moderation_guidelines {
+  DESCRIPTION "Community standards and moderation decision framework"
+  DOMAIN      "content-moderation"
+  PRIORITY    80
+  KEYWORDS    moderation, content, community, guidelines, violation, spam, harassment
+
+  GOVERNANCE {
+    REQUIRE      moderator
+    EXECUTE_ONLY approve, reject, flag, request_context, issue_warning
+    DISALLOW     permanently_ban, delete_appeal, modify_content
+    AUDIT        all_actions
+  }
+}
+
+SKILLDOC legal_escalation_protocol {
+  DESCRIPTION "Protocol for escalating content that may involve illegal activity or legal liability"
+  DOMAIN      "content-moderation"
+  PRIORITY    100
+  KEYWORDS    legal, threat, illegal, law_enforcement, csam, terrorism
+
+  GOVERNANCE {
+    SIGNED_BY    LegalTeamAuthority
+    REQUIRE      senior_moderator, legal_access
+    EXECUTE_ONLY escalate_to_legal, preserve_evidence, notify_authorities
+    DISALLOW     delete_content, approve, reject_without_escalation
+    AUDIT        all_actions
+  }
+}
+
+// ===================================================================
+// ROUTER — tiered routing based on violation score and type
+// ===================================================================
+
+ROUTER moderation_router {
+  DESCRIPTION "Three-tier content moderation router: auto → human → legal"
+
+  TIER 1 auto_moderation {
+    haiku_classifier: anthropic "claude-haiku-4-5-20251001" {
+      STRENGTHS   spam, obvious_violations, low_context
+      COST        0.025
+      CONTEXT     200000
+      DEFAULT
+    }
+  }
+
+  TIER 2 human_assisted {
+    sonnet_reviewer: anthropic "claude-sonnet-4-20250514" {
+      STRENGTHS   nuanced_content, borderline_cases, cultural_context, harassment
+      COST        0.3
+      CONTEXT     200000
+      DEFAULT
+    }
+
+    CIRCUIT_BREAKER {
+      THRESHOLD  0.2
+      WINDOW     "300s"
+      FALLBACK   3
+    }
+  }
+
+  TIER 3 legal_review {
+    sonnet_legal: anthropic "claude-sonnet-4-20250514" {
+      STRENGTHS   legal_threats, illegal_content, csam_adjacent, terrorism
+      COST        0.3
+      CONTEXT     200000
+      DEFAULT
+    }
+  }
+
+  TASK_TYPES    spam, hate_speech, harassment, misinformation, explicit, legal, borderline, general
+  CALIBRATION   true
+}
+
+// ===================================================================
+// AI ACTIONS
+// ===================================================================
+
+ACTION classify_content {
+  INPUT  content_id: string, text: string, platform: string
+  OUTPUT violation_type: string, confidence: number, severity: number, reasoning: string
+  AI     """You are a content moderation classifier. Analyze the content below and return a JSON object.
+
+Platform: {{platform}}
+Content: {{text}}
+
+Classify this content. Return a JSON object with:
+- "violation_type": one of "spam", "hate_speech", "harassment", "misinformation", "explicit", "none"
+- "confidence": 0.0-1.0 how confident you are in this classification
+- "severity": 0.0-1.0 how severe the violation is (0 if violation_type is "none")
+- "reasoning": one sentence explaining your classification
+
+If the content is clearly benign, return violation_type "none" with high confidence. Do not over-classify."""
+  STREAM false
+}
+
+ACTION generate_moderation_decision {
+  INPUT  content_id: string, text: string, violation_type: string, confidence: number, tier: string
+  OUTPUT reason: string, action: string
+  AI     """You are a content moderator issuing a moderation decision.
+
+Tier: {{tier}}
+Violation Type: {{violation_type}}
+Classification Confidence: {{confidence}}
+Content: {{text}}
+
+Write a moderation decision:
+- "action": one of "approve", "flag", "reject", "escalate"
+- "reason": one clear sentence explaining the decision in terms the author can understand
+
+Your decision must be consistent with the classification. High-confidence violations above 0.8 should be rejected. Borderline cases (0.5-0.8) should be flagged for human review. Low confidence should be approved with a flag."""
+  STREAM false
+}
+
+// ===================================================================
+// WORKFLOW — full moderation pipeline
+// ===================================================================
+
+WORKFLOW moderate_content {
+  STEP classify {
+    ACTION  classify_content
+    ON_FAIL stop
+  }
+  STEP decide {
+    ACTION  generate_moderation_decision
+    ON_FAIL stop
+  }
+}
+
+// ===================================================================
+// VIEWS
+// ===================================================================
+
+VIEW ContentQueue {
+  ENTITY  Content
+  LAYOUT  table
+  ACTIONS create, delete
+  FIELDS  platform, status, created_at
+  TITLE   "Content Queue"
+}
+
+VIEW DecisionLog {
+  ENTITY  ModerationDecision
+  LAYOUT  table
+  FIELDS  violation_type, confidence, tier, created_at
+  TITLE   "Moderation Decisions"
+}
+
+VIEW AppealQueue {
+  ENTITY  Appeal
+  LAYOUT  table
+  FIELDS  reason, resolved, created_at
+  TITLE   "Appeals"
+}
+
+// ===================================================================
+// LOGGING — every decision is audited
+// ===================================================================
+
+LOG {
+  LEVEL   info
+  TARGET  both
+  PATH    "logs/moderation.log"
+  ROTATE  "daily"
+}
+
+// ===================================================================
+// TESTS
+// ===================================================================
+
+TEST content_created {
+  GIVEN Content { text: "Check out this amazing product!", author_id: "user_123" }
+  EXPECT create -> id IS NOT NULL
+  EXPECT create -> status == "pending"
+  EXPECT create -> platform == "web"
+}
+
+TEST decision_recorded {
+  GIVEN Content { text: "Neutral community post.", author_id: "user_456" }
+  GIVEN ModerationDecision { violation_type: "none", confidence: 0.95, tier: "auto", reason: "Content is benign.", BELONGS_TO Content }
+  EXPECT create -> id IS NOT NULL
+  EXPECT create -> violation_type == "none"
+}
+
+TEST appeal_recorded {
+  GIVEN Content { text: "Flagged content example.", author_id: "user_789", status: "flagged" }
+  GIVEN Appeal { reason: "This was taken out of context.", BELONGS_TO Content }
+  EXPECT create -> id IS NOT NULL
+  EXPECT create -> resolved == false
+}

@@ -1,0 +1,242 @@
+// monitoring_loop.agi
+// Monitoring Loop — Agicore DSL Example 07
+//
+// Periodic health checks on services and metrics. Anomaly detection via
+// REASONER. Event dispatch when thresholds breach. Remediation workflow
+// triggered reactively. Full audit log. No polling loops in application code.
+//
+// Declarations: APP, ENTITY, AI_SERVICE, ACTION, REASONER, TRIGGER, EVENT,
+//               LOG, VIEW, TEST
+// Status: STUB — REASONER/TRIGGER/EVENT layer shaped
+
+APP monitoring_loop {
+  TITLE  "Monitoring Loop"
+  WINDOW 1300x850 frameless
+  DB     monitoring_loop.db
+  THEME  dark
+}
+
+// ===================================================================
+// AI SERVICE
+// ===================================================================
+
+AI_SERVICE {
+  PROVIDERS  anthropic
+  KEYS_FILE  "%APPDATA%/MonitoringLoop/api-keys.json"
+  DEFAULT    anthropic
+  STREAMING  false
+  MODELS {
+    anthropic  "claude-haiku-4-5-20251001"  LABEL "Claude Haiku 4.5"  DEFAULT
+    anthropic  "claude-sonnet-4-20250514"   LABEL "Claude Sonnet 4"
+  }
+}
+
+// ===================================================================
+// DATA MODELS
+// ===================================================================
+
+ENTITY Service {
+  name:     string REQUIRED
+  endpoint: string REQUIRED
+  status:   string = "unknown"
+  TIMESTAMPS
+}
+
+ENTITY HealthCheck {
+  status_code:   number
+  latency_ms:    number
+  error_message: string
+  healthy:       bool = true
+  BELONGS_TO Service
+  TIMESTAMPS
+}
+
+ENTITY Alert {
+  severity:   string REQUIRED
+  message:    string REQUIRED
+  resolved:   bool = false
+  BELONGS_TO Service
+  TIMESTAMPS
+}
+
+// ===================================================================
+// EVENTS — async pub/sub for anomaly signals
+// ===================================================================
+
+EVENT ServiceDegraded {
+  DESCRIPTION "Fires when a service's health checks fall below the healthy threshold"
+  PAYLOAD {
+    service_id:      string
+    service_name:    string
+    failure_rate:    number
+    latency_p95_ms:  number
+    alert_severity:  string
+  }
+  IDEMPOTENT true
+  TTL        3600
+}
+
+EVENT ServiceRecovered {
+  DESCRIPTION "Fires when a previously degraded service returns to healthy status"
+  PAYLOAD {
+    service_id:   string
+    service_name: string
+    downtime_ms:  number
+  }
+  IDEMPOTENT true
+  TTL        3600
+}
+
+// ===================================================================
+// REASONER — periodic analysis of health check trends
+// ===================================================================
+
+REASONER health_reasoner {
+  DESCRIPTION "Analyzes health check history every 60 seconds to detect degradation patterns"
+  SCHEDULE    "60s"
+  USES        health_analysis_doc
+  TIER        1
+
+  PROMPT """Analyze the recent health check data for {{service_name}}:
+
+Recent checks (last 10):
+{{health_checks}}
+
+Determine:
+1. Is this service currently healthy? (healthy / degraded / critical)
+2. What is the approximate failure rate? (0.0-1.0)
+3. What is the P95 latency estimate in ms?
+4. What is the severity? (info / warning / critical)
+5. What is a one-sentence diagnosis?
+
+Return a JSON object with: healthy (bool), failure_rate (float), latency_p95_ms (number), severity (string), diagnosis (string)."""
+}
+
+// ===================================================================
+// TRIGGERS — reactive wiring from events to workflows
+// ===================================================================
+
+TRIGGER on_service_degraded {
+  DESCRIPTION "When a ServiceDegraded event fires, run the alert workflow"
+  WHEN {
+    EVENT ServiceDegraded
+  }
+  FIRES   WORKFLOW alert_and_remediate
+  IDEMPOTENT true
+}
+
+TRIGGER on_service_recovered {
+  DESCRIPTION "When a ServiceRecovered event fires, resolve open alerts"
+  WHEN {
+    EVENT ServiceRecovered
+  }
+  FIRES   WORKFLOW resolve_alerts
+  IDEMPOTENT true
+}
+
+// ===================================================================
+// AI ACTIONS
+// ===================================================================
+
+ACTION check_service_health {
+  INPUT  service_id: string, endpoint: string
+  OUTPUT healthy: bool, status_code: number, latency_ms: number, error_message: string | null
+  IMPL   "check_service_health"
+}
+
+ACTION analyze_degradation {
+  INPUT  service_name: string, checks: json
+  OUTPUT severity: string, diagnosis: string, recommended_action: string
+  AI     """You are an SRE analyzing service health data.
+
+Service: {{service_name}}
+Recent health checks: {{checks}}
+
+Identify the degradation pattern and recommend action. Return a JSON object with:
+- "severity": "warning" | "critical"
+- "diagnosis": one sentence describing the failure mode
+- "recommended_action": concrete next step (restart, scale, investigate, notify, etc.)"""
+  STREAM false
+}
+
+ACTION create_alert {
+  INPUT  service_id: string, severity: string, message: string
+  OUTPUT alert_id: string, ok: bool
+  IMPL   "create_alert"
+}
+
+// ===================================================================
+// WORKFLOWS
+// ===================================================================
+
+WORKFLOW alert_and_remediate {
+  STEP analyze {
+    ACTION  analyze_degradation
+    ON_FAIL skip
+  }
+  STEP create_alert_record {
+    ACTION  create_alert
+    ON_FAIL stop
+  }
+}
+
+WORKFLOW resolve_alerts {
+  STEP resolve {
+    ACTION  create_alert
+    ON_FAIL skip
+  }
+}
+
+// ===================================================================
+// VIEWS
+// ===================================================================
+
+VIEW ServiceList {
+  ENTITY  Service
+  LAYOUT  dashboard
+  TITLE   "Services"
+}
+
+VIEW AlertList {
+  ENTITY  Alert
+  LAYOUT  table
+  ACTIONS create, delete
+  FIELDS  severity, message, resolved, created_at
+  TITLE   "Alerts"
+}
+
+VIEW HealthCheckLog {
+  ENTITY  HealthCheck
+  LAYOUT  table
+  FIELDS  healthy, status_code, latency_ms, created_at
+  TITLE   "Health Check Log"
+}
+
+// ===================================================================
+// LOGGING — full audit trail of every check and alert
+// ===================================================================
+
+LOG {
+  LEVEL   info
+  TARGET  both
+  PATH    "logs/monitoring.log"
+  ROTATE  "daily"
+}
+
+// ===================================================================
+// TESTS
+// ===================================================================
+
+TEST service_created {
+  GIVEN Service { name: "API Gateway", endpoint: "https://api.example.com/health" }
+  EXPECT create -> id IS NOT NULL
+  EXPECT create -> status == "unknown"
+}
+
+TEST alert_created {
+  GIVEN Service { name: "Auth Service", endpoint: "https://auth.example.com/health" }
+  GIVEN Alert { severity: "critical", message: "Auth service returning 503", BELONGS_TO Service }
+  EXPECT create -> id IS NOT NULL
+  EXPECT create -> severity == "critical"
+  EXPECT create -> resolved == false
+}

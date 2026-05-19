@@ -1,0 +1,263 @@
+// competitive_intel.agi
+// Competitive Intel — Agicore DSL Example 09
+//
+// Parallel competitor signal gathering → AI analysis per signal →
+// SCORE-based ranking → synthesized strategic report.
+// The SCORE declaration keeps quality gates on what gets promoted to the report.
+//
+// Declarations: APP, ENTITY, AI_SERVICE, ACTION, PIPELINE, SCORE, MODULE,
+//               VIEW, LOG, TEST
+// Status: STUB — PIPELINE/SCORE/MODULE layer shaped
+
+APP competitive_intel {
+  TITLE  "Competitive Intel"
+  WINDOW 1400x900 frameless
+  DB     competitive_intel.db
+  THEME  dark
+}
+
+// ===================================================================
+// AI SERVICE
+// ===================================================================
+
+AI_SERVICE {
+  PROVIDERS  anthropic
+  KEYS_FILE  "%APPDATA%/CompetitiveIntel/api-keys.json"
+  DEFAULT    anthropic
+  STREAMING  true
+  MODELS {
+    anthropic  "claude-sonnet-4-20250514"   LABEL "Claude Sonnet 4"   DEFAULT
+    anthropic  "claude-haiku-4-5-20251001"  LABEL "Claude Haiku 4.5"
+  }
+}
+
+// ===================================================================
+// DATA MODELS
+// ===================================================================
+
+ENTITY Competitor {
+  name:        string REQUIRED
+  website:     string
+  category:    string
+  description: string
+  active:      bool = true
+  TIMESTAMPS
+}
+
+ENTITY IntelSignal {
+  source:      string REQUIRED
+  signal_type: string REQUIRED
+  content:     string REQUIRED
+  relevance:   number
+  impact:      string
+  BELONGS_TO Competitor
+  TIMESTAMPS
+}
+
+ENTITY IntelReport {
+  title:    string REQUIRED
+  summary:  string REQUIRED
+  findings: json = []
+  period:   string
+  TIMESTAMPS
+}
+
+// ===================================================================
+// SCORE MODEL — rates the strategic impact of each intel signal
+// ===================================================================
+
+SCORE signal_impact {
+  DESCRIPTION "Scores each competitive signal on strategic relevance and urgency"
+
+  METRICS {
+    market_relevance:  float
+    urgency:           float
+    confidence:        float
+    actionability:     float
+  }
+
+  WEIGHTS {
+    market_relevance: 0.35
+    urgency:          0.30
+    confidence:       0.20
+    actionability:    0.15
+  }
+
+  THRESHOLDS {
+    HIGH    0.75
+    MEDIUM  0.50
+    LOW     0.25
+  }
+}
+
+// ===================================================================
+// MODULE — reusable competitive analysis expert bundle
+// ===================================================================
+
+MODULE competitive_analysis {
+  DESCRIPTION "Expert system module for competitive signal analysis and strategic synthesis"
+  VERSION     "1.0.0"
+
+  ACTIVATES_WHEN {
+    score signal_impact >= 0.50
+  }
+
+  EXPORTS [
+    analyze_signal,
+    synthesize_report,
+    score_signal_impact
+  ]
+}
+
+// ===================================================================
+// AI ACTIONS
+// ===================================================================
+
+ACTION gather_signals {
+  INPUT  competitor_name: string, category: string
+  OUTPUT signals: json
+  AI     """You are a competitive intelligence analyst. Research {{competitor_name}} (category: {{category}}) and identify the 5 most strategically relevant signals from the past 30 days.
+
+Signal types to look for: product launches, pricing changes, partnerships, hiring patterns, marketing campaigns, press coverage, customer complaints, patents.
+
+Return a JSON array where each element has:
+- source: where this signal comes from (TechCrunch, LinkedIn, their website, etc.)
+- signal_type: one of the types listed above
+- content: 2-3 sentence description of the signal
+- urgency: "low" | "medium" | "high"
+
+Return ONLY the JSON array."""
+  STREAM false
+}
+
+ACTION analyze_signal {
+  INPUT  competitor: string, signal_type: string, content: string
+  OUTPUT market_relevance: number, urgency: number, confidence: number, actionability: number, impact: string
+  AI     """You are a strategic analyst scoring a competitive intelligence signal.
+
+Competitor: {{competitor}}
+Signal Type: {{signal_type}}
+Signal Content: {{content}}
+
+Score each dimension from 0.0 to 1.0:
+- market_relevance: How relevant is this to our market position?
+- urgency: How quickly must we respond?
+- confidence: How confident are we in this signal's accuracy?
+- actionability: Can we actually do something with this insight?
+
+Also write a one-sentence strategic impact statement.
+
+Return a JSON object with: market_relevance, urgency, confidence, actionability (all floats 0.0-1.0), impact (string)."""
+  STREAM false
+}
+
+ACTION synthesize_report {
+  INPUT  period: string, signals: json, competitors: json
+  OUTPUT title: string, summary: string, findings: json
+  AI     """You are a strategic intelligence analyst writing a competitive briefing.
+
+Period: {{period}}
+Competitors analyzed: {{competitors}}
+Top-scored signals:
+{{signals}}
+
+Write a strategic competitive intelligence report:
+1. Executive Summary (3-4 sentences on the most important developments)
+2. Top Threats (signals that require immediate action)
+3. Opportunities (signals that reveal competitor weaknesses)
+4. Watch List (signals to monitor but not act on yet)
+
+Return a JSON object with:
+- "title": report title string
+- "summary": executive summary string
+- "findings": array of {category, insight, action_required} objects"""
+  STREAM true
+}
+
+// ===================================================================
+// PIPELINE — parallel signal gathering across all competitors
+// ===================================================================
+
+PIPELINE intel_gather {
+  DESCRIPTION "Fan-out: gather signals from all active competitors in parallel, then score and rank"
+  IDEMPOTENT  true
+
+  ROW gather {
+    per_competitor: ai_action {
+      action  "gather_signals"
+      foreach "active_competitors"
+    }
+  }
+
+  ROW score {
+    scored_signals: ai_action {
+      action  "analyze_signal"
+      foreach "gather.per_competitor.signals"
+    }
+  }
+
+  ROW rank {
+    top_signals: transform {
+      op      "sort_desc"
+      field   "overall_score"
+      limit   20
+      input   "score.scored_signals"
+    }
+  }
+
+  CONNECTION gather.per_competitor -> score.signals
+  CONNECTION score.scored_signals  -> rank.input
+}
+
+// ===================================================================
+// VIEWS
+// ===================================================================
+
+VIEW CompetitorList {
+  ENTITY  Competitor
+  LAYOUT  table
+  ACTIONS create, delete
+  FIELDS  name, category, website, active, created_at
+  TITLE   "Competitors"
+}
+
+VIEW SignalFeed {
+  ENTITY  IntelSignal
+  LAYOUT  table
+  FIELDS  signal_type, relevance, impact, created_at
+  TITLE   "Intelligence Signals"
+}
+
+VIEW ReportView {
+  ENTITY  IntelReport
+  LAYOUT  document_editor
+  TITLE   "Intelligence Reports"
+}
+
+// ===================================================================
+// LOGGING
+// ===================================================================
+
+LOG {
+  LEVEL   info
+  TARGET  file
+  PATH    "logs/competitive_intel.log"
+  ROTATE  "weekly"
+}
+
+// ===================================================================
+// TESTS
+// ===================================================================
+
+TEST competitor_created {
+  GIVEN Competitor { name: "Acme Corp", category: "SaaS CRM", website: "https://acme.example.com" }
+  EXPECT create -> id IS NOT NULL
+  EXPECT create -> active == true
+}
+
+TEST signal_belongs_to_competitor {
+  GIVEN Competitor { name: "Globex", category: "Enterprise ERP" }
+  GIVEN IntelSignal { source: "TechCrunch", signal_type: "product_launch", content: "Globex launches AI assistant integration.", BELONGS_TO Competitor }
+  EXPECT create -> id IS NOT NULL
+  EXPECT create -> signal_type == "product_launch"
+}

@@ -1,0 +1,182 @@
+// data_extraction.agi
+// Data Extraction — Agicore DSL Example 05
+//
+// Extracts structured data from unstructured text (contracts, emails, receipts)
+// using typed ENTITY schemas as the extraction target. No hallucination escape
+// hatches — if the field type doesn't match, it fails cleanly.
+//
+// Declarations: APP, TYPE, ENTITY, AI_SERVICE, ACTION, PIPELINE, VIEW, TEST
+// Status: STUB — entity schema and extraction actions shaped
+
+APP data_extraction {
+  TITLE  "Data Extraction"
+  WINDOW 1200x800 frameless
+  DB     data_extraction.db
+  THEME  dark
+}
+
+// ===================================================================
+// AI SERVICE
+// ===================================================================
+
+AI_SERVICE {
+  PROVIDERS  anthropic
+  KEYS_FILE  "%APPDATA%/DataExtraction/api-keys.json"
+  DEFAULT    anthropic
+  STREAMING  false
+  MODELS {
+    anthropic  "claude-sonnet-4-20250514"  LABEL "Claude Sonnet 4"  DEFAULT
+  }
+}
+
+// ===================================================================
+// TYPE ALIASES
+// ===================================================================
+
+TYPE DocumentKind = "contract" | "invoice" | "email" | "receipt" | "other"
+TYPE ExtractionStatus = "pending" | "complete" | "failed" | "needs_review"
+
+// ===================================================================
+// DATA MODELS — typed extraction targets
+// ===================================================================
+
+ENTITY Document {
+  kind:    string = "other"
+  source:  string REQUIRED
+  raw:     string REQUIRED
+  status:  string = "pending"
+  TIMESTAMPS
+}
+
+ENTITY ExtractedRecord {
+  field_name:  string REQUIRED
+  field_value: string
+  confidence:  number = 0
+  BELONGS_TO Document
+  TIMESTAMPS
+}
+
+ENTITY ExtractionRun {
+  model:        string REQUIRED
+  fields_found: number = 0
+  fields_total: number = 0
+  BELONGS_TO Document
+  TIMESTAMPS
+}
+
+// ===================================================================
+// AI ACTIONS
+// ===================================================================
+
+// TODO: classify the document kind before extraction
+ACTION classify_document {
+  INPUT  raw: string
+  OUTPUT kind: string, confidence: number
+  AI     """Classify this document. Return a JSON object with "kind" (one of: contract, invoice, email, receipt, other) and "confidence" (float 0-1).
+
+Document text:
+{{raw}}"""
+  STREAM false
+}
+
+// TODO: extract structured fields from a document
+ACTION extract_fields {
+  INPUT  raw: string, kind: string, schema: json
+  OUTPUT fields: json, fields_found: number
+  AI     """Extract structured data from this {{kind}} document. Return a JSON object where each key is a field name and each value is the extracted string (or null if not found). Also include a "confidence" float 0-1 per field.
+
+Target schema (extract these fields):
+{{schema}}
+
+Document text:
+{{raw}}
+
+Return ONLY the JSON object with the extracted fields."""
+  STREAM false
+}
+
+// TODO: validate extracted fields against expected types
+ACTION validate_extraction {
+  INPUT  fields: json, schema: json
+  OUTPUT valid: bool, errors: json
+  // IMPL for custom Rust validation logic
+  IMPL   "validate_extraction"
+}
+
+// ===================================================================
+// PIPELINE — classify, extract, validate
+// ===================================================================
+
+PIPELINE extraction_pipeline {
+  DESCRIPTION "Three-stage extraction pipeline: classify document, extract fields, validate output"
+  IDEMPOTENT  true
+
+  ROW classify {
+    classifier: ai_action {
+      action "classify_document"
+      output "kind"
+    }
+  }
+
+  ROW extract {
+    extractor: ai_action {
+      action  "extract_fields"
+      input   "classify.kind"
+      output  "fields"
+    }
+  }
+
+  ROW validate {
+    validator: custom {
+      action "validate_extraction"
+      input  "extract.fields"
+    }
+  }
+
+  CONNECTION classify.kind -> extract.kind
+  CONNECTION extract.fields -> validate.fields
+}
+
+// ===================================================================
+// VIEWS
+// ===================================================================
+
+VIEW DocumentList {
+  ENTITY  Document
+  LAYOUT  table
+  ACTIONS create, delete
+  FIELDS  kind, status, source, created_at
+  TITLE   "Documents"
+}
+
+VIEW ExtractedRecordList {
+  ENTITY  ExtractedRecord
+  LAYOUT  table
+  ACTIONS create, delete
+  FIELDS  field_name, field_value, confidence, created_at
+  TITLE   "Extracted Fields"
+}
+
+VIEW ExtractionRunList {
+  ENTITY  ExtractionRun
+  LAYOUT  table
+  FIELDS  model, fields_found, fields_total, created_at
+  TITLE   "Extraction Runs"
+}
+
+// ===================================================================
+// TESTS
+// ===================================================================
+
+TEST document_created {
+  GIVEN Document { kind: "invoice", source: "email-attachment.pdf", raw: "Invoice #1234 Date: 2026-01-15 Amount: $2,500.00" }
+  EXPECT create -> id IS NOT NULL
+  EXPECT create -> status == "pending"
+}
+
+TEST extracted_record_belongs_to_document {
+  GIVEN Document { kind: "contract", source: "contract.pdf", raw: "This agreement is entered into on January 1, 2026..." }
+  GIVEN ExtractedRecord { field_name: "effective_date", field_value: "2026-01-01", confidence: 95, BELONGS_TO Document }
+  EXPECT create -> id IS NOT NULL
+  EXPECT create -> confidence > 90
+}

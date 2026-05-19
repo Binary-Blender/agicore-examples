@@ -1,0 +1,236 @@
+// content_pipeline.agi
+// Content Pipeline — Agicore DSL Example 08
+//
+// Brief → AI draft → critique loop → revision → SPC quality gate → publish.
+// The QC declaration applies statistical process control to AI output quality —
+// it will block publishing if output quality falls outside control limits.
+//
+// Declarations: APP, ENTITY, AI_SERVICE, ACTION, WORKFLOW, QC, COMPILER,
+//               VIEW, LOG, TEST
+// Status: STUB — WORKFLOW/QC/COMPILER layer shaped
+
+APP content_pipeline {
+  TITLE  "Content Pipeline"
+  WINDOW 1300x850 frameless
+  DB     content_pipeline.db
+  THEME  dark
+}
+
+// ===================================================================
+// AI SERVICE — two-tier: fast for drafts, capable for critique/final
+// ===================================================================
+
+AI_SERVICE {
+  PROVIDERS  anthropic, openai
+  KEYS_FILE  "%APPDATA%/ContentPipeline/api-keys.json"
+  DEFAULT    anthropic
+  STREAMING  true
+  MODELS {
+    anthropic  "claude-sonnet-4-20250514"   LABEL "Claude Sonnet 4"   DEFAULT
+    anthropic  "claude-haiku-4-5-20251001"  LABEL "Claude Haiku 4.5"
+    openai     "gpt-4o"                     LABEL "GPT-4o"             DEFAULT
+  }
+}
+
+// ===================================================================
+// DATA MODELS
+// ===================================================================
+
+ENTITY Brief {
+  title:    string REQUIRED
+  audience: string REQUIRED
+  goal:     string REQUIRED
+  tone:     string = "professional"
+  keywords: json = []
+  TIMESTAMPS
+}
+
+ENTITY Draft {
+  title:      string REQUIRED
+  body:       string REQUIRED
+  version:    number = 1
+  status:     string = "draft"
+  qc_score:   number
+  BELONGS_TO Brief
+  TIMESTAMPS
+}
+
+ENTITY CritiqueNote {
+  dimension:   string REQUIRED
+  feedback:    string REQUIRED
+  severity:    string = "minor"
+  BELONGS_TO Draft
+  TIMESTAMPS
+}
+
+// ===================================================================
+// QC DECLARATION — SPC quality gate before publish
+// ===================================================================
+
+QC content_quality_gate {
+  DESCRIPTION "Statistical process control gate for AI-generated content quality"
+
+  METRICS {
+    clarity_score:     float
+    relevance_score:   float
+    tone_alignment:    float
+    keyword_coverage:  float
+  }
+
+  SPC {
+    WINDOW     20
+    UCL        1.0
+    LCL        0.65
+    SAMPLE_RATE 1.0
+  }
+
+  ON_VIOLATION block
+}
+
+// ===================================================================
+// AI ACTIONS
+// ===================================================================
+
+ACTION generate_draft {
+  INPUT  brief_id: string, title: string, audience: string, goal: string, tone: string, keywords: json
+  OUTPUT body: string
+  AI     """You are a professional content writer. Write a complete draft based on the brief below.
+
+Title: {{title}}
+Target Audience: {{audience}}
+Goal: {{goal}}
+Tone: {{tone}}
+Keywords to incorporate: {{keywords}}
+
+Write a complete, publication-ready draft. Use markdown formatting. The draft should achieve the stated goal for the target audience in the specified tone."""
+  STREAM true
+}
+
+ACTION critique_draft {
+  INPUT  draft_body: string, audience: string, goal: string, tone: string
+  OUTPUT notes: json, overall_score: number, ready_to_publish: bool
+  AI     """You are an expert content editor. Critique the draft below against the brief requirements.
+
+Target Audience: {{audience}}
+Goal: {{goal}}
+Required Tone: {{tone}}
+
+Draft:
+{{draft_body}}
+
+Evaluate on four dimensions (0.0-1.0 each):
+1. clarity_score: Is the writing clear and easy to read for the target audience?
+2. relevance_score: Does it directly serve the stated goal?
+3. tone_alignment: Does the tone match what was requested?
+4. keyword_coverage: Are key concepts addressed naturally?
+
+Return a JSON object with:
+- "notes": array of objects with {dimension, feedback, severity: "minor"|"major"|"critical"}
+- "overall_score": weighted average (0.0-1.0)
+- "ready_to_publish": true if overall_score >= 0.8 and no critical notes"""
+  STREAM false
+}
+
+ACTION revise_draft {
+  INPUT  draft_body: string, critique_notes: json, audience: string, goal: string
+  OUTPUT body: string
+  AI     """You are a professional content writer revising a draft based on editor feedback.
+
+Target Audience: {{audience}}
+Goal: {{goal}}
+
+Original Draft:
+{{draft_body}}
+
+Editor Critique:
+{{critique_notes}}
+
+Rewrite the draft addressing all critique points, especially any marked major or critical. Preserve what works well. Return the complete revised draft in markdown."""
+  STREAM true
+}
+
+// ===================================================================
+// WORKFLOW — draft → critique → revise loop
+// ===================================================================
+
+WORKFLOW content_workflow {
+  STEP draft {
+    ACTION  generate_draft
+    ON_FAIL stop
+  }
+  STEP critique {
+    ACTION  critique_draft
+    ON_FAIL skip
+  }
+  STEP revise {
+    ACTION  revise_draft
+    ON_FAIL stop
+  }
+}
+
+// ===================================================================
+// COMPILER — semantic transition: Draft → published content store
+// ===================================================================
+
+SESSION drafting_session {
+  DESCRIPTION "Active drafting workspace — holds brief context and current draft state"
+  MEMORY {
+    active_brief:  string
+    revision_count: number
+    last_qc_score:  number
+  }
+}
+
+// ===================================================================
+// VIEWS
+// ===================================================================
+
+VIEW BriefList {
+  ENTITY  Brief
+  LAYOUT  table
+  ACTIONS create, delete
+  FIELDS  title, audience, goal, created_at
+  TITLE   "Content Briefs"
+}
+
+VIEW DraftEditor {
+  ENTITY  Draft
+  LAYOUT  document_editor
+  TITLE   "Draft Editor"
+}
+
+VIEW CritiqueList {
+  ENTITY  CritiqueNote
+  LAYOUT  table
+  FIELDS  dimension, severity, feedback, created_at
+  TITLE   "Critique Notes"
+}
+
+// ===================================================================
+// LOGGING
+// ===================================================================
+
+LOG {
+  LEVEL   info
+  TARGET  file
+  PATH    "logs/content_pipeline.log"
+  ROTATE  "weekly"
+}
+
+// ===================================================================
+// TESTS
+// ===================================================================
+
+TEST brief_created {
+  GIVEN Brief { title: "Q3 Product Launch", audience: "SMB decision makers", goal: "Drive trial signups" }
+  EXPECT create -> id IS NOT NULL
+  EXPECT create -> tone == "professional"
+}
+
+TEST draft_belongs_to_brief {
+  GIVEN Brief { title: "Newsletter Sept", audience: "Subscribers", goal: "Increase engagement" }
+  GIVEN Draft { title: "September Newsletter", body: "Dear subscribers...", BELONGS_TO Brief }
+  EXPECT create -> id IS NOT NULL
+  EXPECT create -> version == 1
+  EXPECT create -> status == "draft"
+}

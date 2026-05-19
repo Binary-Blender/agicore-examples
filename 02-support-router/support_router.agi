@@ -1,0 +1,299 @@
+// support_router.agi
+// Support Router — Agicore DSL Example 02
+//
+// A customer support system that classifies incoming tickets, routes them
+// through tiered specialist models (FAQ bot -> specialized -> human escalation),
+// applies governance via skill docs, and logs everything.
+//
+// Declarations: APP, TYPE, ENTITY, AI_SERVICE, SKILLDOC, ROUTER,
+//               ACTION, PACKET, CHANNEL, TRIGGER, VIEW, LOG, TEST
+
+APP support_router {
+  TITLE  "Support Router"
+  WINDOW 1400x900 frameless
+  DB     support_router.db
+  THEME  dark
+}
+
+// ===================================================================
+// TYPE ALIASES
+// ===================================================================
+
+TYPE TicketStatus   = "open" | "routed" | "resolved" | "escalated"
+TYPE TicketPriority = "low" | "medium" | "high" | "critical"
+
+// ===================================================================
+// AI SERVICE — three models across two providers
+// ===================================================================
+
+AI_SERVICE {
+  PROVIDERS  anthropic, openai
+  KEYS_FILE  "%APPDATA%/SupportRouter/api-keys.json"
+  DEFAULT    anthropic
+  STREAMING  true
+  MODELS {
+    anthropic  "claude-haiku-4-5-20251001"   LABEL "Claude Haiku 4.5"  DEFAULT
+    anthropic  "claude-sonnet-4-20250514"    LABEL "Claude Sonnet 4"
+    openai     "gpt-4o"                      LABEL "GPT-4o"             DEFAULT
+  }
+}
+
+// ===================================================================
+// DATA MODELS
+// ===================================================================
+
+ENTITY Ticket {
+  subject:  string REQUIRED
+  body:     string REQUIRED
+  status:   string = "open"
+  priority: string = "medium"
+  TIMESTAMPS
+}
+
+ENTITY Response {
+  content: string REQUIRED
+  tier:    string REQUIRED
+  BELONGS_TO Ticket
+  TIMESTAMPS
+}
+
+// ===================================================================
+// SKILL DOCUMENTS — governed cognition for support contexts
+// ===================================================================
+
+SKILLDOC support_guidelines {
+  DESCRIPTION "Customer support response standards and tone guidelines"
+  DOMAIN      "customer-support"
+  PRIORITY    50
+  KEYWORDS    support, help, refund, billing, account, subscription, error, bug
+
+  GOVERNANCE {
+    REQUIRE      support_agent
+    EXECUTE_ONLY respond, escalate, close_ticket, request_info
+    DISALLOW     delete_ticket, ignore_customer, share_customer_data
+    AUDIT        all_access
+  }
+}
+
+SKILLDOC escalation_protocol {
+  DESCRIPTION "Protocol for escalating critical, legal, and sensitive support cases"
+  DOMAIN      "customer-support"
+  PRIORITY    90
+  KEYWORDS    escalation, critical, legal, threat, fraud, billing_dispute, chargeback
+
+  GOVERNANCE {
+    REQUIRE      senior_support
+    EXECUTE_ONLY escalate, document_incident, notify_management
+    DISALLOW     resolve_without_escalation, delete_ticket
+    AUDIT        all_actions
+  }
+}
+
+// ===================================================================
+// COOPERATIVE INTELLIGENCE ROUTER — tiered support routing
+// ===================================================================
+
+ROUTER support_router_logic {
+  DESCRIPTION "Three-tier support router: FAQ -> Specialist -> Escalation"
+
+  TIER 1 faq {
+    haiku: anthropic "claude-haiku-4-5-20251001" {
+      STRENGTHS   general, faq, billing, account
+      COST        0.025
+      CONTEXT     200000
+      DEFAULT
+    }
+  }
+
+  TIER 2 specialist {
+    sonnet: anthropic "claude-sonnet-4-20250514" {
+      STRENGTHS   technical, analysis, complex_billing, policy
+      COST        0.3
+      CONTEXT     200000
+      DEFAULT
+    }
+    gpt4o: openai "gpt-4o" {
+      STRENGTHS   technical, reasoning, edge_cases
+      COST        0.25
+      CONTEXT     128000
+    }
+
+    CIRCUIT_BREAKER {
+      THRESHOLD  0.3
+      WINDOW     "120s"
+      FALLBACK   3
+    }
+  }
+
+  TIER 3 escalation {
+    sonnet_escalation: anthropic "claude-sonnet-4-20250514" {
+      STRENGTHS   legal, fraud, critical, sensitive
+      COST        0.3
+      CONTEXT     200000
+      DEFAULT
+    }
+  }
+
+  TASK_TYPES    faq, billing, technical, account, legal, fraud, policy, general
+  MOSH_PIT      2
+  CALIBRATION   true
+}
+
+// ===================================================================
+// AI ACTIONS
+// ===================================================================
+
+// Classify incoming ticket priority and route tier recommendation
+ACTION classify_ticket {
+  INPUT  subject: string, body: string
+  OUTPUT priority: string, recommended_tier: number, reasoning: string
+  AI     """You are a support ticket classifier. Analyze the ticket below and return a JSON object with three fields:
+- "priority": one of "low", "medium", "high", "critical"
+- "recommended_tier": 1 (FAQ/simple), 2 (specialist/complex), or 3 (escalation/legal/fraud)
+- "reasoning": one sentence explaining your classification
+
+Classify as "critical" and tier 3 if the ticket mentions: legal action, fraud, unauthorized charges, data breach, or account security compromise.
+Classify as "high" and tier 2 if the ticket requires policy knowledge or technical investigation.
+Classify as "medium" or "low" and tier 1 if the ticket is a common FAQ, billing question, or how-to request.
+
+Subject: {{subject}}
+Body: {{body}}
+
+Return ONLY the JSON object."""
+  STREAM false
+}
+
+// Generate a support response for the given ticket and tier
+ACTION generate_response {
+  INPUT  ticket_id: string, subject: string, body: string, tier: string, priority: string
+  OUTPUT content: string
+  AI     """You are a customer support agent. Your response must be empathetic, specific, and actionable.
+
+Support tier: {{tier}}
+Ticket priority: {{priority}}
+Subject: {{subject}}
+Customer message: {{body}}
+
+Write a professional support response. If this is a tier-3 escalation, acknowledge the severity, apologize sincerely, and confirm that a senior team member will follow up within 2 hours. If this is tier-1 or tier-2, provide a clear answer or next steps.
+
+Response guidelines:
+- Address the customer by acknowledging their specific issue
+- Be concrete — avoid generic "we will look into this" responses
+- End with a clear next step or confirmation"""
+  STREAM true
+}
+
+// ===================================================================
+// PACKET + CHANNEL — typed message bus for ticket routing events
+// ===================================================================
+
+PACKET TicketEvent {
+  DESCRIPTION "Routing event emitted when a ticket changes state"
+  PAYLOAD {
+    ticket_id: string REQUIRED
+    priority:  string REQUIRED
+    tier:      number REQUIRED
+    status:    string REQUIRED
+  }
+}
+
+CHANNEL ticket_channel {
+  DESCRIPTION "Typed message bus for ticket routing and state transitions"
+  PACKET      TicketEvent
+  PROTOCOL    local
+  DIRECTION   outbound
+  RETRY       3
+  TIMEOUT     15000
+  ORDERING    fifo
+}
+
+// ===================================================================
+// TRIGGER — fire routing logic when new tickets arrive on the channel
+// ===================================================================
+
+TRIGGER on_new_ticket {
+  DESCRIPTION "When a ticket routing event arrives, fire the classify-and-route workflow"
+  WHEN {
+    CHANNEL [ticket_channel]
+    PACKET  TicketEvent
+  }
+  FIRES WORKFLOW route_ticket
+  IDEMPOTENT true
+}
+
+// ===================================================================
+// WORKFLOW — classify then respond
+// ===================================================================
+
+WORKFLOW route_ticket {
+  STEP classify {
+    ACTION  classify_ticket
+    ON_FAIL stop
+  }
+  STEP respond {
+    ACTION  generate_response
+    ON_FAIL retry
+  }
+}
+
+// ===================================================================
+// VIEWS
+// ===================================================================
+
+VIEW TicketList {
+  ENTITY  Ticket
+  LAYOUT  table
+  ACTIONS create, delete
+  FIELDS  subject, status, priority, created_at
+  TITLE   "Support Tickets"
+}
+
+VIEW TicketDetail {
+  ENTITY  Ticket
+  LAYOUT  detail
+  TITLE   "Ticket Detail"
+}
+
+VIEW ResponseList {
+  ENTITY  Response
+  LAYOUT  table
+  ACTIONS create, delete
+  FIELDS  tier, content, created_at
+  TITLE   "Responses"
+}
+
+// ===================================================================
+// LOGGING
+// ===================================================================
+
+LOG {
+  LEVEL   info
+  TARGET  both
+  PATH    "logs/support.log"
+  ROTATE  "daily"
+}
+
+// ===================================================================
+// TESTS
+// ===================================================================
+
+TEST ticket_created {
+  GIVEN Ticket { subject: "Cannot log in", body: "I get an error 403 when I try to log in to my account." }
+  EXPECT create -> id IS NOT NULL
+  EXPECT create -> subject == "Cannot log in"
+  EXPECT create -> status == "open"
+  EXPECT create -> priority == "medium"
+}
+
+TEST response_belongs_to_ticket {
+  GIVEN Ticket { subject: "Billing question", body: "Why was I charged twice this month?" }
+  GIVEN Response { content: "We are looking into your billing.", tier: "faq", BELONGS_TO Ticket }
+  EXPECT create -> id IS NOT NULL
+  EXPECT create -> tier == "faq"
+}
+
+TEST critical_ticket_defaults {
+  GIVEN Ticket { subject: "Unauthorized charge — possible fraud", body: "Someone charged my card without my permission.", priority: "critical" }
+  EXPECT create -> id IS NOT NULL
+  EXPECT create -> priority == "critical"
+}

@@ -1,0 +1,199 @@
+// document_rag.agi
+// Document RAG — Agicore DSL Example 06
+//
+// Ingest documents into session-based knowledge stores. Retrieve grounded
+// context on demand. AI answers are always traceable to a source document.
+// No hallucination without a paper trail.
+//
+// Declarations: APP, ENTITY, AI_SERVICE, ACTION, SESSION, CHANNEL, PACKET,
+//               VIEW, LOG, TEST
+// Status: STUB — session/channel/packet layer shaped
+
+APP document_rag {
+  TITLE  "Document RAG"
+  WINDOW 1300x850 frameless
+  DB     document_rag.db
+  THEME  dark
+}
+
+// ===================================================================
+// AI SERVICE
+// ===================================================================
+
+AI_SERVICE {
+  PROVIDERS  anthropic
+  KEYS_FILE  "%APPDATA%/DocumentRAG/api-keys.json"
+  DEFAULT    anthropic
+  STREAMING  true
+  MODELS {
+    anthropic  "claude-sonnet-4-20250514"  LABEL "Claude Sonnet 4"  DEFAULT
+    anthropic  "claude-haiku-4-5-20251001" LABEL "Claude Haiku 4.5"
+  }
+}
+
+// ===================================================================
+// DATA MODELS
+// ===================================================================
+
+ENTITY KnowledgeBase {
+  name:        string REQUIRED
+  description: string
+  TIMESTAMPS
+}
+
+ENTITY Document {
+  title:    string REQUIRED
+  content:  string REQUIRED
+  source:   string
+  BELONGS_TO KnowledgeBase
+  TIMESTAMPS
+}
+
+ENTITY Query {
+  question:  string REQUIRED
+  answer:    string
+  sources:   json = []
+  BELONGS_TO KnowledgeBase
+  TIMESTAMPS
+}
+
+// ===================================================================
+// SESSION — semantic operating modes for retrieval contexts
+// ===================================================================
+
+SESSION retrieval_session {
+  DESCRIPTION "Active retrieval context: holds the current knowledge base and query history"
+  MEMORY {
+    active_kb:     string
+    recent_queries: json
+    context_window: json
+  }
+}
+
+// ===================================================================
+// PACKET + CHANNEL — typed retrieval request/response bus
+// ===================================================================
+
+PACKET RetrievalRequest {
+  DESCRIPTION "A query dispatched into the retrieval pipeline"
+  PAYLOAD {
+    query_id:   string REQUIRED
+    question:   string REQUIRED
+    kb_id:      string REQUIRED
+    max_chunks: number
+  }
+}
+
+PACKET RetrievalResult {
+  DESCRIPTION "Grounded answer returned from the retrieval pipeline"
+  PAYLOAD {
+    query_id:  string REQUIRED
+    answer:    string REQUIRED
+    sources:   json REQUIRED
+    grounded:  bool REQUIRED
+  }
+}
+
+CHANNEL retrieval_pipeline {
+  DESCRIPTION "Typed channel connecting query intake to retrieval and answer generation"
+  PACKET      RetrievalRequest
+  PROTOCOL    local
+  DIRECTION   bidirectional
+  RETRY       2
+  TIMEOUT     30000
+  ORDERING    fifo
+}
+
+// ===================================================================
+// AI ACTIONS
+// ===================================================================
+
+// Ingest a document: chunk it and index into the knowledge base
+ACTION ingest_document {
+  INPUT  document_id: string, title: string, content: string
+  OUTPUT chunks_indexed: number, ok: bool
+  AI     """You are a document indexer. Given the document below, identify the 5-10 most information-dense passages that would be useful to retrieve when answering questions. Return a JSON array where each element has: chunk (the passage text), keywords (array of key terms), importance (0-1 float).
+
+Title: {{title}}
+Content: {{content}}
+
+Return ONLY the JSON array."""
+  STREAM false
+}
+
+// Retrieve relevant chunks and generate a grounded answer
+ACTION answer_question {
+  INPUT  question: string, documents: json, kb_name: string
+  OUTPUT answer: string, sources: json
+  AI     """You are a research assistant answering questions from a specific knowledge base.
+
+Knowledge Base: {{kb_name}}
+
+Available documents and excerpts:
+{{documents}}
+
+Question: {{question}}
+
+Answer the question using ONLY the information in the provided documents. If the answer is not in the documents, say so explicitly — do not invent information. For each claim in your answer, note which document it came from.
+
+Return a JSON object with:
+- "answer": your grounded answer in markdown
+- "sources": array of document titles you drew from"""
+  STREAM true
+}
+
+// ===================================================================
+// VIEWS
+// ===================================================================
+
+VIEW KnowledgeBaseList {
+  ENTITY  KnowledgeBase
+  LAYOUT  table
+  ACTIONS create, delete
+  FIELDS  name, description, created_at
+  TITLE   "Knowledge Bases"
+}
+
+VIEW DocumentList {
+  ENTITY  Document
+  LAYOUT  table
+  ACTIONS create, delete
+  FIELDS  title, source, created_at
+  TITLE   "Documents"
+}
+
+VIEW QueryHistory {
+  ENTITY  Query
+  LAYOUT  table
+  ACTIONS create, delete
+  FIELDS  question, created_at
+  TITLE   "Query History"
+}
+
+// ===================================================================
+// LOGGING
+// ===================================================================
+
+LOG {
+  LEVEL   info
+  TARGET  file
+  PATH    "logs/rag.log"
+  ROTATE  "weekly"
+}
+
+// ===================================================================
+// TESTS
+// ===================================================================
+
+TEST kb_created {
+  GIVEN KnowledgeBase { name: "Product Docs", description: "Customer-facing product documentation" }
+  EXPECT create -> id IS NOT NULL
+  EXPECT create -> name == "Product Docs"
+}
+
+TEST document_indexed {
+  GIVEN KnowledgeBase { name: "Internal Wiki", description: "Internal knowledge base" }
+  GIVEN Document { title: "Onboarding Guide", content: "Welcome to the company...", BELONGS_TO KnowledgeBase }
+  EXPECT create -> id IS NOT NULL
+  EXPECT create -> title == "Onboarding Guide"
+}
