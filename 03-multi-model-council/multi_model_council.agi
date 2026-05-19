@@ -2,11 +2,11 @@
 // Multi-Model Council — Agicore DSL Example 03
 //
 // A council pattern: broadcast a question to multiple models simultaneously,
-// collect independent answers, then synthesize the best response.
-// Uses NBVE to promote the synthesis model only when quality metrics are met.
+// collect independent answers, then synthesize the best combined response.
+// NBVE shadow-tests the synthesis model against SPC quality thresholds before
+// promoting it — so you never upgrade your council's brain on faith alone.
 //
-// Declarations: APP, ENTITY, AI_SERVICE, NBVE, ACTION, VIEW, TEST, LOG
-// Status: STUB — fully shaped, synthesis action pending implementation
+// Declarations: APP, ENTITY, AI_SERVICE, NBVE, ACTION, WORKFLOW, VIEW, LOG, TEST
 
 APP multi_model_council {
   TITLE  "Multi-Model Council"
@@ -33,12 +33,12 @@ AI_SERVICE {
 }
 
 // ===================================================================
-// NBVE — no-blind-version-elevation for the synthesis model
-// Promotes a new synthesis model only after SPC quality gates pass
+// NBVE — shadow-test the synthesis model before promotion
+// Never blindly upgrade what produces your final answer
 // ===================================================================
 
-NBVE council_nbve {
-  DESCRIPTION  "Promotes synthesis model candidates only after quality thresholds are met"
+NBVE council_synthesis_nbve {
+  DESCRIPTION  "Shadow-tests GPT-4o as synthesis model alongside Claude Sonnet before promoting"
   PRODUCTION   "claude-sonnet-4-20250514"
   SHADOW       "gpt-4o"
   SPC {
@@ -48,7 +48,7 @@ NBVE council_nbve {
     STABILITY_THRESHOLD  0.90
     DEFECT_RATE_MAX      0.05
   }
-  METRICS    quality_score, user_rating, synthesis_coherence
+  METRICS    quality_score, coherence_score, user_rating
   PROMOTION  manual
   FALLBACK   production
 }
@@ -60,6 +60,7 @@ NBVE council_nbve {
 ENTITY Question {
   text:    string REQUIRED
   context: string
+  domain:  string = "general"
   status:  string = "pending"
   TIMESTAMPS
 }
@@ -68,14 +69,18 @@ ENTITY CouncilResponse {
   model:    string REQUIRED
   provider: string REQUIRED
   content:  string REQUIRED
+  quality:  number
   BELONGS_TO Question
   TIMESTAMPS
 }
 
 ENTITY Synthesis {
-  content:       string REQUIRED
-  model_count:   number REQUIRED
+  content:         string REQUIRED
+  model_count:     number REQUIRED
   synthesis_model: string REQUIRED
+  confidence:      number
+  agreements:      json = []
+  disagreements:   json = []
   BELONGS_TO Question
   TIMESTAMPS
 }
@@ -84,32 +89,105 @@ ENTITY Synthesis {
 // AI ACTIONS
 // ===================================================================
 
-// TODO: implement broadcast action — sends question to all council models concurrently
-ACTION broadcast_question {
-  INPUT  question_id: string, text: string, context: string, model_ids: json
-  OUTPUT responses: json
-  // AI prompt: fan out to each model, collect independent answers
-  // Each response is stored as a CouncilResponse entity
+// Ask a single council member — called once per model
+ACTION ask_council_member {
+  INPUT  question_id: string, text: string, context: string, domain: string, model_label: string
+  OUTPUT content: string, key_points: json
+  AI     """You are a council member providing your independent expert analysis.
+
+Domain: {{domain}}
+Context: {{context}}
+Question: {{text}}
+
+Give your best, most thorough answer. Do not hedge excessively — commit to positions where you have strong reasoning. Structure your response with:
+1. Direct answer (1-2 sentences)
+2. Reasoning (the why behind your answer)
+3. Key considerations (what factors matter most here)
+4. Caveats (where you are genuinely uncertain)
+
+Return a JSON object with:
+- "content": your full answer as markdown
+- "key_points": array of 3-5 one-sentence strings capturing your most important claims"""
+  STREAM false
 }
 
-// TODO: implement synthesis action — reads all responses, produces best combined answer
+// Rate one council member's response for quality
+ACTION rate_response {
+  INPUT  question: string, response_content: string, key_points: json
+  OUTPUT quality_score: number, strengths: json, weaknesses: json
+  AI     """You are a quality evaluator assessing a council member's response.
+
+Original Question: {{question}}
+
+Response to evaluate:
+{{response_content}}
+
+Key points claimed: {{key_points}}
+
+Rate the response on:
+- Accuracy: Is the reasoning sound and claims defensible?
+- Completeness: Does it address the full question?
+- Clarity: Is it well-organized and easy to follow?
+- Insight: Does it offer non-obvious value beyond the obvious answer?
+
+Return a JSON object with:
+- "quality_score": weighted average 0.0-1.0
+- "strengths": array of 2-3 one-sentence strengths
+- "weaknesses": array of 1-2 one-sentence weaknesses (empty if none)"""
+  STREAM false
+}
+
+// Synthesize all council responses into one superior answer
 ACTION synthesize_council {
-  INPUT  question_id: string, responses: json
-  OUTPUT synthesis: string, confidence: number
-  AI     """You are a synthesis model in a multi-model council. Multiple AI models have independently answered the same question. Your job is to synthesize their responses into the single best answer — taking the strongest reasoning from each, noting disagreements, and producing a coherent, authoritative answer.
+  INPUT  question: string, context: string, responses: json
+  OUTPUT content: string, confidence: number, agreements: json, disagreements: json
+  AI     """You are the synthesis model in a multi-model council. Multiple independent AI models have answered the same question. Your job is to produce a single answer that is better than any individual response — not by averaging, but by taking the strongest reasoning from each while resolving contradictions.
 
 Question: {{question}}
+Context: {{context}}
 
-Council responses (JSON):
+Council responses (JSON array with content and key_points per model):
 {{responses}}
 
-Produce a synthesis that:
-1. Captures the consensus where models agree
-2. Notes significant disagreements and explains which view is better supported
-3. Does not simply average or concatenate — produce genuinely better reasoning
+Your synthesis must:
+1. Identify where the council agrees — these are high-confidence claims
+2. Identify where the council disagrees — analyze which position has stronger evidence
+3. Produce a final answer that synthesizes the best reasoning
+4. Be more complete and better-reasoned than any single response
 
-Return a JSON object with "synthesis" (string) and "confidence" (float 0-1)."""
+Return a JSON object with:
+- "content": final synthesized answer in markdown
+- "confidence": 0.0-1.0 (high when models agree, lower when significant disagreement)
+- "agreements": array of claims where all/most models agreed
+- "disagreements": array of objects with {claim, positions, resolution}"""
   STREAM true
+}
+
+// ===================================================================
+// WORKFLOW — broadcast → rate → synthesize
+// ===================================================================
+
+WORKFLOW council_workflow {
+  STEP ask_member_1 {
+    ACTION  ask_council_member
+    ON_FAIL skip
+  }
+  STEP ask_member_2 {
+    ACTION  ask_council_member
+    ON_FAIL skip
+  }
+  STEP ask_member_3 {
+    ACTION  ask_council_member
+    ON_FAIL skip
+  }
+  STEP rate_responses {
+    ACTION  rate_response
+    ON_FAIL skip
+  }
+  STEP synthesize {
+    ACTION  synthesize_council
+    ON_FAIL stop
+  }
 }
 
 // ===================================================================
@@ -120,15 +198,14 @@ VIEW QuestionList {
   ENTITY  Question
   LAYOUT  table
   ACTIONS create, delete
-  FIELDS  text, status, created_at
+  FIELDS  text, domain, status, created_at
   TITLE   "Council Questions"
 }
 
 VIEW CouncilResponseList {
   ENTITY  CouncilResponse
   LAYOUT  table
-  ACTIONS create, delete
-  FIELDS  model, provider, created_at
+  FIELDS  model, provider, quality, created_at
   TITLE   "Model Responses"
 }
 
@@ -154,14 +231,22 @@ LOG {
 // ===================================================================
 
 TEST question_created {
-  GIVEN Question { text: "What are the tradeoffs between eventual and strong consistency?", context: "distributed systems design" }
+  GIVEN Question { text: "What are the tradeoffs between eventual and strong consistency?", context: "distributed systems design", domain: "engineering" }
   EXPECT create -> id IS NOT NULL
   EXPECT create -> status == "pending"
+  EXPECT create -> domain == "engineering"
 }
 
 TEST response_belongs_to_question {
-  GIVEN Question { text: "Explain the CAP theorem.", context: "" }
-  GIVEN CouncilResponse { model: "claude-sonnet-4-20250514", provider: "anthropic", content: "The CAP theorem states...", BELONGS_TO Question }
+  GIVEN Question { text: "Explain the CAP theorem.", context: "", domain: "engineering" }
+  GIVEN CouncilResponse { model: "claude-sonnet-4-20250514", provider: "anthropic", content: "The CAP theorem states that a distributed system cannot simultaneously guarantee consistency, availability, and partition tolerance.", BELONGS_TO Question }
   EXPECT create -> id IS NOT NULL
   EXPECT create -> provider == "anthropic"
+}
+
+TEST synthesis_belongs_to_question {
+  GIVEN Question { text: "What is the best architecture for a high-traffic API?", context: "SaaS product with 1M users", domain: "engineering" }
+  GIVEN Synthesis { content: "A horizontally scaled stateless API...", model_count: 3, synthesis_model: "claude-sonnet-4-20250514", confidence: 88, BELONGS_TO Question }
+  EXPECT create -> id IS NOT NULL
+  EXPECT create -> model_count == 3
 }

@@ -1,12 +1,13 @@
 // automated_qa.agi
 // Automated QA — Agicore DSL Example 04
 //
-// An AI-powered quality assurance system that evaluates generated content
-// against defined criteria using SPC-tracked quality control, with a
-// workflow that routes low-quality outputs back for revision.
+// AI-powered quality assurance system. Evaluates generated content against
+// defined criteria using structured rubrics, SPC-tracked pass/fail rates,
+// and a revision workflow that routes low-quality output back for improvement.
+// The QC declaration applies the same statistical process control Toyota uses
+// in manufacturing — to AI output quality.
 //
-// Declarations: APP, ENTITY, AI_SERVICE, QC, ACTION, WORKFLOW, VIEW, TEST, LOG
-// Status: STUB — key patterns shaped, QC integration pending
+// Declarations: APP, TYPE, ENTITY, AI_SERVICE, QC, ACTION, WORKFLOW, VIEW, LOG, TEST
 
 APP automated_qa {
   TITLE  "Automated QA"
@@ -16,14 +17,14 @@ APP automated_qa {
 }
 
 // ===================================================================
-// AI SERVICE
+// AI SERVICE — two models: fast for review, capable for revision
 // ===================================================================
 
 AI_SERVICE {
   PROVIDERS  anthropic, openai
   KEYS_FILE  "%APPDATA%/AutomatedQA/api-keys.json"
   DEFAULT    anthropic
-  STREAMING  false
+  STREAMING  true
   MODELS {
     anthropic  "claude-sonnet-4-20250514"  LABEL "Claude Sonnet 4"  DEFAULT
     openai     "gpt-4o-mini"               LABEL "GPT-4o Mini"      DEFAULT
@@ -31,10 +32,17 @@ AI_SERVICE {
 }
 
 // ===================================================================
-// QUALITY CONTROL — SPC-tracked pass/fail rates
+// TYPE ALIASES
 // ===================================================================
 
-QC content_quality {
+TYPE QAStatus      = "pending" | "pass" | "fail" | "revised" | "approved"
+TYPE SeverityLevel = "minor" | "major" | "critical" | "blocker"
+
+// ===================================================================
+// QUALITY CONTROL — SPC tracking for AI output pass rates
+// ===================================================================
+
+QC output_quality {
   YOUNG_THRESHOLD     30
   MATURING_THRESHOLD  150
   YOUNG_PASS_RATE     0.80
@@ -47,19 +55,40 @@ QC content_quality {
 // DATA MODELS
 // ===================================================================
 
-ENTITY ContentItem {
+ENTITY Artifact {
   title:    string REQUIRED
   content:  string REQUIRED
+  category: string = "general"
   status:   string = "pending"
   revision: number = 0
   TIMESTAMPS
 }
 
+ENTITY QARubric {
+  name:        string REQUIRED
+  description: string REQUIRED
+  criteria:    json = []
+  pass_threshold: number = 75
+  TIMESTAMPS
+}
+
 ENTITY QAResult {
-  passed:   bool REQUIRED
-  score:    number REQUIRED
-  feedback: string REQUIRED
-  BELONGS_TO ContentItem
+  passed:         bool REQUIRED
+  overall_score:  number REQUIRED
+  dimension_scores: json = []
+  issues:         json = []
+  revision_notes: string
+  reviewer_model: string REQUIRED
+  BELONGS_TO Artifact
+  TIMESTAMPS
+}
+
+ENTITY RevisionNote {
+  dimension:  string REQUIRED
+  severity:   string REQUIRED
+  issue:      string REQUIRED
+  suggestion: string REQUIRED
+  BELONGS_TO QAResult
   TIMESTAMPS
 }
 
@@ -67,57 +96,97 @@ ENTITY QAResult {
 // AI ACTIONS
 // ===================================================================
 
-// TODO: generate content from a brief
-ACTION generate_content {
-  INPUT  title: string, brief: string
-  OUTPUT content: string
-  AI     "Generate professional content based on the title and brief provided. Title: {{title}}. Brief: {{brief}}"
+// Review an artifact against a rubric — produces structured QA result
+ACTION review_artifact {
+  INPUT  artifact_id: string, title: string, content: string, category: string, rubric: json
+  OUTPUT passed: bool, overall_score: number, dimension_scores: json, issues: json, revision_notes: string
+  AI     """You are a quality assurance reviewer evaluating a content artifact.
+
+Artifact Title: {{title}}
+Category: {{category}}
+
+Content to review:
+{{content}}
+
+Evaluation rubric:
+{{rubric}}
+
+Evaluate the artifact against each rubric criterion. For each criterion, assign a score 0-100 and identify specific issues.
+
+Return a JSON object with:
+- "passed": true if overall_score >= rubric.pass_threshold, false otherwise
+- "overall_score": weighted average across all criteria (0-100)
+- "dimension_scores": array of {criterion, score, rationale} objects
+- "issues": array of {dimension, severity, issue, suggestion} where severity is "minor"|"major"|"critical"|"blocker"
+- "revision_notes": one paragraph summarizing what must change for this to pass (empty string if passed)"""
   STREAM false
 }
 
-// TODO: evaluate content against quality criteria
-ACTION evaluate_content {
-  INPUT  content: string, criteria: string
-  OUTPUT passed: bool, score: number, feedback: string
-  AI     """Evaluate the following content against the given quality criteria. Return a JSON object with:
-- "passed": true if score >= 0.75, false otherwise
-- "score": float 0.0 to 1.0
-- "feedback": one paragraph explaining the score
+// Revise an artifact based on QA feedback
+ACTION revise_artifact {
+  INPUT  title: string, content: string, issues: json, revision_notes: string, category: string
+  OUTPUT content: string, changes_made: json
+  AI     """You are revising a content artifact based on QA reviewer feedback.
 
-Criteria: {{criteria}}
+Artifact Title: {{title}}
+Category: {{category}}
 
-Content: {{content}}"""
-  STREAM false
+Original content:
+{{content}}
+
+QA issues to address:
+{{issues}}
+
+Reviewer notes:
+{{revision_notes}}
+
+Rewrite the artifact to address ALL issues, especially any marked major, critical, or blocker. Preserve everything that was good. Do not add padding or filler — only improve.
+
+Return a JSON object with:
+- "content": the complete revised artifact text
+- "changes_made": array of one-sentence descriptions of what changed"""
+  STREAM true
 }
 
-// TODO: revise content based on QA feedback
-ACTION revise_content {
-  INPUT  content: string, feedback: string
-  OUTPUT revised_content: string
-  AI     """Revise the content below based on the quality feedback provided. Preserve the original intent and structure while addressing the specific issues raised.
+// Final approval gate — used after revision
+ACTION approve_artifact {
+  INPUT  title: string, original_content: string, revised_content: string, original_issues: json
+  OUTPUT approved: bool, remaining_issues: json, approval_note: string
+  AI     """You are doing a final approval check on a revised artifact.
 
-Feedback: {{feedback}}
+Title: {{title}}
 
-Original content: {{content}}"""
+Original issues that were flagged:
+{{original_issues}}
+
+Revised content:
+{{revised_content}}
+
+Check whether all critical and blocker issues from the original review have been resolved. Minor issues can remain if they do not affect the artifact's core quality.
+
+Return a JSON object with:
+- "approved": true if all critical/blocker issues resolved
+- "remaining_issues": array of any still-unresolved issues (should be empty for approval)
+- "approval_note": one sentence explaining the approval or rejection decision"""
   STREAM false
 }
 
 // ===================================================================
-// WORKFLOW — generate, evaluate, revise if needed
+// WORKFLOW — review → revise if failed → approve
 // ===================================================================
 
 WORKFLOW qa_workflow {
-  STEP generate {
-    ACTION  generate_content
-    ON_FAIL stop
-  }
-  STEP evaluate {
-    ACTION  evaluate_content
+  STEP review {
+    ACTION  review_artifact
     ON_FAIL stop
   }
   STEP revise {
-    ACTION  revise_content
+    ACTION  revise_artifact
     ON_FAIL skip
+  }
+  STEP approve {
+    ACTION  approve_artifact
+    ON_FAIL stop
   }
 }
 
@@ -125,20 +194,33 @@ WORKFLOW qa_workflow {
 // VIEWS
 // ===================================================================
 
-VIEW ContentList {
-  ENTITY  ContentItem
+VIEW ArtifactList {
+  ENTITY  Artifact
   LAYOUT  table
   ACTIONS create, delete
-  FIELDS  title, status, revision, created_at
-  TITLE   "Content Items"
+  FIELDS  title, category, status, revision, created_at
+  TITLE   "Artifacts"
+}
+
+VIEW QARubricList {
+  ENTITY  QARubric
+  LAYOUT  table
+  ACTIONS create, delete
+  FIELDS  name, pass_threshold, created_at
+  TITLE   "QA Rubrics"
 }
 
 VIEW QAResultList {
   ENTITY  QAResult
   LAYOUT  table
-  ACTIONS create, delete
-  FIELDS  passed, score, created_at
+  FIELDS  passed, overall_score, reviewer_model, created_at
   TITLE   "QA Results"
+}
+
+VIEW ArtifactEditor {
+  ENTITY  Artifact
+  LAYOUT  document_editor
+  TITLE   "Artifact Editor"
 }
 
 // ===================================================================
@@ -148,23 +230,41 @@ VIEW QAResultList {
 LOG {
   LEVEL   info
   TARGET  file
-  PATH    "logs/qa.log"
-  ROTATE  "daily"
+  PATH    "logs/automated_qa.log"
+  ROTATE  "weekly"
+}
+
+// ===================================================================
+// SEED DATA — a starter rubric so the app is useful on first launch
+// ===================================================================
+
+SEED QARubric {
+  name: "General Content Quality"
+  description: "Standard rubric for evaluating AI-generated content"
+  pass_threshold: 75
 }
 
 // ===================================================================
 // TESTS
 // ===================================================================
 
-TEST content_created {
-  GIVEN ContentItem { title: "Product Launch Email", content: "We are excited to announce...", status: "pending" }
+TEST artifact_created {
+  GIVEN Artifact { title: "Product Launch Announcement", content: "We are excited to announce...", category: "marketing" }
   EXPECT create -> id IS NOT NULL
+  EXPECT create -> status == "pending"
   EXPECT create -> revision == 0
 }
 
-TEST qa_result_belongs_to_content {
-  GIVEN ContentItem { title: "Blog Post", content: "In today's fast-moving landscape..." }
-  GIVEN QAResult { passed: true, score: 85, feedback: "Clear and well-structured.", BELONGS_TO ContentItem }
+TEST qa_result_belongs_to_artifact {
+  GIVEN Artifact { title: "Technical Specification v1", content: "This document describes...", category: "technical" }
+  GIVEN QAResult { passed: false, overall_score: 62, reviewer_model: "claude-sonnet-4-20250514", revision_notes: "Missing error handling section.", BELONGS_TO Artifact }
   EXPECT create -> id IS NOT NULL
-  EXPECT create -> score > 80
+  EXPECT create -> passed == false
+  EXPECT create -> overall_score == 62
+}
+
+TEST rubric_created {
+  GIVEN QARubric { name: "API Documentation", description: "Rubric for REST API documentation quality", pass_threshold: 80 }
+  EXPECT create -> id IS NOT NULL
+  EXPECT create -> pass_threshold == 80
 }
