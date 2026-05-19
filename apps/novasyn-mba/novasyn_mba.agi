@@ -95,13 +95,29 @@ ENTITY Business {
   ORDER name ASC
 }
 
-## TODO(agicore): COMPILER state machine for Business.stage
-## Desired transition rules (see DESIGN.md > Business Lifecycle):
-##   Idea -> Validated  REQUIRES StrategicPosition.value_proposition + target_market + 1 SalesContact
-##   Validated -> Building  REQUIRES SalesContact with notes indicating customer conversation
-##   Building -> Active  REQUIRES FinancialSnapshot.revenue > 0 OR 3 SalesContact.stage = closed_won
-##   Active -> Scaling  REQUIRES 2+ FinancialSnapshot records AND OperationsAudit.overall_score < 20
-## For now, stage transitions are handled as IMPL actions with manual validation.
+## ---------------------------------------------------------------------------
+## STAGE MACHINE — Business Lifecycle Gating
+## ---------------------------------------------------------------------------
+
+STAGES Business.stage {
+  TRANSITION "Idea" -> "Validated" {
+    REQUIRE StrategicPosition.value_proposition IS NOT NULL
+    REQUIRE StrategicPosition.target_market IS NOT NULL
+    REQUIRE SalesContact COUNT >= 1
+  }
+  TRANSITION "Validated" -> "Building" {
+    REQUIRE SalesContact.notes IS NOT NULL
+  }
+  TRANSITION "Building" -> "Active" {
+    MATCH any
+    REQUIRE FinancialSnapshot.revenue > 0
+    REQUIRE SalesContact COUNT >= 3 WHERE stage = "closed_won"
+  }
+  TRANSITION "Active" -> "Scaling" {
+    REQUIRE FinancialSnapshot COUNT >= 2
+    REQUIRE OperationsAudit.overall_score < 20
+  }
+}
 
 ENTITY StrategicPosition {
   FIELDS {
@@ -986,19 +1002,17 @@ VIEW unit_economics_dashboard {
   ACTIONS [calculate_ltv_cac]
 }
 
-## TODO(agicore): kanban LAYOUT needed for these two views
-## Desired: LAYOUT kanban GROUP_BY status
-## For now: list layout with manual status column sorting
-
 VIEW content_pipeline {
   ENTITY ContentPipelineItem
-  LAYOUT list
+  LAYOUT kanban
+  GROUP_BY status
   ACTIONS []
 }
 
 VIEW sales_pipeline {
   ENTITY SalesContact
-  LAYOUT list
+  LAYOUT kanban
+  GROUP_BY stage
   ACTIONS [sales_advisor]
 }
 
