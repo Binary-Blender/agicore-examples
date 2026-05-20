@@ -1,0 +1,689 @@
+// accelerando_erp.agi
+// Accelerando ERP/CRM
+//
+// A basic but extensible ERP + CRM for AI-native organizations.
+// Compiles to a multi-tenant Axum web service + React frontend + PostgreSQL.
+// Deploy on any Docker host or cloud provider with a single docker-compose up.
+//
+// Designed to be paired with the Accelerando OIE:
+//   Business action → EMIT event → oie_telemetry_out CHANNEL → OIE ingestion
+//   The OIE then reasons over the activity stream to surface organizational intelligence.
+//
+// This is the data side.  The OIE (accelerando_oie.agi) is the intelligence side.
+// Together: two .agi files, one docker-compose.yml, complete AI-native business platform.
+//
+// CRM module:     Customer, Contact → Quote pipeline → Invoice
+// ERP module:     Vendor management, Product catalog, Invoice processing
+// Service module: ServiceTicket triage, escalation, and resolution
+//
+// Extensibility points (each module is one ENTITY + STAGES + VIEW away):
+//   - PurchaseOrder, GoodsReceipt    (procurement)
+//   - Project, Milestone, TimeEntry  (project management)
+//   - Lead, Campaign, LeadScore      (marketing automation)
+//   - PayrollRun, ExpenseClaim       (HR)
+
+APP accelerando_erp {
+  TITLE "Accelerando ERP"
+  DB    accelerando_erp
+  PORT  3000
+}
+
+TARGET web {
+  RUNTIME  axum
+  FRONTEND react
+  DEPLOY   docker
+}
+
+AUTH {
+  STRATEGY jwt
+  EXPIRY   "8h"
+  REFRESH  true
+}
+
+TENANT {
+  MODEL   row_level
+  ISOLATE strict
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// CRM — Customers and Contacts
+// ═══════════════════════════════════════════════════════════════════════════════
+
+ENTITY Customer {
+  tenant_id:  string REQUIRED
+  name:       string REQUIRED
+  email:      string
+  phone:      string
+  company:    string
+  tier:       string = "standard"
+  active:     bool = true
+  notes:      string
+  TIMESTAMPS
+  CRUD create, read, list, edit, delete
+}
+
+ENTITY Contact {
+  tenant_id:   string REQUIRED
+  customer_id: string REQUIRED
+  name:        string REQUIRED
+  email:       string
+  phone:       string
+  title:       string
+  primary:     bool = false
+  TIMESTAMPS
+  CRUD create, read, list, edit, delete
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// ERP — Vendors, Products, Employees
+// ═══════════════════════════════════════════════════════════════════════════════
+
+ENTITY Vendor {
+  tenant_id:     string REQUIRED
+  name:          string REQUIRED
+  contact_email: string
+  category:      string
+  rating:        float = 3.0
+  active:        bool = true
+  notes:         string
+  TIMESTAMPS
+  CRUD create, read, list, edit, delete
+}
+
+ENTITY Product {
+  tenant_id:  string REQUIRED
+  name:       string REQUIRED
+  sku:        string REQUIRED
+  price:      float REQUIRED
+  stock_qty:  int = 0
+  category:   string
+  active:     bool = true
+  TIMESTAMPS
+  CRUD create, read, list, edit, delete
+}
+
+ENTITY Employee {
+  tenant_id:  string REQUIRED
+  name:       string REQUIRED
+  email:      string REQUIRED
+  role:       string REQUIRED
+  department: string
+  active:     bool = true
+  TIMESTAMPS
+  CRUD create, read, list, edit
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// QUOTES — CRM sales pipeline
+// ═══════════════════════════════════════════════════════════════════════════════
+
+ENTITY Quote {
+  tenant_id:   string REQUIRED
+  customer_id: string REQUIRED
+  employee_id: string
+  total:       float = 0.0
+  status:      string = "draft"
+  valid_until: datetime
+  notes:       string
+  TIMESTAMPS
+  CRUD create, read, list, edit
+}
+
+ENTITY QuoteLineItem {
+  tenant_id:  string REQUIRED
+  quote_id:   string REQUIRED
+  product_id: string REQUIRED
+  qty:        int = 1
+  unit_price: float REQUIRED
+  line_total: float REQUIRED
+  TIMESTAMPS
+  CRUD create, read, list, edit, delete
+}
+
+STAGES Quote.status {
+  TRANSITION "draft" -> "sent" {
+    MATCH any
+    REQUIRE Quote.customer_id IS NOT NULL
+    REQUIRE Quote.total > 0
+  }
+  TRANSITION "sent" -> "accepted" {
+    MATCH any
+    REQUIRE Quote.valid_until IS NOT NULL
+  }
+  TRANSITION "sent" -> "rejected" {
+    MATCH any
+    REQUIRE Quote.notes IS NOT NULL
+  }
+  TRANSITION "sent" -> "expired" {
+    MATCH any
+    REQUIRE Quote.valid_until IS NOT NULL
+  }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// INVOICES — ERP billing and receivables
+// ═══════════════════════════════════════════════════════════════════════════════
+
+ENTITY Invoice {
+  tenant_id:   string REQUIRED
+  customer_id: string REQUIRED
+  quote_id:    string
+  employee_id: string
+  total:       float REQUIRED
+  status:      string = "draft"
+  due_date:    datetime
+  paid_date:   datetime
+  notes:       string
+  TIMESTAMPS
+  CRUD create, read, list, edit
+}
+
+ENTITY InvoiceLineItem {
+  tenant_id:   string REQUIRED
+  invoice_id:  string REQUIRED
+  product_id:  string
+  description: string REQUIRED
+  qty:         int = 1
+  unit_price:  float REQUIRED
+  line_total:  float REQUIRED
+  TIMESTAMPS
+  CRUD create, read, list, edit, delete
+}
+
+STAGES Invoice.status {
+  TRANSITION "draft" -> "submitted" {
+    MATCH any
+    REQUIRE Invoice.customer_id IS NOT NULL
+    REQUIRE Invoice.total > 0
+    REQUIRE Invoice.due_date IS NOT NULL
+  }
+  TRANSITION "submitted" -> "approved" {
+    MATCH any
+    REQUIRE Invoice.employee_id IS NOT NULL
+  }
+  TRANSITION "approved" -> "paid" {
+    MATCH any
+    REQUIRE Invoice.paid_date IS NOT NULL
+  }
+  TRANSITION "submitted" -> "void" {
+    MATCH any
+    REQUIRE Invoice.notes IS NOT NULL
+  }
+  TRANSITION "approved" -> "void" {
+    MATCH any
+    REQUIRE Invoice.notes IS NOT NULL
+  }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// SERVICE — CRM support tickets
+// ═══════════════════════════════════════════════════════════════════════════════
+
+ENTITY ServiceTicket {
+  tenant_id:   string REQUIRED
+  customer_id: string REQUIRED
+  assignee_id: string
+  subject:     string REQUIRED
+  description: string
+  status:      string = "new"
+  priority:    string = "normal"
+  resolved_at: datetime
+  TIMESTAMPS
+  CRUD create, read, list, edit
+}
+
+STAGES ServiceTicket.status {
+  TRANSITION "new" -> "in_progress" {
+    MATCH any
+    REQUIRE ServiceTicket.assignee_id IS NOT NULL
+  }
+  TRANSITION "in_progress" -> "escalated" {
+    MATCH any
+    REQUIRE ServiceTicket.priority IS NOT NULL
+  }
+  TRANSITION "in_progress" -> "resolved" {
+    MATCH any
+    REQUIRE ServiceTicket.resolved_at IS NOT NULL
+  }
+  TRANSITION "escalated" -> "resolved" {
+    MATCH any
+    REQUIRE ServiceTicket.resolved_at IS NOT NULL
+  }
+  TRANSITION "resolved" -> "closed" {
+    MATCH any
+    REQUIRE ServiceTicket.resolved_at IS NOT NULL
+  }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// TELEMETRY — outbound stream to Accelerando OIE
+// Every significant business action emits a TelemetryPacket.
+// The OIE ingests these via its matching telemetry_ingress CHANNEL.
+// ═══════════════════════════════════════════════════════════════════════════════
+
+PACKET TelemetryPacket {
+  DESCRIPTION "Normalized ERP/CRM activity record for OIE ingestion"
+
+  PAYLOAD {
+    source:         string REQUIRED
+    event_type:     string REQUIRED
+    user_id:        string
+    tenant_id:      string REQUIRED
+    success:        bool   REQUIRED
+    duration_ms:    number
+    correlation_id: string
+  }
+
+  METADATA {
+    PROVENANCE    true
+    LINEAGE       false
+    SIGNATURES    false
+    ADMISSIBILITY true
+    TTL           90
+  }
+
+  VALIDATION {
+    has_source:  source IS NOT NULL
+    has_event:   event_type IS NOT NULL
+    has_tenant:  tenant_id IS NOT NULL
+  }
+}
+
+CHANNEL oie_telemetry_out {
+  DESCRIPTION "Outbound telemetry — every ERP/CRM action feeds the Accelerando OIE intelligence layer"
+  PROTOCOL    local
+  DIRECTION   outbound
+  PACKET      TelemetryPacket
+  RETRY       3
+  TIMEOUT     5000
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// ACTIONS
+// EMIT blocks declare the telemetry event shape for each action.
+// The OIE's insight seeds (invoice approval bottleneck, service escalation spike)
+// are drawn from exactly these event_type values.
+// ═══════════════════════════════════════════════════════════════════════════════
+
+ACTION CreateInvoice {
+  INPUT   customer_id: string, total: float, due_date: string, notes: string
+  OUTPUT  invoice: Invoice
+  AI      "Draft a professional invoice summary for customer {{customer_id}} totalling {{total}} due by {{due_date}}. Include standard NET-30 payment terms and note: {{notes}}"
+  EMIT invoice_created {
+    source:      string,
+    event_type:  string,
+    tenant_id:   string,
+    success:     bool,
+    duration_ms: number
+  }
+}
+
+ACTION ApproveInvoice {
+  INPUT   invoice_id: string, employee_id: string
+  OUTPUT  approved: bool
+  IMPL    "validate invoice status is submitted, record approver, transition to approved"
+  EMIT invoice_approved {
+    source:      string,
+    event_type:  string,
+    tenant_id:   string,
+    success:     bool,
+    duration_ms: number
+  }
+}
+
+ACTION MarkInvoicePaid {
+  INPUT   invoice_id: string, paid_date: string
+  OUTPUT  paid: bool
+  IMPL    "transition invoice to paid, record payment date, trigger receipt"
+  EMIT invoice_paid {
+    source:      string,
+    event_type:  string,
+    tenant_id:   string,
+    success:     bool,
+    duration_ms: number
+  }
+}
+
+ACTION CreateQuote {
+  INPUT   customer_id: string, employee_id: string, valid_days: number
+  OUTPUT  quote: Quote
+  AI      "Generate a professional quote introduction for customer {{customer_id}}. Quote is valid for {{valid_days}} days from today."
+  EMIT quote_created {
+    source:      string,
+    event_type:  string,
+    tenant_id:   string,
+    success:     bool,
+    duration_ms: number
+  }
+}
+
+ACTION ConvertQuoteToInvoice {
+  INPUT   quote_id: string
+  OUTPUT  invoice: Invoice
+  IMPL    "create invoice from accepted quote, copy line items, set due date from preferences, transition quote to accepted"
+  EMIT quote_converted {
+    source:      string,
+    event_type:  string,
+    tenant_id:   string,
+    success:     bool,
+    duration_ms: number
+  }
+}
+
+ACTION CreateServiceRequest {
+  INPUT   customer_id: string, subject: string, description: string, priority: string
+  OUTPUT  ticket: ServiceTicket
+  IMPL    "create service ticket, auto-assign based on department workload, notify assignee"
+  EMIT service_request_created {
+    source:      string,
+    event_type:  string,
+    tenant_id:   string,
+    success:     bool,
+    duration_ms: number
+  }
+}
+
+ACTION UpdateTicketStatus {
+  INPUT   ticket_id: string, new_status: string, notes: string
+  OUTPUT  updated: bool
+  IMPL    "validate status transition via STAGES, update ticket, log change with timestamp"
+  EMIT ticket_status_updated {
+    source:      string,
+    event_type:  string,
+    tenant_id:   string,
+    success:     bool,
+    duration_ms: number
+  }
+}
+
+ACTION EscalateToTier2 {
+  INPUT   ticket_id: string, reason: string
+  OUTPUT  escalated: bool
+  IMPL    "transition ticket to escalated, notify tier-2 team, record escalation reason and timestamp"
+  EMIT ticket_escalated {
+    source:      string,
+    event_type:  string,
+    tenant_id:   string,
+    success:     bool,
+    duration_ms: number
+  }
+}
+
+ACTION ResolveServiceTicket {
+  INPUT   ticket_id: string, resolution: string
+  OUTPUT  resolved: bool
+  AI      "Draft a concise resolution note for ticket {{ticket_id}}: {{resolution}}. Include next steps if applicable."
+  EMIT service_ticket_resolved {
+    source:      string,
+    event_type:  string,
+    tenant_id:   string,
+    success:     bool,
+    duration_ms: number
+  }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// VIEWS
+// ═══════════════════════════════════════════════════════════════════════════════
+
+VIEW CustomerList {
+  ENTITY  Customer
+  LAYOUT  table
+  FIELDS  name, company, email, tier, active, created_at
+  ACTIONS create, read, edit, delete
+  SIDEBAR icon: Users
+}
+
+VIEW CustomerDetail {
+  ENTITY  Customer
+  LAYOUT  split
+  FIELDS  name, company, email, phone, tier, active, notes
+  ACTIONS read, edit
+  SIDEBAR icon: User
+}
+
+VIEW VendorList {
+  ENTITY  Vendor
+  LAYOUT  table
+  FIELDS  name, category, rating, contact_email, active
+  ACTIONS create, read, edit, delete
+  SIDEBAR icon: Building2
+}
+
+VIEW ProductCatalog {
+  ENTITY  Product
+  LAYOUT  table
+  FIELDS  name, sku, price, stock_qty, category, active
+  ACTIONS create, read, edit, delete
+  SIDEBAR icon: Package
+}
+
+VIEW EmployeeList {
+  ENTITY  Employee
+  LAYOUT  table
+  FIELDS  name, email, role, department, active
+  ACTIONS create, read, edit
+  SIDEBAR icon: UserCircle
+}
+
+VIEW QuoteList {
+  ENTITY  Quote
+  LAYOUT  table
+  FIELDS  customer_id, employee_id, total, status, valid_until, created_at
+  ACTIONS create, read, edit
+  SIDEBAR icon: FileText
+}
+
+VIEW InvoiceDashboard {
+  ENTITY  Invoice
+  LAYOUT  dashboard
+  FIELDS  status, total, due_date, customer_id, created_at
+  ACTIONS read
+  SIDEBAR icon: LayoutDashboard
+}
+
+VIEW InvoiceList {
+  ENTITY  Invoice
+  LAYOUT  table
+  FIELDS  customer_id, total, status, due_date, paid_date, created_at
+  ACTIONS create, read, edit
+  SIDEBAR icon: Receipt
+}
+
+VIEW ServiceBoard {
+  ENTITY   ServiceTicket
+  LAYOUT   kanban
+  GROUP_BY status
+  FIELDS   subject, customer_id, assignee_id, priority, created_at
+  ACTIONS  create, read, edit
+  SIDEBAR  icon: Headphones
+}
+
+VIEW ServiceList {
+  ENTITY  ServiceTicket
+  LAYOUT  table
+  FIELDS  subject, customer_id, assignee_id, priority, status, created_at
+  ACTIONS create, read, edit
+  SIDEBAR icon: Ticket
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// PREFERENCES
+// ═══════════════════════════════════════════════════════════════════════════════
+
+PREFERENCE default_currency {
+  TYPE    string
+  DEFAULT "USD"
+  KEY     "erp.default_currency"
+}
+
+PREFERENCE invoice_due_days {
+  TYPE    number
+  DEFAULT 30
+  KEY     "erp.invoice_due_days"
+}
+
+PREFERENCE support_email {
+  TYPE    string
+  DEFAULT "support@accelerando.io"
+  KEY     "erp.support_email"
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// SEED — demo data whose activity patterns match the OIE's insight seeds.
+//
+// The OIE ships with three pre-seeded insights:
+//   1. "Invoice approval averaging 4.2 days" — driven by invoice workflow data
+//   2. "Quote-to-cash handoff is manual in 67% of cases" — driven by quote events
+//   3. "Support ticket escalation rate up 40% this week" — driven by ticket events
+//
+// These ERP seeds create the business context that makes those insights credible.
+// ═══════════════════════════════════════════════════════════════════════════════
+
+SEED Customer {
+  tenant_id "demo"
+  name      "Acme Corporation"
+  email     "ap@acme.com"
+  company   "Acme Corporation"
+  tier      "enterprise"
+  active    true
+}
+
+SEED Customer {
+  tenant_id "demo"
+  name      "Brightline Retail"
+  email     "procurement@brightline.io"
+  company   "Brightline Retail"
+  tier      "preferred"
+  active    true
+}
+
+SEED Customer {
+  tenant_id "demo"
+  name      "Vertex Systems"
+  email     "ops@vertex.com"
+  company   "Vertex Systems"
+  tier      "standard"
+  active    true
+}
+
+SEED Vendor {
+  tenant_id "demo"
+  name      "Northgate Supplies"
+  category  "office"
+  rating    4.2
+  active    true
+}
+
+SEED Product {
+  tenant_id "demo"
+  name      "Accelerando Starter"
+  sku       "ACC-STARTER"
+  price     299.00
+  category  "software"
+  active    true
+}
+
+SEED Product {
+  tenant_id "demo"
+  name      "Accelerando Professional"
+  sku       "ACC-PRO"
+  price     799.00
+  category  "software"
+  active    true
+}
+
+SEED Product {
+  tenant_id "demo"
+  name      "Implementation Services"
+  sku       "SVC-IMPL"
+  price     150.00
+  category  "services"
+  active    true
+}
+
+SEED Employee {
+  tenant_id  "demo"
+  name       "Jordan Mitchell"
+  email      "jordan@accelerando.io"
+  role       "Sales Manager"
+  department "Sales"
+  active     true
+}
+
+SEED Employee {
+  tenant_id  "demo"
+  name       "Alex Rivera"
+  email      "alex@accelerando.io"
+  role       "Support Lead"
+  department "Support"
+  active     true
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// TESTS
+// ═══════════════════════════════════════════════════════════════════════════════
+
+TEST customer_crud {
+  GIVEN Customer {
+    tenant_id: "test"
+    name:      "Test Corp"
+    email:     "billing@testcorp.com"
+    tier:      "standard"
+    active:    true
+  }
+  EXPECT create -> id IS NOT NULL
+  EXPECT get_by_id -> name == "Test Corp"
+  EXPECT get_by_id -> tier == "standard"
+  EXPECT get_by_id -> active == true
+}
+
+TEST invoice_lifecycle {
+  GIVEN Invoice {
+    tenant_id:   "test"
+    customer_id: "customer-123"
+    total:       1500.00
+    status:      "draft"
+  }
+  EXPECT create -> id IS NOT NULL
+  EXPECT get_by_id -> status == "draft"
+  EXPECT get_by_id -> total == 1500.00
+}
+
+TEST service_ticket_triage {
+  GIVEN ServiceTicket {
+    tenant_id:   "test"
+    customer_id: "customer-456"
+    subject:     "Cannot access dashboard"
+    priority:    "high"
+    status:      "new"
+  }
+  EXPECT create -> id IS NOT NULL
+  EXPECT get_by_id -> status == "new"
+  EXPECT get_by_id -> priority == "high"
+}
+
+TEST product_catalog {
+  GIVEN Product {
+    tenant_id: "test"
+    name:      "Test Product"
+    sku:       "TEST-001"
+    price:     49.99
+    active:    true
+  }
+  EXPECT create -> id IS NOT NULL
+  EXPECT get_by_id -> sku == "TEST-001"
+  EXPECT get_by_id -> price == 49.99
+}
+
+TEST quote_pipeline {
+  GIVEN Quote {
+    tenant_id:   "test"
+    customer_id: "customer-789"
+    total:       2400.00
+    status:      "draft"
+  }
+  EXPECT create -> id IS NOT NULL
+  EXPECT get_by_id -> status == "draft"
+  EXPECT get_by_id -> total == 2400.00
+}
