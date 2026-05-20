@@ -1,6 +1,6 @@
 # Accelerando ERP/CRM
 
-**A basic but extensible ERP + CRM for AI-native organizations.**
+**Full-spec AI-native enterprise platform. "SAP + Salesforce + GPT — in a single `.agi` file."**
 
 Compiles from a single `.agi` source file to a multi-tenant Axum web service, React frontend, and PostgreSQL database — ready to deploy on any Docker host or cloud provider.
 
@@ -27,8 +27,8 @@ This app is the reference implementation for Agicore's **web target** — the sa
 
 ```
 TARGET web { RUNTIME axum  FRONTEND react  DEPLOY docker }
-AUTH   jwt { STRATEGY bearer  EXPIRY 3600  REFRESH 86400 }
-TENANT rows { ISOLATE tenant_id }
+AUTH   { STRATEGY jwt  EXPIRY "8h"  REFRESH true }
+TENANT { MODEL row_level  ISOLATE strict }
 ```
 
 Everything else — entities, actions, views, stages, packets, channels — is 100% target-agnostic.
@@ -40,24 +40,42 @@ Everything else — entities, actions, views, stages, packets, channels — is 1
 ```
 accelerando_erp.agi
 │
-├── TARGET / AUTH / TENANT      → Axum server, JWT middleware, tenant isolation
+├── TARGET / AUTH / TENANT      → Axum server, JWT middleware, row-level tenant isolation
 │
-├── ENTITY × 10                 → PostgreSQL tables (tenant_id on every row)
-│   Customer, Contact           → CRM: account and contact management
-│   Vendor, Product, Employee   → ERP: supplier, catalog, headcount
-│   Quote, QuoteLineItem        → Sales pipeline
-│   Invoice, InvoiceLineItem    → Billing and receivables
-│   ServiceTicket               → Support triage
+├── ENTITY × 32                 → PostgreSQL tables (tenant_id on every row)
+│   Customer, Contact           → CRM: accounts and contacts
+│   Lead, Opportunity           → CRM: pipeline and funnel
+│   Activity, Contract          → CRM: activities and agreements
+│   Vendor, Product, Employee   → ERP core: supplier, catalog, headcount
+│   Department                  → ERP core: org structure
+│   GLAccount, JournalEntry     → Finance: general ledger
+│   JournalLine, Payment        → Finance: double-entry and AR
+│   Quote, QuoteLineItem        → Sales: quote pipeline
+│   SalesOrder, SalesOrderLine  → Sales: order fulfilment
+│   Invoice, InvoiceLineItem    → Sales: billing and receivables
+│   ServiceTicket               → Service: support triage
+│   PurchaseOrder, POLineItem   → Procurement: vendor orders
+│   Warehouse, InventoryItem    → Inventory: stock and replenishment
+│   BOM, BOMLine                → Manufacturing: bill of materials
+│   ManufacturingOrder          → Manufacturing: production orders
+│   Project, Task               → Projects: delivery tracking
+│   Shift, Timesheet            → HR: time and attendance
 │
-├── STAGES × 3                  → Declarative state machines
-│   Quote.status                → draft → sent → accepted / rejected / expired
-│   Invoice.status              → draft → submitted → approved → paid / void
-│   ServiceTicket.status        → new → in_progress → escalated → resolved → closed
+├── STAGES × 12                 → Declarative state machines for every document workflow
+│   Lead.status, Opportunity.stage, Contract.status
+│   Quote.status, SalesOrder.status, Invoice.status
+│   ServiceTicket.status, PurchaseOrder.status
+│   ManufacturingOrder.status, Project.status, Task.status, Timesheet.status
+│
+├── WORKFLOW × 3                → Automated responses to business events
+│   high_value_invoice_review   → flags invoices for finance approval
+│   deal_closed_won             → triggers project creation on opportunity win
+│   low_inventory_replenishment → auto-creates purchase order at reorder point
 │
 ├── PACKET TelemetryPacket      → Typed event shape (matches OIE expectation)
 ├── CHANNEL oie_telemetry_out   → Outbound stream to OIE
 │
-├── ACTION × 9                  → Business operations with EMIT telemetry
+├── ACTION × 32                 → Full service catalog with EMIT telemetry
 │   CreateInvoice               → AI-assisted invoice drafting
 │   ApproveInvoice              → IMPL: status transition + approver record
 │   MarkInvoicePaid             → IMPL: payment close-out
