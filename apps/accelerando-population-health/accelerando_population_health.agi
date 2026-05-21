@@ -1,0 +1,917 @@
+APP accelerando_population_health {
+  VERSION "1.0.0"
+  PORT 3012
+  DESCRIPTION "Population health management — care gap detection, disease registries, HEDIS/MIPS quality measures, risk stratification, and proactive outreach coordination"
+
+  // ── ENTITIES ──────────────────────────────────────────────────────────────
+
+  ENTITY PopulationCohort {
+    FIELDS {
+      id:              string   REQUIRED
+      name:            string   REQUIRED   // "Diabetes Registry", "Hypertension Panel", "Wellness Due"
+      description:     string
+      cohort_type:     string   REQUIRED   // "disease_registry", "care_gap", "risk_tier", "quality_measure"
+      filter_criteria: string   REQUIRED   // JSON: condition/demographic criteria
+      patient_count:   number   DEFAULT 0
+      last_updated:    string   REQUIRED
+      owner_provider_id: string
+      active:          boolean  DEFAULT true
+    }
+    CRUD [create, read, list, edit]
+  }
+
+  ENTITY CareGap {
+    FIELDS {
+      id:              string   REQUIRED
+      patient_id:      string   REQUIRED
+      measure_id:      string   REQUIRED   // HEDIS/MIPS measure reference
+      measure_name:    string   REQUIRED   // "Colorectal Cancer Screening", "HbA1c Control"
+      gap_type:        string   REQUIRED   // "screening", "lab", "medication", "follow_up", "immunization"
+      opened_date:     string   REQUIRED
+      due_date:        string   REQUIRED
+      // priority
+      priority_score:  number   DEFAULT 5  // 1=critical..10=low
+      // outreach
+      outreach_campaign_id: string
+      outreach_count:  number   DEFAULT 0
+      last_outreach:   string
+      // closure
+      closed_date:     string
+      closed_reason:   string   // "completed", "patient_declined", "contraindicated", "expired"
+      closing_encounter_id: string
+    }
+    STAGES [open, outreach_sent, appointment_scheduled, closed, expired]
+    CRUD [create, read, list, edit]
+  }
+
+  ENTITY DiseaseRegistry {
+    FIELDS {
+      id:              string   REQUIRED
+      patient_id:      string   REQUIRED
+      registry_name:   string   REQUIRED   // "Diabetes", "Hypertension", "CHF", "COPD", "Asthma", "CKD"
+      icd10_codes:     string   REQUIRED
+      enrolled_date:   string   REQUIRED
+      // current clinical status
+      last_a1c:        number              // for diabetes
+      last_a1c_date:   string
+      last_bp_systolic: number            // for HTN
+      last_bp_diastolic: number
+      last_bp_date:    string
+      last_ldl:        number             // for cardiac
+      last_ldl_date:   string
+      last_egfr:       number             // for CKD
+      last_egfr_date:  string
+      // control status
+      controlled:      boolean  Default false
+      last_control_assessment: string
+      // care management
+      care_manager_id: string
+      care_plan_id:    string
+    }
+    CRUD [create, read, list, edit]
+  }
+
+  ENTITY QualityMeasure {
+    FIELDS {
+      id:              string   REQUIRED
+      measure_id:      string   REQUIRED   // "HEDIS CDC-HbA1c Control", "MIPS IA_PM_16"
+      measure_name:    string   REQUIRED
+      measure_type:    string   REQUIRED   // "HEDIS", "MIPS", "CMS", "PCMH", "internal"
+      reporting_year:  number   REQUIRED
+      // numerator/denominator
+      denominator_count: number DEFAULT 0
+      numerator_count:   number DEFAULT 0
+      performance_rate:  number DEFAULT 0  // numerator/denominator × 100
+      // targets
+      target_rate:       number REQUIRED
+      benchmark_75th:    number
+      benchmark_90th:    number
+      // reporting
+      last_calculated:   string
+      reporting_deadline: string
+    }
+    CRUD [create, read, list, edit]
+  }
+
+  ENTITY RiskScore {
+    FIELDS {
+      id:              string   REQUIRED
+      patient_id:      string   REQUIRED
+      score_date:      string   REQUIRED
+      // risk models
+      raf_score:       number              // Risk Adjustment Factor (HCC coding)
+      charlson_index:  number             // Charlson Comorbidity Index
+      ed_utilization_risk: number         // 0–100 predicted ED visit in 12 months
+      avoidable_admit_risk: number        // 0–100 predicted avoidable hospitalization
+      // tier assignment
+      risk_tier:       string   REQUIRED   // "low", "moderate", "high", "rising_risk"
+      // contributing factors
+      top_risk_factors: string            // JSON array: [{factor, weight}]
+      // care management
+      care_management_enrolled: boolean Default false
+      care_manager_id:  string
+    }
+    CRUD [create, read, list]
+  }
+
+  ENTITY OutreachCampaign {
+    FIELDS {
+      id:              string   REQUIRED
+      name:            string   REQUIRED
+      campaign_type:   string   REQUIRED   // "care_gap", "recall", "wellness", "disease_management"
+      target_cohort_id: string  REQUIRED
+      start_date:      string   REQUIRED
+      end_date:        string
+      // channels
+      primary_channel: string   REQUIRED   // "sms", "email", "portal", "phone"
+      fallback_channel: string
+      // content
+      message_template_id: string
+      // metrics
+      patients_targeted: number DEFAULT 0
+      messages_sent:     number DEFAULT 0
+      responses:         number DEFAULT 0
+      appointments_scheduled: number DEFAULT 0
+      gaps_closed:       number Default 0
+      // status
+      active:            boolean DEFAULT true
+    }
+    STAGES [draft, active, paused, completed]
+    CRUD [create, read, list, edit]
+  }
+
+  ENTITY CareManagementEnrollment {
+    FIELDS {
+      id:              string   REQUIRED
+      patient_id:      string   REQUIRED
+      care_manager_id: string   REQUIRED
+      enrolled_date:   string   REQUIRED
+      enrollment_reason: string REQUIRED   // "high_risk", "complex_chronic", "post_discharge", "transition"
+      // complexity
+      complexity_score: number
+      active_conditions: string           // JSON array of ICD-10
+      active_medications_count: number
+      // activity
+      last_contact_date: string
+      next_contact_date: string
+      contact_frequency: string           // "weekly", "biweekly", "monthly"
+      // outcomes
+      ed_visits_ytd:   number DEFAULT 0
+      hospital_admits_ytd: number Default 0
+      goals_met:       number Default 0
+      total_goals:     number Default 0
+      // status
+      active:          boolean DEFAULT true
+      discharge_date:  string
+      discharge_reason: string
+    }
+    STAGES [enrolled, active, on_hold, discharged]
+    CRUD [create, read, list, edit]
+  }
+
+  ENTITY HCCCode {
+    FIELDS {
+      id:              string   REQUIRED
+      patient_id:      string   REQUIRED
+      hcc_code:        string   REQUIRED   // HCC category number
+      hcc_description: string   REQUIRED
+      icd10_code:      string   REQUIRED
+      diagnosis_date:  string   REQUIRED
+      encounter_id:    string   REQUIRED
+      // RAF contribution
+      raf_weight:      number   REQUIRED
+      // recapture status (HCC must be documented every plan year)
+      last_capture_year: number REQUIRED
+      recapture_due:     boolean Default false
+      recapture_encounter_id: string
+    }
+    CRUD [create, read, list, edit]
+  }
+
+  // ── PACKETS ───────────────────────────────────────────────────────────────
+
+  PACKET CareGapOpenedPacket {
+    care_gap_id:     string  REQUIRED
+    patient_id:      string  REQUIRED
+    measure_name:    string  REQUIRED
+    due_date:        string  REQUIRED
+    priority_score:  number  REQUIRED
+    SIGNATURE "accelerando_population_health"
+  }
+
+  PACKET HighRiskPatientPacket {
+    patient_id:        string  REQUIRED
+    risk_tier:         string  REQUIRED
+    ed_risk_pct:       number  REQUIRED
+    admit_risk_pct:    number  REQUIRED
+    top_risk_factors:  string  REQUIRED
+    SIGNATURE "accelerando_population_health"
+  }
+
+  PACKET QualityMeasureReportPacket {
+    measure_id:         string  REQUIRED
+    measure_name:       string  REQUIRED
+    reporting_year:     number  REQUIRED
+    performance_rate:   number  REQUIRED
+    target_rate:        number  REQUIRED
+    numerator:          number  REQUIRED
+    denominator:        number  REQUIRED
+    SIGNATURE "accelerando_population_health"
+  }
+
+  PACKET HCCRecapturePacket {
+    patient_id:         string  REQUIRED
+    hcc_codes_due:      string  REQUIRED  // JSON array
+    total_raf_at_risk:  number  REQUIRED
+    next_encounter_id:  string
+    SIGNATURE "accelerando_population_health"
+  }
+
+  // ── CHANNELS ──────────────────────────────────────────────────────────────
+
+  CHANNEL care_gap_outbound {
+    PACKET CareGapOpenedPacket
+    CONSUMERS ["accelerando_clinical", "accelerando_patient_portal"]
+    DELIVERY at_least_once
+  }
+
+  CHANNEL high_risk_outbound {
+    PACKET HighRiskPatientPacket
+    CONSUMERS ["accelerando_clinical", "accelerando_es"]
+    DELIVERY at_least_once
+  }
+
+  CHANNEL quality_measure_outbound {
+    PACKET QualityMeasureReportPacket
+    CONSUMERS ["accelerando_es"]
+    DELIVERY at_least_once
+  }
+
+  CHANNEL hcc_recapture_outbound {
+    PACKET HCCRecapturePacket
+    CONSUMERS ["accelerando_clinical"]
+    DELIVERY at_least_once
+  }
+
+  // ── MODULES ───────────────────────────────────────────────────────────────
+
+  MODULE CareGapEngine {
+
+    FACT CareGapContext {
+      critical_gap_overdue:         boolean
+      gap_no_outreach_30_days:      boolean
+      patient_declined_all_channels: boolean
+      gap_closure_rate_below_target: boolean
+      mammogram_gap_open:           boolean
+      colorectal_gap_open:          boolean
+      a1c_gap_open:                 boolean
+    }
+
+    SCORE care_gap_closure_rate {
+      INITIAL   0
+      MIN       0
+      MAX     100
+      DECAY     0 PER day
+      THRESHOLD excellent  AT 85 THEN FLAG "care_gap_closure_excellent_performance"
+      THRESHOLD target     AT 70 THEN FLAG "care_gap_closure_at_target"
+      THRESHOLD below      AT 60 THEN FLAG "care_gap_closure_below_target_intensify_outreach"
+      THRESHOLD critical   AT 50 THEN FLAG "care_gap_closure_critical_quality_measure_at_risk"
+    }
+
+    RULE critical_gap_overdue {
+      WHEN CareGapContext.critical_gap_overdue == true
+      THEN FLAG "critical_care_gap_overdue_escalate_to_provider"
+      SEVERITY critical
+      PRIORITY 92
+    }
+
+    RULE gap_no_outreach {
+      WHEN CareGapContext.gap_no_outreach_30_days == true
+      THEN FLAG "care_gap_no_outreach_in_30_days_initiate_campaign"
+      SEVERITY warning
+      PRIORITY 78
+    }
+
+    RULE closure_rate_below {
+      WHEN CareGapContext.gap_closure_rate_below_target == true
+      THEN FLAG "care_gap_closure_below_target_quality_measure_impact"
+      SEVERITY warning
+      PRIORITY 80
+    }
+
+  }
+
+  MODULE RiskEngine {
+
+    FACT RiskContext {
+      high_risk_no_care_manager:      boolean
+      rising_risk_not_enrolled:       boolean
+      care_management_contact_overdue: boolean
+      high_ed_risk_no_intervention:   boolean
+      post_discharge_no_followup:     boolean
+    }
+
+    SCORE population_health_score {
+      INITIAL 100
+      MIN       0
+      MAX     100
+      DECAY     0 PER day
+      THRESHOLD excellent  AT 85 THEN FLAG "population_health_score_excellent"
+      THRESHOLD acceptable AT 70 THEN FLAG "population_health_score_acceptable"
+      THRESHOLD concerning AT 60 THEN FLAG "population_health_score_concerning_intervention_needed"
+      THRESHOLD critical   AT 50 THEN FLAG "population_health_score_critical_program_review_required"
+    }
+
+    RULE high_risk_no_care_manager {
+      WHEN RiskContext.high_risk_no_care_manager == true
+      THEN FLAG "high_risk_patient_not_enrolled_in_care_management"
+      SEVERITY critical
+      PRIORITY 93
+    }
+
+    RULE rising_risk_not_enrolled {
+      WHEN RiskContext.rising_risk_not_enrolled == true
+      THEN FLAG "rising_risk_patient_not_enrolled_preventive_intervention_opportunity"
+      SEVERITY warning
+      PRIORITY 82
+    }
+
+    RULE post_discharge_no_followup {
+      WHEN RiskContext.post_discharge_no_followup == true
+      THEN FLAG "post_discharge_followup_not_scheduled_30_day_readmission_risk"
+      SEVERITY critical
+      PRIORITY 95
+    }
+
+    RULE care_management_contact_overdue {
+      WHEN RiskContext.care_management_contact_overdue == true
+      THEN FLAG "care_management_contact_overdue_per_frequency_plan"
+      SEVERITY warning
+      PRIORITY 80
+    }
+
+  }
+
+  MODULE QualityMeasureEngine {
+
+    FACT QualityContext {
+      measure_below_target:           boolean
+      measure_below_50th_percentile:  boolean
+      reporting_deadline_approaching: boolean
+      hcc_recapture_due:              boolean
+      denominator_falling:            boolean
+    }
+
+    RULE measure_below_target {
+      WHEN QualityContext.measure_below_target == true
+      THEN FLAG "quality_measure_below_target_improvement_plan_required"
+      SEVERITY warning
+      PRIORITY 82
+    }
+
+    RULE measure_below_benchmark {
+      WHEN QualityContext.measure_below_50th_percentile == true
+      THEN FLAG "quality_measure_below_50th_percentile_performance_improvement_escalation"
+      SEVERITY critical
+      PRIORITY 90
+    }
+
+    RULE reporting_deadline {
+      WHEN QualityContext.reporting_deadline_approaching == true
+      THEN FLAG "quality_measure_reporting_deadline_approaching_submit_data"
+      SEVERITY warning
+      PRIORITY 85
+    }
+
+    RULE hcc_recapture {
+      WHEN QualityContext.hcc_recapture_due == true
+      THEN FLAG "hcc_codes_require_annual_recapture_risk_adjustment_revenue_at_risk"
+      SEVERITY warning
+      PRIORITY 83
+    }
+
+  }
+
+  MODULE DiseaseRegistryEngine {
+
+    FACT RegistryContext {
+      diabetes_uncontrolled:      boolean
+      hypertension_uncontrolled:  boolean
+      chf_no_recent_labs:         boolean
+      ckd_egfr_declining:         boolean
+      asthma_exacerbation_risk:   boolean
+      copd_no_pulmonary_followup: boolean
+    }
+
+    RULE diabetes_uncontrolled {
+      WHEN RegistryContext.diabetes_uncontrolled == true
+      THEN FLAG "diabetes_registry_patient_a1c_uncontrolled_intensify_management"
+      SEVERITY warning
+      PRIORITY 85
+    }
+
+    RULE hypertension_uncontrolled {
+      WHEN RegistryContext.hypertension_uncontrolled == true
+      THEN FLAG "hypertension_registry_patient_blood_pressure_uncontrolled"
+      SEVERITY warning
+      PRIORITY 83
+    }
+
+    RULE ckd_egfr_declining {
+      WHEN RegistryContext.ckd_egfr_declining == true
+      THEN FLAG "ckd_registry_egfr_declining_trend_nephrology_referral_consider"
+      SEVERITY warning
+      PRIORITY 87
+    }
+
+    RULE chf_labs_overdue {
+      WHEN RegistryContext.chf_no_recent_labs == true
+      THEN FLAG "chf_registry_bmp_and_bnp_overdue_order_or_schedule"
+      SEVERITY warning
+      PRIORITY 82
+    }
+
+  }
+
+  // ── REASONER ──────────────────────────────────────────────────────────────
+
+  REASONER population_intelligence_reasoner {
+    SCHEDULE "weekly"
+    DESCRIPTION "Analyzes population-level trends in care gap closure, disease registry control rates, risk tier distribution, and quality measure performance to generate actionable improvement recommendations"
+    INPUT {
+      care_gap_summary:         string
+      risk_tier_distribution:   string
+      quality_measure_rates:    string
+      registry_control_rates:   string
+      outreach_response_rates:  string
+    }
+    OUTPUT {
+      priority_gap_list:        string
+      risk_tier_trend:          string
+      quality_improvement_plan: string
+      registry_alert_summary:   string
+      outreach_recommendations: string
+    }
+  }
+
+  // ── WORKFLOWS ─────────────────────────────────────────────────────────────
+
+  WORKFLOW identify_care_gaps {
+    IDEMPOTENT true
+    STEPS {
+      STEP run_hedis_logic {
+        ACTION RunHEDISCareGapLogic
+        ON_FAIL abort
+      }
+      STEP score_gaps {
+        ACTION ScoreCareGapPriority
+        ON_FAIL skip
+      }
+      STEP emit_new_gaps {
+        ACTION EmitNewCareGaps
+        ON_FAIL skip
+      }
+    }
+  }
+
+  WORKFLOW stratify_risk {
+    IDEMPOTENT true
+    STEPS {
+      STEP compute_risk_scores {
+        ACTION StratifyRiskPanel
+        ON_FAIL abort
+      }
+      STEP assign_tiers {
+        ACTION AssignRiskTiers
+        ON_FAIL abort
+      }
+      STEP enroll_high_risk {
+        ACTION EnrollHighRiskPatients
+        ON_FAIL skip
+      }
+      STEP emit_high_risk {
+        ACTION EmitHighRiskAlerts
+        ON_FAIL skip
+      }
+    }
+  }
+
+  WORKFLOW compute_quality_measures {
+    IDEMPOTENT true
+    STEPS {
+      STEP calculate_measures {
+        ACTION CalculateQualityMeasures
+        ON_FAIL abort
+      }
+      STEP identify_gaps_from_measures {
+        ACTION IdentifyMeasureGaps
+        ON_FAIL skip
+      }
+      STEP emit_measure_report {
+        ACTION EmitQualityMeasureReport
+        ON_FAIL skip
+      }
+    }
+  }
+
+  WORKFLOW outreach_campaign {
+    IDEMPOTENT false
+    STEPS {
+      STEP identify_targets {
+        ACTION IdentifyOutreachTargets
+        ON_FAIL abort
+      }
+      STEP generate_messages {
+        ACTION GenerateOutreachMessages
+        ON_FAIL abort
+      }
+      STEP send_outreach {
+        ACTION ExecuteOutreachCampaign
+        ON_FAIL skip
+      }
+      STEP record_activity {
+        ACTION RecordOutreachActivity
+        ON_FAIL skip
+      }
+    }
+  }
+
+  WORKFLOW enroll_care_management {
+    IDEMPOTENT false
+    STEPS {
+      STEP assess_eligibility {
+        ACTION AssessCareManagementEligibility
+        ON_FAIL abort
+      }
+      STEP create_enrollment {
+        ACTION CreateCareManagementEnrollment
+        ON_FAIL abort
+      }
+      STEP assign_care_manager {
+        ACTION AssignCareManager
+        ON_FAIL abort
+      }
+      STEP schedule_first_contact {
+        ACTION ScheduleFirstContact
+        ON_FAIL skip
+      }
+    }
+  }
+
+  WORKFLOW hcc_recapture {
+    IDEMPOTENT true
+    STEPS {
+      STEP identify_recapture_due {
+        ACTION IdentifyHCCRecaptureDue
+        ON_FAIL abort
+      }
+      STEP emit_recapture_alerts {
+        ACTION EmitHCCRecapturePackets
+        ON_FAIL skip
+      }
+    }
+  }
+
+  // ── ACTIONS ───────────────────────────────────────────────────────────────
+
+  ACTION RunHEDISCareGapLogic {
+    DESCRIPTION "Runs HEDIS measure logic against patient records to identify open care gaps; returns gap records for creation"
+    DETERMINISTIC true
+    INPUT {
+      cohort_id:       string  REQUIRED
+      measure_ids:     string  REQUIRED   // JSON array of HEDIS measure IDs to evaluate
+      as_of_date:      string  REQUIRED
+    }
+    OUTPUT {
+      gaps_identified:  number  REQUIRED
+      gap_records:      string  REQUIRED  // JSON array of new CareGap data
+    }
+  }
+
+  ACTION ScoreCareGapPriority {
+    DESCRIPTION "Assigns priority_score (1-10) to each care gap based on clinical urgency, patient risk tier, and measure performance impact"
+    DETERMINISTIC true
+    INPUT {
+      care_gap_ids:  string  REQUIRED  // JSON array
+    }
+    OUTPUT {
+      scored_gaps:   string  REQUIRED  // JSON: [{care_gap_id, priority_score}]
+    }
+  }
+
+  ACTION EmitNewCareGaps {
+    DESCRIPTION "Emits CareGapOpenedPacket for each newly identified care gap"
+    DETERMINISTIC true
+    INPUT {
+      care_gap_ids:  string  REQUIRED
+    }
+    OUTPUT {
+      emitted: number  REQUIRED
+    }
+  }
+
+  ACTION StratifyRiskPanel {
+    DESCRIPTION "Computes RAF, Charlson, ED utilization risk, and avoidable admit risk for a patient panel"
+    DETERMINISTIC true
+    INPUT {
+      cohort_id:    string  REQUIRED
+      as_of_date:   string  REQUIRED
+    }
+    OUTPUT {
+      risk_scores_updated: number  REQUIRED
+    }
+  }
+
+  ACTION AssignRiskTiers {
+    DESCRIPTION "Assigns risk tier (low/moderate/high/rising_risk) based on computed scores"
+    DETERMINISTIC true
+    INPUT {
+      cohort_id: string  REQUIRED
+    }
+    OUTPUT {
+      tier_assignments: string  REQUIRED  // JSON: tier distribution counts
+    }
+  }
+
+  ACTION EnrollHighRiskPatients {
+    DESCRIPTION "Identifies high-risk patients not yet in care management and initiates enrollment workflow"
+    DETERMINISTIC true
+    INPUT {
+      cohort_id: string  REQUIRED
+    }
+    OUTPUT {
+      patients_enrolled: number  REQUIRED
+    }
+  }
+
+  ACTION EmitHighRiskAlerts {
+    DESCRIPTION "Emits HighRiskPatientPacket for each newly identified high-risk patient"
+    DETERMINISTIC true
+    INPUT {
+      patient_ids: string  REQUIRED  // JSON array of newly high-risk patients
+    }
+    OUTPUT {
+      emitted: number  REQUIRED
+    }
+  }
+
+  ACTION CalculateQualityMeasures {
+    DESCRIPTION "Recalculates numerator, denominator, and performance rate for all active quality measures"
+    DETERMINISTIC true
+    INPUT {
+      reporting_year: number  REQUIRED
+      measure_ids:    string  REQUIRED  // JSON array, empty = all
+    }
+    OUTPUT {
+      measures_updated: number  REQUIRED
+    }
+  }
+
+  ACTION IdentifyMeasureGaps {
+    DESCRIPTION "From recalculated measures, identifies specific patients who are in denominators but not numerators"
+    DETERMINISTIC true
+    INPUT {
+      measure_id:      string  REQUIRED
+      reporting_year:  number  REQUIRED
+    }
+    OUTPUT {
+      patients_with_gap: string  REQUIRED  // JSON array of {patient_id, care_gap_type}
+    }
+  }
+
+  ACTION EmitQualityMeasureReport {
+    DESCRIPTION "Emits QualityMeasureReportPacket for governance and leadership dashboards"
+    DETERMINISTIC true
+    INPUT {
+      measure_ids:    string  REQUIRED
+      reporting_year: number  REQUIRED
+    }
+    OUTPUT {
+      emitted: number  REQUIRED
+    }
+  }
+
+  ACTION IdentifyOutreachTargets {
+    DESCRIPTION "Selects patients from cohort for outreach based on open care gaps, risk tier, and prior outreach response"
+    DETERMINISTIC true
+    INPUT {
+      campaign_id:    string  REQUIRED
+      max_batch:      number  DEFAULT 500
+    }
+    OUTPUT {
+      target_patient_ids: string  REQUIRED  // JSON array
+    }
+  }
+
+  ACTION GenerateOutreachMessages {
+    DESCRIPTION "AI generates personalized outreach messages per patient, care gap, and channel"
+    DETERMINISTIC false
+    AI_MODEL "claude-haiku-4-5-20251001"
+    INPUT {
+      campaign_id:    string  REQUIRED
+      patient_id:     string  REQUIRED
+      care_gap_name:  string  REQUIRED
+      channel:        string  REQUIRED
+      patient_name:   string  REQUIRED
+    }
+    OUTPUT {
+      message_subject: string  REQUIRED
+      message_body:    string  REQUIRED
+    }
+  }
+
+  ACTION ExecuteOutreachCampaign {
+    DESCRIPTION "Dispatches personalized outreach messages via the configured channels"
+    DETERMINISTIC true
+    INPUT {
+      campaign_id:    string  REQUIRED
+      message_batch:  string  REQUIRED  // JSON: [{patient_id, channel, subject, body}]
+    }
+    OUTPUT {
+      messages_sent:  number  REQUIRED
+      failures:       number  REQUIRED
+    }
+  }
+
+  ACTION RecordOutreachActivity {
+    DESCRIPTION "Updates care gap outreach_count, last_outreach, and campaign metrics"
+    DETERMINISTIC true
+    INPUT {
+      campaign_id:      string  REQUIRED
+      patient_ids_sent: string  REQUIRED
+      care_gap_ids:     string  REQUIRED
+    }
+    OUTPUT {
+      records_updated: number  REQUIRED
+    }
+  }
+
+  ACTION AssessCareManagementEligibility {
+    DESCRIPTION "Evaluates patient against care management enrollment criteria: risk tier, complexity, condition count"
+    DETERMINISTIC true
+    INPUT {
+      patient_id:  string  REQUIRED
+    }
+    OUTPUT {
+      eligible:             boolean  REQUIRED
+      complexity_score:     number   REQUIRED
+      enrollment_reason:    string   REQUIRED
+      recommended_frequency: string  REQUIRED
+    }
+  }
+
+  ACTION CreateCareManagementEnrollment {
+    DESCRIPTION "Creates CareManagementEnrollment entity and notifies the assigned care manager"
+    DETERMINISTIC true
+    INPUT {
+      patient_id:        string  REQUIRED
+      enrollment_reason: string  REQUIRED
+      complexity_score:  number  REQUIRED
+    }
+    OUTPUT {
+      enrollment_id: string  REQUIRED
+    }
+  }
+
+  ACTION AssignCareManager {
+    DESCRIPTION "Routes enrollment to the appropriate care manager based on caseload and patient conditions"
+    DETERMINISTIC true
+    INPUT {
+      enrollment_id: string  REQUIRED
+      patient_id:    string  REQUIRED
+      primary_condition: string REQUIRED
+    }
+    OUTPUT {
+      care_manager_id: string  REQUIRED
+    }
+  }
+
+  ACTION ScheduleFirstContact {
+    DESCRIPTION "Schedules initial care management contact within 48 hours of enrollment"
+    DETERMINISTIC true
+    INPUT {
+      enrollment_id:  string  REQUIRED
+      care_manager_id: string REQUIRED
+    }
+    OUTPUT {
+      first_contact_scheduled_for: string  REQUIRED
+    }
+  }
+
+  ACTION IdentifyHCCRecaptureDue {
+    DESCRIPTION "Finds HCC codes from prior years that require recapture in the current plan year"
+    DETERMINISTIC true
+    INPUT {
+      cohort_id:      string  REQUIRED
+      plan_year:      number  REQUIRED
+    }
+    OUTPUT {
+      recapture_records: string  REQUIRED  // JSON: [{patient_id, hcc_codes[], raf_at_risk}]
+    }
+  }
+
+  ACTION EmitHCCRecapturePackets {
+    DESCRIPTION "Emits HCCRecapturePacket to clinical for provider action at next encounter"
+    DETERMINISTIC true
+    INPUT {
+      recapture_records: string  REQUIRED
+    }
+    OUTPUT {
+      emitted: number  REQUIRED
+    }
+  }
+
+  ACTION GeneratePopulationReport {
+    DESCRIPTION "AI generates executive population health report: risk distribution, quality performance, care gap trends, and care management outcomes"
+    DETERMINISTIC false
+    AI_MODEL "claude-sonnet-4-6"
+    INPUT {
+      report_period:       string  REQUIRED
+      risk_tier_data:      string  REQUIRED
+      quality_measure_data: string REQUIRED
+      care_gap_data:       string  REQUIRED
+      care_management_data: string REQUIRED
+    }
+    OUTPUT {
+      executive_summary:   string  REQUIRED
+      key_metrics:         string  REQUIRED
+      improvement_priorities: string REQUIRED
+    }
+  }
+
+  ACTION CloseCareGap {
+    DESCRIPTION "Records care gap closure with reason and closing encounter"
+    DETERMINISTIC true
+    INPUT {
+      care_gap_id:         string  REQUIRED
+      closed_reason:       string  REQUIRED
+      closing_encounter_id: string
+    }
+    OUTPUT {
+      closed: boolean  REQUIRED
+    }
+  }
+
+  // ── PREFERENCES ───────────────────────────────────────────────────────────
+
+  PREFERENCE care_gap_outreach_interval_days {
+    DEFAULT 30
+    TYPE    number
+    DESCRIPTION "Days between care gap outreach attempts before flagging no-outreach"
+  }
+
+  PREFERENCE high_risk_enrollment_ed_threshold {
+    DEFAULT 50
+    TYPE    number
+    DESCRIPTION "ED utilization risk score above which patient must be offered care management enrollment"
+  }
+
+  PREFERENCE post_discharge_followup_days {
+    DEFAULT 7
+    TYPE    number
+    DESCRIPTION "Days post-discharge within which follow-up appointment must be scheduled (CMS readmission measure)"
+  }
+
+  PREFERENCE quality_measure_target_rate {
+    DEFAULT 75
+    TYPE    number
+    DESCRIPTION "Default target performance rate for quality measures (pct)"
+  }
+
+  PREFERENCE hcc_recapture_plan_year_deadline_days {
+    DEFAULT 60
+    TYPE    number
+    DESCRIPTION "Days before plan year end to begin HCC recapture alerts"
+  }
+
+  PREFERENCE care_management_caseload_max {
+    DEFAULT 150
+    TYPE    number
+    DESCRIPTION "Maximum patients per care manager before triggering capacity alert"
+  }
+
+  // ── SEED DATA ─────────────────────────────────────────────────────────────
+
+  SEED QualityMeasure {
+    RECORDS [
+      { id: "qm-001", measure_id: "HEDIS-CBC-HbA1c-Control", measure_name: "Comprehensive Diabetes Care — HbA1c Control <8%", measure_type: "HEDIS", reporting_year: 2026, denominator_count: 0, numerator_count: 0, performance_rate: 0, target_rate: 70, benchmark_75th: 72, benchmark_90th: 82, last_calculated: "2026-01-01", reporting_deadline: "2026-06-30" }
+      { id: "qm-002", measure_id: "HEDIS-COL", measure_name: "Colorectal Cancer Screening", measure_type: "HEDIS", reporting_year: 2026, denominator_count: 0, numerator_count: 0, performance_rate: 0, target_rate: 68, benchmark_75th: 70, benchmark_90th: 76, last_calculated: "2026-01-01", reporting_deadline: "2026-06-30" }
+      { id: "qm-003", measure_id: "HEDIS-BCS", measure_name: "Breast Cancer Screening", measure_type: "HEDIS", reporting_year: 2026, denominator_count: 0, numerator_count: 0, performance_rate: 0, target_rate: 72, benchmark_75th: 74, benchmark_90th: 80, last_calculated: "2026-01-01", reporting_deadline: "2026-06-30" }
+      { id: "qm-004", measure_id: "HEDIS-CBP", measure_name: "Controlling High Blood Pressure", measure_type: "HEDIS", reporting_year: 2026, denominator_count: 0, numerator_count: 0, performance_rate: 0, target_rate: 65, benchmark_75th: 68, benchmark_90th: 76, last_calculated: "2026-01-01", reporting_deadline: "2026-06-30" }
+      { id: "qm-005", measure_id: "HEDIS-FUH", measure_name: "Follow-Up After Hospitalization for Mental Illness — 7 days", measure_type: "HEDIS", reporting_year: 2026, denominator_count: 0, numerator_count: 0, performance_rate: 0, target_rate: 58, benchmark_75th: 60, benchmark_90th: 68, last_calculated: "2026-01-01", reporting_deadline: "2026-06-30" }
+      { id: "qm-006", measure_id: "MIPS-IA_PM_16", measure_name: "Annual Influenza Vaccine", measure_type: "MIPS", reporting_year: 2026, denominator_count: 0, numerator_count: 0, performance_rate: 0, target_rate: 80, last_calculated: "2026-01-01", reporting_deadline: "2026-12-31" }
+    ]
+  }
+
+  SEED PopulationCohort {
+    RECORDS [
+      { id: "coh-001", name: "Diabetes Registry", description: "Patients with Type 1 or Type 2 Diabetes", cohort_type: "disease_registry", filter_criteria: "{\"icd10_prefix\":[\"E10\",\"E11\",\"E13\"]}", patient_count: 0, last_updated: "2026-01-01", active: true }
+      { id: "coh-002", name: "Hypertension Registry", description: "Patients with essential hypertension", cohort_type: "disease_registry", filter_criteria: "{\"icd10_prefix\":[\"I10\",\"I11\",\"I12\",\"I13\"]}", patient_count: 0, last_updated: "2026-01-01", active: true }
+      { id: "coh-003", name: "CHF Registry", description: "Patients with congestive heart failure", cohort_type: "disease_registry", filter_criteria: "{\"icd10_prefix\":[\"I50\"]}", patient_count: 0, last_updated: "2026-01-01", active: true }
+      { id: "coh-004", name: "COPD Registry", description: "Patients with chronic obstructive pulmonary disease", cohort_type: "disease_registry", filter_criteria: "{\"icd10_prefix\":[\"J43\",\"J44\"]}", patient_count: 0, last_updated: "2026-01-01", active: true }
+      { id: "coh-005", name: "CKD Registry", description: "Patients with chronic kidney disease stage 3+", cohort_type: "disease_registry", filter_criteria: "{\"icd10_prefix\":[\"N18.3\",\"N18.4\",\"N18.5\",\"N18.6\"]}", patient_count: 0, last_updated: "2026-01-01", active: true }
+      { id: "coh-006", name: "High Risk Panel", description: "Patients with risk tier = high", cohort_type: "risk_tier", filter_criteria: "{\"risk_tier\":\"high\"}", patient_count: 0, last_updated: "2026-01-01", active: true }
+    ]
+  }
+
+}

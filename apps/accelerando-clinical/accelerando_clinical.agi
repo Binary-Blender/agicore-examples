@@ -1,0 +1,1223 @@
+APP accelerando_clinical {
+  VERSION "1.0.0"
+  PORT 3009
+  DESCRIPTION "Clinical documentation and decision support — patient chart, CPOE, drug safety, clinical notes, CDS hooks, and care plan management"
+
+  // ── ENTITIES ──────────────────────────────────────────────────────────────
+
+  ENTITY Patient {
+    FIELDS {
+      id:              string   REQUIRED
+      mrn:             string   REQUIRED   // Medical Record Number
+      first_name:      string   REQUIRED
+      last_name:       string   REQUIRED
+      dob:             string   REQUIRED
+      sex:             string   REQUIRED   // "M" | "F" | "U"
+      gender_identity: string
+      race:            string
+      ethnicity:       string
+      preferred_language: string DEFAULT "English"
+      // contact
+      phone:           string
+      email:           string
+      address_line1:   string
+      address_line2:   string
+      city:            string
+      state:           string
+      zip:             string
+      // insurance
+      primary_payer_id: string
+      primary_member_id: string
+      // care team
+      pcp_provider_id: string
+      // clinical flags
+      advance_directive_on_file: boolean DEFAULT false
+      advance_directive_date:    string
+      active:          boolean   DEFAULT true
+    }
+    CRUD [create, read, list, edit]
+  }
+
+  ENTITY Encounter {
+    FIELDS {
+      id:              string   REQUIRED
+      patient_id:      string   REQUIRED
+      provider_id:     string   REQUIRED
+      appointment_id:  string
+      encounter_date:  string   REQUIRED
+      encounter_type:  string   REQUIRED   // "office_visit", "telehealth", "procedure", "hospital"
+      chief_complaint: string
+      // vitals summary
+      vitals_recorded: boolean DEFAULT false
+      // documentation
+      note_id:         string
+      note_signed:     boolean DEFAULT false
+      note_signed_at:  string
+      // billing
+      visit_codes:     string   // JSON: {dx_codes[], cpt_codes[]}
+      billing_submitted: boolean DEFAULT false
+      // status
+      status:          string   DEFAULT "scheduled"
+    }
+    STAGES [scheduled, checked_in, provider_review, in_progress, pending_orders, pending_sign, signed, closed]
+    CRUD [create, read, list, edit]
+  }
+
+  ENTITY Problem {
+    FIELDS {
+      id:              string   REQUIRED
+      patient_id:      string   REQUIRED
+      icd10_code:      string   REQUIRED
+      description:     string   REQUIRED
+      onset_date:      string
+      resolution_date: string
+      status:          string   DEFAULT "active"  // "active" | "resolved" | "inactive"
+      chronic:         boolean  DEFAULT false
+      added_by:        string   REQUIRED
+      encounter_id:    string
+      // SNOMED for interoperability
+      snomed_code:     string
+    }
+    STAGES [active, inactive, resolved]
+    CRUD [create, read, list, edit]
+  }
+
+  ENTITY Medication {
+    FIELDS {
+      id:              string   REQUIRED
+      patient_id:      string   REQUIRED
+      drug_name:       string   REQUIRED
+      rxnorm_code:     string   REQUIRED
+      dose:            string   REQUIRED
+      route:           string   REQUIRED   // "oral", "IV", "topical", etc.
+      frequency:       string   REQUIRED
+      prescriber_id:   string   REQUIRED
+      start_date:      string   REQUIRED
+      end_date:        string
+      status:          string   DEFAULT "active"
+      indication:      string
+      controlled_substance: boolean DEFAULT false
+      dea_schedule:    string   // "II", "III", "IV", "V"
+      // interaction checking
+      last_interaction_check: string
+    }
+    STAGES [active, discontinued, expired]
+    CRUD [create, read, list, edit]
+  }
+
+  ENTITY Allergy {
+    FIELDS {
+      id:              string   REQUIRED
+      patient_id:      string   REQUIRED
+      allergen:        string   REQUIRED
+      allergen_rxnorm: string
+      reaction_type:   string   REQUIRED   // "drug", "food", "environmental", "other"
+      severity:        string   REQUIRED   // "mild", "moderate", "severe", "anaphylaxis"
+      reaction:        string   REQUIRED
+      onset_date:      string
+      verified:        boolean  DEFAULT false
+      verified_by:     string
+      nkda:            boolean  DEFAULT false  // No Known Drug Allergies
+    }
+    CRUD [create, read, list, edit]
+  }
+
+  ENTITY Vital {
+    FIELDS {
+      id:              string   REQUIRED
+      patient_id:      string   REQUIRED
+      encounter_id:    string   REQUIRED
+      recorded_at:     string   REQUIRED
+      recorded_by:     string   REQUIRED
+      // standard vitals
+      systolic_bp:     number
+      diastolic_bp:    number
+      heart_rate:      number
+      respiratory_rate: number
+      temperature_f:   number
+      oxygen_saturation: number
+      weight_kg:       number
+      height_cm:       number
+      bmi:             number
+      pain_score:      number   // 0-10
+      // pediatric
+      head_circumference_cm: number
+    }
+    CRUD [create, read, list]
+  }
+
+  ENTITY ClinicalNote {
+    FIELDS {
+      id:              string   REQUIRED
+      patient_id:      string   REQUIRED
+      encounter_id:    string   REQUIRED
+      author_id:       string   REQUIRED
+      note_type:       string   REQUIRED   // "SOAP", "H&P", "progress", "procedure", "discharge"
+      // SOAP sections
+      subjective:      string
+      objective:       string
+      assessment:      string
+      plan:            string
+      // full text (for non-SOAP types)
+      note_body:       string
+      // status
+      status:          string   DEFAULT "draft"
+      signed_at:       string
+      // co-signature
+      cosign_required: boolean  DEFAULT false
+      cosigned_by:     string
+      cosigned_at:     string
+      // addenda
+      addenda:         string   // JSON array
+    }
+    STAGES [draft, pending_cosign, signed, addended]
+    CRUD [create, read, list, edit]
+  }
+
+  ENTITY Order {
+    FIELDS {
+      id:              string   REQUIRED
+      patient_id:      string   REQUIRED
+      encounter_id:    string   REQUIRED
+      ordered_by:      string   REQUIRED
+      order_type:      string   REQUIRED   // "lab", "imaging", "referral", "medication", "procedure"
+      order_detail:    string   REQUIRED   // JSON per order_type
+      priority:        string   DEFAULT "routine"  // "stat", "urgent", "routine"
+      ordered_at:      string   REQUIRED
+      due_at:          string
+      // result linkage
+      result_received: boolean  DEFAULT false
+      result_id:       string
+      result_acknowledged: boolean DEFAULT false
+      // cancellation
+      cancelled:       boolean  DEFAULT false
+      cancelled_reason: string
+    }
+    STAGES [ordered, sent, pending, resulted, acknowledged, cancelled]
+    CRUD [create, read, list, edit]
+  }
+
+  ENTITY Result {
+    FIELDS {
+      id:              string   REQUIRED
+      patient_id:      string   REQUIRED
+      order_id:        string   REQUIRED
+      result_type:     string   REQUIRED   // "lab", "imaging", "pathology"
+      result_date:     string   REQUIRED
+      // lab fields
+      test_name:       string
+      loinc_code:      string
+      value:           string
+      units:           string
+      reference_range: string
+      // abnormal flags
+      abnormal:        boolean  DEFAULT false
+      critical:        boolean  DEFAULT false
+      // acknowledgement
+      acknowledged_by: string
+      acknowledged_at: string
+      // HL7/FHIR source
+      source_message_id: string
+    }
+    STAGES [received, acknowledged, reviewed, released_to_portal]
+    CRUD [create, read, list, edit]
+  }
+
+  ENTITY Referral {
+    FIELDS {
+      id:              string   REQUIRED
+      patient_id:      string   REQUIRED
+      referring_provider_id: string REQUIRED
+      receiving_provider_id: string
+      receiving_specialty: string REQUIRED
+      reason:          string   REQUIRED
+      urgency:         string   DEFAULT "routine"  // "urgent", "routine", "elective"
+      diagnosis_codes: string   // comma-separated ICD-10
+      // authorization
+      prior_auth_required: boolean DEFAULT false
+      auth_number:     string
+      // status
+      accepted:        boolean
+      appointment_date: string
+      consult_received: boolean DEFAULT false
+    }
+    STAGES [requested, sent, accepted, appointment_scheduled, consult_received, closed]
+    CRUD [create, read, list, edit]
+  }
+
+  ENTITY CarePlan {
+    FIELDS {
+      id:              string   REQUIRED
+      patient_id:      string   REQUIRED
+      created_by:      string   REQUIRED
+      effective_date:  string   REQUIRED
+      review_date:     string
+      // goals
+      goals:           string   // JSON array: {goal, target_date, status}
+      // interventions
+      interventions:   string   // JSON array: {description, responsible_party, frequency}
+      // conditions addressed
+      icd10_codes:     string
+      status:          string   DEFAULT "active"
+      last_reviewed:   string
+    }
+    STAGES [active, completed, discontinued]
+    CRUD [create, read, list, edit]
+  }
+
+  ENTITY Immunization {
+    FIELDS {
+      id:              string   REQUIRED
+      patient_id:      string   REQUIRED
+      vaccine_name:    string   REQUIRED
+      cvx_code:        string   REQUIRED
+      administered_date: string REQUIRED
+      administered_by:  string
+      lot_number:      string
+      manufacturer:    string
+      site:            string   // "left deltoid", "right thigh", etc.
+      route:           string   // "IM", "subcutaneous", etc.
+      dose_number:     number
+      series_complete: boolean  DEFAULT false
+      vfc_eligible:    boolean  DEFAULT false
+    }
+    CRUD [create, read, list]
+  }
+
+  ENTITY ClinicalAlert {
+    FIELDS {
+      id:              string   REQUIRED
+      patient_id:      string   REQUIRED
+      alert_type:      string   REQUIRED   // "drug_interaction", "allergy", "critical_result", "screening_due", "care_gap"
+      severity:        string   REQUIRED   // "info", "warning", "critical"
+      message:         string   REQUIRED
+      generated_at:    string   REQUIRED
+      acknowledged_by: string
+      acknowledged_at: string
+      overridden:      boolean  DEFAULT false
+      override_reason: string
+      encounter_id:    string
+    }
+    STAGES [active, acknowledged, overridden, resolved]
+    CRUD [create, read, list, edit]
+  }
+
+  // ── PACKETS ───────────────────────────────────────────────────────────────
+
+  PACKET NewEncounterPacket {
+    encounter_id:    string   REQUIRED
+    patient_id:      string   REQUIRED
+    provider_id:     string   REQUIRED
+    encounter_date:  string   REQUIRED
+    encounter_type:  string   REQUIRED
+    SIGNATURE "accelerando_clinical"
+  }
+
+  PACKET PrescriptionPacket {
+    order_id:        string   REQUIRED
+    patient_id:      string   REQUIRED
+    prescriber_id:   string   REQUIRED
+    drug_name:       string   REQUIRED
+    rxnorm_code:     string   REQUIRED
+    dose:            string   REQUIRED
+    route:           string   REQUIRED
+    frequency:       string   REQUIRED
+    days_supply:     number   REQUIRED
+    controlled:      boolean  REQUIRED
+    dea_schedule:    string
+    SIGNATURE "accelerando_clinical"
+  }
+
+  PACKET ReferralPacket {
+    referral_id:     string   REQUIRED
+    patient_id:      string   REQUIRED
+    specialty:       string   REQUIRED
+    urgency:         string   REQUIRED
+    diagnosis_codes: string   REQUIRED
+    SIGNATURE "accelerando_clinical"
+  }
+
+  PACKET CriticalResultPacket {
+    result_id:       string   REQUIRED
+    patient_id:      string   REQUIRED
+    result_type:     string   REQUIRED
+    test_name:       string   REQUIRED
+    value:           string   REQUIRED
+    ordering_provider_id: string REQUIRED
+    SIGNATURE "accelerando_clinical"
+  }
+
+  PACKET CCDPacket {
+    patient_id:      string   REQUIRED
+    generated_at:    string   REQUIRED
+    ccd_document:    string   REQUIRED  // CDA R2 / FHIR bundle JSON
+    SIGNATURE "accelerando_clinical"
+    TTL 3600
+  }
+
+  // ── CHANNELS ──────────────────────────────────────────────────────────────
+
+  CHANNEL encounter_outbound {
+    PACKET NewEncounterPacket
+    CONSUMERS ["accelerando_billing", "accelerando_population_health"]
+    DELIVERY at_least_once
+  }
+
+  CHANNEL prescription_outbound {
+    PACKET PrescriptionPacket
+    CONSUMERS ["accelerando_pharmacy"]
+    DELIVERY exactly_once
+  }
+
+  CHANNEL referral_outbound {
+    PACKET ReferralPacket
+    CONSUMERS ["accelerando_scheduling"]
+    DELIVERY at_least_once
+  }
+
+  CHANNEL critical_result_outbound {
+    PACKET CriticalResultPacket
+    CONSUMERS ["accelerando_radiology", "accelerando_patient_portal"]
+    DELIVERY exactly_once
+  }
+
+  CHANNEL ccd_outbound {
+    PACKET CCDPacket
+    CONSUMERS ["accelerando_interchange", "accelerando_patient_portal"]
+    DELIVERY at_least_once
+  }
+
+  // ── MODULES ───────────────────────────────────────────────────────────────
+
+  MODULE ChartEngine {
+
+    FACT ChartContext {
+      unreviewed_critical_results: boolean
+      result_overdue_72h:          boolean
+      allergy_list_incomplete:     boolean
+      unsigned_note_24h:           boolean
+      reconciliation_required:     boolean   // post-encounter med rec needed
+      advance_directive_missing:   boolean
+    }
+
+    RULE critical_result_unreviewed {
+      WHEN ChartContext.unreviewed_critical_results == true
+      THEN FLAG "critical_result_not_acknowledged_immediate_provider_review"
+      SEVERITY critical
+      PRIORITY 100
+    }
+
+    RULE result_overdue {
+      WHEN ChartContext.result_overdue_72h == true
+      THEN FLAG "pending_result_overdue_72h_provider_review_required"
+      SEVERITY warning
+      PRIORITY 85
+    }
+
+    RULE unsigned_note_overdue {
+      WHEN ChartContext.unsigned_note_24h == true
+      THEN FLAG "clinical_note_unsigned_24h_documentation_incomplete"
+      SEVERITY warning
+      PRIORITY 80
+    }
+
+    RULE medication_reconciliation_required {
+      WHEN ChartContext.reconciliation_required == true
+      THEN FLAG "medication_reconciliation_required_post_encounter"
+      SEVERITY warning
+      PRIORITY 82
+    }
+
+    RULE advance_directive_missing {
+      WHEN ChartContext.advance_directive_missing == true
+      THEN FLAG "advance_directive_not_on_file_document_goals_of_care"
+      SEVERITY info
+      PRIORITY 55
+    }
+
+  }
+
+  MODULE SafetyEngine {
+
+    FACT SafetyContext {
+      known_allergy_conflict:       boolean
+      major_drug_interaction:       boolean
+      moderate_drug_interaction:    boolean
+      controlled_no_pdmp_check:     boolean
+      dose_exceeds_renal_limit:     boolean
+      dose_exceeds_hepatic_limit:   boolean
+      duplicate_therapy_detected:   boolean
+    }
+
+    RULE critical_allergy_alert {
+      WHEN SafetyContext.known_allergy_conflict == true
+      THEN FLAG "allergy_conflict_medication_blocked_provider_override_required"
+      SEVERITY critical
+      PRIORITY 100
+    }
+
+    RULE major_drug_interaction {
+      WHEN SafetyContext.major_drug_interaction == true
+      THEN FLAG "major_drug_drug_interaction_detected_clinical_review_required"
+      SEVERITY critical
+      PRIORITY 98
+    }
+
+    RULE controlled_without_pdmp {
+      WHEN SafetyContext.controlled_no_pdmp_check == true
+      THEN FLAG "controlled_substance_ordered_without_pdmp_query_blocked"
+      SEVERITY critical
+      PRIORITY 100
+    }
+
+    RULE renal_dose_adjustment {
+      WHEN SafetyContext.dose_exceeds_renal_limit == true
+      THEN FLAG "dose_exceeds_renal_limit_adjustment_required"
+      SEVERITY warning
+      PRIORITY 90
+    }
+
+    RULE hepatic_dose_adjustment {
+      WHEN SafetyContext.dose_exceeds_hepatic_limit == true
+      THEN FLAG "dose_exceeds_hepatic_limit_adjustment_required"
+      SEVERITY warning
+      PRIORITY 88
+    }
+
+    RULE moderate_drug_interaction {
+      WHEN SafetyContext.moderate_drug_interaction == true
+      THEN FLAG "moderate_drug_interaction_detected_monitor_required"
+      SEVERITY warning
+      PRIORITY 75
+    }
+
+    RULE duplicate_therapy {
+      WHEN SafetyContext.duplicate_therapy_detected == true
+      THEN FLAG "duplicate_therapy_detected_review_medication_list"
+      SEVERITY warning
+      PRIORITY 78
+    }
+
+  }
+
+  MODULE CPOEEngine {
+
+    FACT CPOEContext {
+      stat_order_unfulfilled_1h:   boolean
+      lab_order_no_specimen_4h:    boolean
+      imaging_order_not_scheduled: boolean
+      referral_not_sent_48h:       boolean
+      order_missing_indication:    boolean
+    }
+
+    RULE stat_order_overdue {
+      WHEN CPOEContext.stat_order_unfulfilled_1h == true
+      THEN FLAG "stat_order_unfulfilled_one_hour_escalate"
+      SEVERITY critical
+      PRIORITY 95
+    }
+
+    RULE lab_specimen_overdue {
+      WHEN CPOEContext.lab_order_no_specimen_4h == true
+      THEN FLAG "lab_order_no_specimen_collected_4h_nursing_alert"
+      SEVERITY warning
+      PRIORITY 83
+    }
+
+    RULE imaging_not_scheduled {
+      WHEN CPOEContext.imaging_order_not_scheduled == true
+      THEN FLAG "imaging_order_not_scheduled_radiology_coordination_required"
+      SEVERITY warning
+      PRIORITY 78
+    }
+
+    RULE referral_not_sent {
+      WHEN CPOEContext.referral_not_sent_48h == true
+      THEN FLAG "referral_not_transmitted_48h_follow_up_required"
+      SEVERITY warning
+      PRIORITY 76
+    }
+
+  }
+
+  MODULE VitalsEngine {
+
+    FACT VitalsContext {
+      critically_abnormal_vitals: boolean
+      bp_hypertensive_urgency:    boolean
+      bp_hypertensive_emergency:  boolean
+      oxygen_sat_critical:        boolean
+      heart_rate_critical:        boolean
+      temperature_critical:       boolean
+      vitals_not_recorded:        boolean
+    }
+
+    RULE hypertensive_emergency {
+      WHEN VitalsContext.bp_hypertensive_emergency == true
+      THEN FLAG "hypertensive_emergency_sbp_180_or_higher_immediate_intervention"
+      SEVERITY critical
+      PRIORITY 100
+    }
+
+    RULE oxygen_sat_critical {
+      WHEN VitalsContext.oxygen_sat_critical == true
+      THEN FLAG "oxygen_saturation_below_90_pct_immediate_assessment"
+      SEVERITY critical
+      PRIORITY 100
+    }
+
+    RULE critically_abnormal {
+      WHEN VitalsContext.critically_abnormal_vitals == true
+      THEN FLAG "critically_abnormal_vital_sign_provider_notification_required"
+      SEVERITY critical
+      PRIORITY 97
+    }
+
+    RULE hypertensive_urgency {
+      WHEN VitalsContext.bp_hypertensive_urgency == true
+      THEN FLAG "hypertensive_urgency_sbp_160_to_179_assessment_required"
+      SEVERITY warning
+      PRIORITY 88
+    }
+
+    RULE vitals_not_recorded {
+      WHEN VitalsContext.vitals_not_recorded == true
+      THEN FLAG "encounter_vitals_not_recorded_complete_before_sign"
+      SEVERITY warning
+      PRIORITY 80
+    }
+
+  }
+
+  MODULE ScreeningEngine {
+
+    FACT ScreeningContext {
+      mammogram_overdue:              boolean
+      colorectal_screening_overdue:   boolean
+      cervical_cancer_screening_overdue: boolean
+      lung_cancer_screening_eligible_unscreened: boolean
+      depression_screening_overdue:   boolean
+      diabetes_a1c_overdue:           boolean
+      lipid_panel_overdue:            boolean
+      bone_density_overdue:           boolean
+      immunizations_not_current:      boolean
+    }
+
+    RULE cancer_screening_overdue {
+      WHEN ScreeningContext.mammogram_overdue == true
+      THEN FLAG "mammogram_overdue_order_or_document_declination"
+      SEVERITY info
+      PRIORITY 60
+    }
+
+    RULE colorectal_overdue {
+      WHEN ScreeningContext.colorectal_screening_overdue == true
+      THEN FLAG "colorectal_cancer_screening_overdue_order_or_document_declination"
+      SEVERITY info
+      PRIORITY 60
+    }
+
+    RULE lung_cancer_eligible_unscreened {
+      WHEN ScreeningContext.lung_cancer_screening_eligible_unscreened == true
+      THEN FLAG "lung_cancer_screening_eligible_patient_not_screened_ldct_indicated"
+      SEVERITY warning
+      PRIORITY 70
+    }
+
+    RULE depression_screening {
+      WHEN ScreeningContext.depression_screening_overdue == true
+      THEN FLAG "depression_screening_phq9_overdue_administer_today"
+      SEVERITY info
+      PRIORITY 58
+    }
+
+    RULE diabetes_monitoring {
+      WHEN ScreeningContext.diabetes_a1c_overdue == true
+      THEN FLAG "diabetes_a1c_overdue_order_hemoglobin_a1c"
+      SEVERITY warning
+      PRIORITY 72
+    }
+
+    RULE immunizations_not_current {
+      WHEN ScreeningContext.immunizations_not_current == true
+      THEN FLAG "immunizations_not_current_administer_or_document_declination"
+      SEVERITY info
+      PRIORITY 55
+    }
+
+  }
+
+  // ── REASONER ──────────────────────────────────────────────────────────────
+
+  REASONER clinical_intelligence_reasoner {
+    SCHEDULE "weekly"
+    DESCRIPTION "Analyzes population-level patterns in diagnoses, medication safety events, screening gaps, and documentation quality"
+    INPUT {
+      encounter_data:        string
+      safety_alert_summary:  string
+      unsigned_notes_report: string
+      screening_gap_summary: string
+    }
+    OUTPUT {
+      documentation_quality_score: number
+      top_safety_alerts:           string
+      screening_gap_priorities:    string
+      care_opportunity_summary:    string
+    }
+  }
+
+  // ── WORKFLOWS ─────────────────────────────────────────────────────────────
+
+  WORKFLOW open_encounter {
+    IDEMPOTENT false
+    STEPS {
+      STEP create_encounter {
+        ACTION CreateEncounterRecord
+        ON_FAIL abort
+      }
+      STEP run_screening_checks {
+        ACTION CheckScreeningDue
+        ON_FAIL skip
+      }
+      STEP run_care_gap_checks {
+        ACTION CheckCareGaps
+        ON_FAIL skip
+      }
+      STEP pull_active_alerts {
+        ACTION LoadActiveAlerts
+        ON_FAIL skip
+      }
+    }
+  }
+
+  WORKFLOW record_vitals {
+    IDEMPOTENT false
+    STEPS {
+      STEP save_vitals {
+        ACTION RecordVitals
+        ON_FAIL abort
+      }
+      STEP evaluate_vitals {
+        ACTION EvaluateVitalSigns
+        ON_FAIL skip
+      }
+      STEP alert_if_critical {
+        ACTION GenerateVitalAlert
+        ON_FAIL skip
+      }
+    }
+  }
+
+  WORKFLOW order_medication {
+    IDEMPOTENT false
+    STEPS {
+      STEP check_allergy {
+        ACTION CheckAllergyConflict
+        ON_FAIL abort
+      }
+      STEP check_interactions {
+        ACTION CheckDrugInteractions
+        ON_FAIL abort
+      }
+      STEP check_pdmp_if_controlled {
+        ACTION CheckPDMPRequirement
+        ON_FAIL abort
+      }
+      STEP check_dose_adjustment {
+        ACTION CheckRenalHepaticDose
+        ON_FAIL skip
+      }
+      STEP write_order {
+        ACTION CreateMedicationOrder
+        ON_FAIL abort
+      }
+      STEP transmit_to_pharmacy {
+        ACTION EmitPrescriptionPacket
+        ON_FAIL abort
+      }
+    }
+  }
+
+  WORKFLOW sign_note {
+    IDEMPOTENT false
+    STEPS {
+      STEP validate_completeness {
+        ACTION ValidateNoteCompleteness
+        ON_FAIL abort
+      }
+      STEP check_cosign {
+        ACTION CheckCosignRequired
+        ON_FAIL skip
+      }
+      STEP sign {
+        ACTION SignClinicalNote
+        ON_FAIL abort
+      }
+      STEP close_encounter {
+        ACTION CloseEncounterRecord
+        ON_FAIL skip
+      }
+      STEP emit_encounter_event {
+        ACTION EmitEncounterPacket
+        ON_FAIL skip
+      }
+    }
+  }
+
+  WORKFLOW generate_ccd {
+    IDEMPOTENT true
+    STEPS {
+      STEP compile_chart_data {
+        ACTION CompileChartData
+        ON_FAIL abort
+      }
+      STEP generate_document {
+        ACTION GenerateCCDDocument
+        ON_FAIL abort
+      }
+      STEP emit_ccd {
+        ACTION EmitCCDPacket
+        ON_FAIL skip
+      }
+    }
+  }
+
+  WORKFLOW acknowledge_result {
+    IDEMPOTENT true
+    STEPS {
+      STEP mark_acknowledged {
+        ACTION AcknowledgeResult
+        ON_FAIL abort
+      }
+      STEP check_critical {
+        ACTION CheckResultCritical
+        ON_FAIL skip
+      }
+      STEP notify_if_critical {
+        ACTION EmitCriticalResultPacket
+        ON_FAIL skip
+      }
+      STEP release_to_portal {
+        ACTION ReleaseResultToPortal
+        ON_FAIL skip
+      }
+    }
+  }
+
+  // ── ACTIONS ───────────────────────────────────────────────────────────────
+
+  ACTION CreateEncounterRecord {
+    DESCRIPTION "Creates encounter, links to appointment, sets initial status"
+    DETERMINISTIC true
+    INPUT {
+      patient_id:      string   REQUIRED
+      provider_id:     string   REQUIRED
+      appointment_id:  string
+      encounter_type:  string   REQUIRED
+      chief_complaint: string
+    }
+    OUTPUT {
+      encounter_id: string REQUIRED
+    }
+  }
+
+  ACTION CheckAllergyConflict {
+    DESCRIPTION "Checks ordered drug against patient's allergy list using RxNorm cross-sensitivity rules"
+    DETERMINISTIC true
+    INPUT {
+      patient_id:   string   REQUIRED
+      rxnorm_code:  string   REQUIRED
+      drug_name:    string   REQUIRED
+    }
+    OUTPUT {
+      conflict_detected: boolean  REQUIRED
+      conflict_detail:   string
+      severity:          string
+    }
+  }
+
+  ACTION CheckDrugInteractions {
+    DESCRIPTION "Queries drug interaction database for all active medications plus the new drug"
+    DETERMINISTIC true
+    INPUT {
+      patient_id:       string   REQUIRED
+      new_rxnorm_code:  string   REQUIRED
+    }
+    OUTPUT {
+      interactions:     string   REQUIRED  // JSON array: {drug1, drug2, severity, description}
+      major_detected:   boolean  REQUIRED
+      moderate_detected: boolean REQUIRED
+    }
+  }
+
+  ACTION CheckPDMPRequirement {
+    DESCRIPTION "Verifies PDMP has been queried before a controlled substance can be ordered"
+    DETERMINISTIC true
+    INPUT {
+      patient_id:       string   REQUIRED
+      prescriber_id:    string   REQUIRED
+      dea_schedule:     string   REQUIRED
+      state:            string   REQUIRED
+    }
+    OUTPUT {
+      pdmp_check_current: boolean  REQUIRED
+      pdmp_check_date:    string
+      block_order:        boolean  REQUIRED
+    }
+  }
+
+  ACTION CheckRenalHepaticDose {
+    DESCRIPTION "Evaluates dose appropriateness given patient's renal and hepatic function"
+    DETERMINISTIC true
+    INPUT {
+      patient_id:    string   REQUIRED
+      rxnorm_code:   string   REQUIRED
+      dose:          string   REQUIRED
+      route:         string   REQUIRED
+    }
+    OUTPUT {
+      renal_adjustment_required:  boolean  REQUIRED
+      hepatic_adjustment_required: boolean REQUIRED
+      recommended_dose:           string
+    }
+  }
+
+  ACTION CreateMedicationOrder {
+    DESCRIPTION "Writes medication order to patient chart after safety checks pass"
+    DETERMINISTIC true
+    INPUT {
+      patient_id:    string   REQUIRED
+      encounter_id:  string   REQUIRED
+      ordered_by:    string   REQUIRED
+      drug_name:     string   REQUIRED
+      rxnorm_code:   string   REQUIRED
+      dose:          string   REQUIRED
+      route:         string   REQUIRED
+      frequency:     string   REQUIRED
+      days_supply:   number   REQUIRED
+      indication:    string
+      controlled:    boolean  DEFAULT false
+      dea_schedule:  string
+    }
+    OUTPUT {
+      order_id:    string   REQUIRED
+    }
+  }
+
+  ACTION EmitPrescriptionPacket {
+    DESCRIPTION "Emits PrescriptionPacket to pharmacy channel for e-prescribing"
+    DETERMINISTIC true
+    INPUT {
+      order_id: string REQUIRED
+    }
+    OUTPUT {
+      emitted: boolean REQUIRED
+    }
+  }
+
+  ACTION RecordVitals {
+    DESCRIPTION "Saves vital signs to the encounter, computes BMI if height and weight provided"
+    DETERMINISTIC true
+    INPUT {
+      patient_id:         string  REQUIRED
+      encounter_id:       string  REQUIRED
+      recorded_by:        string  REQUIRED
+      systolic_bp:        number
+      diastolic_bp:       number
+      heart_rate:         number
+      respiratory_rate:   number
+      temperature_f:      number
+      oxygen_saturation:  number
+      weight_kg:          number
+      height_cm:          number
+      pain_score:         number
+    }
+    OUTPUT {
+      vital_id: string  REQUIRED
+      bmi:      number
+    }
+  }
+
+  ACTION EvaluateVitalSigns {
+    DESCRIPTION "Compares vitals against clinical thresholds and sets VitalsContext flags"
+    DETERMINISTIC true
+    INPUT {
+      vital_id: string REQUIRED
+    }
+    OUTPUT {
+      alerts_generated: number REQUIRED
+    }
+  }
+
+  ACTION GenerateVitalAlert {
+    DESCRIPTION "Creates ClinicalAlert records for out-of-range vitals"
+    DETERMINISTIC true
+    INPUT {
+      patient_id:   string  REQUIRED
+      encounter_id: string  REQUIRED
+      vital_id:     string  REQUIRED
+    }
+    OUTPUT {
+      alert_ids: string  REQUIRED  // JSON array
+    }
+  }
+
+  ACTION CheckScreeningDue {
+    DESCRIPTION "Evaluates USPSTF screening schedules for this patient and generates care reminders"
+    DETERMINISTIC true
+    INPUT {
+      patient_id: string REQUIRED
+      encounter_id: string REQUIRED
+    }
+    OUTPUT {
+      screenings_due:  string  REQUIRED  // JSON array
+    }
+  }
+
+  ACTION CheckCareGaps {
+    DESCRIPTION "Identifies open care gaps from population health and presents them at encounter open"
+    DETERMINISTIC true
+    INPUT {
+      patient_id:   string  REQUIRED
+      encounter_id: string  REQUIRED
+    }
+    OUTPUT {
+      care_gaps: string  REQUIRED  // JSON array
+    }
+  }
+
+  ACTION LoadActiveAlerts {
+    DESCRIPTION "Loads unacknowledged clinical alerts for display at encounter start"
+    DETERMINISTIC true
+    INPUT {
+      patient_id: string REQUIRED
+    }
+    OUTPUT {
+      alerts: string  REQUIRED  // JSON array
+    }
+  }
+
+  ACTION ValidateNoteCompleteness {
+    DESCRIPTION "Checks that SOAP sections are populated and vitals recorded before allowing sign"
+    DETERMINISTIC true
+    INPUT {
+      note_id:      string  REQUIRED
+      encounter_id: string  REQUIRED
+    }
+    OUTPUT {
+      complete:          boolean  REQUIRED
+      missing_sections:  string
+    }
+  }
+
+  ACTION CheckCosignRequired {
+    DESCRIPTION "Determines if note requires co-signature based on provider role and encounter type"
+    DETERMINISTIC true
+    INPUT {
+      author_id:    string  REQUIRED
+      encounter_id: string  REQUIRED
+    }
+    OUTPUT {
+      cosign_required:  boolean  REQUIRED
+      cosigner_role:    string
+    }
+  }
+
+  ACTION SignClinicalNote {
+    DESCRIPTION "Applies provider signature and timestamp to the note, marks it immutable"
+    DETERMINISTIC true
+    INPUT {
+      note_id:      string  REQUIRED
+      signed_by:    string  REQUIRED
+    }
+    OUTPUT {
+      signed: boolean  REQUIRED
+      signed_at: string  REQUIRED
+    }
+  }
+
+  ACTION CloseEncounterRecord {
+    DESCRIPTION "Transitions encounter to signed/closed and marks billing as ready"
+    DETERMINISTIC true
+    INPUT {
+      encounter_id: string  REQUIRED
+    }
+    OUTPUT {
+      closed: boolean  REQUIRED
+    }
+  }
+
+  ACTION EmitEncounterPacket {
+    DESCRIPTION "Emits NewEncounterPacket to billing and population health channels"
+    DETERMINISTIC true
+    INPUT {
+      encounter_id: string  REQUIRED
+    }
+    OUTPUT {
+      emitted: boolean  REQUIRED
+    }
+  }
+
+  ACTION AcknowledgeResult {
+    DESCRIPTION "Marks result as acknowledged and records the acknowledging provider"
+    DETERMINISTIC true
+    INPUT {
+      result_id:        string  REQUIRED
+      acknowledged_by:  string  REQUIRED
+    }
+    OUTPUT {
+      acknowledged: boolean  REQUIRED
+    }
+  }
+
+  ACTION CheckResultCritical {
+    DESCRIPTION "Evaluates result against critical value thresholds and sets critical flag"
+    DETERMINISTIC true
+    INPUT {
+      result_id: string  REQUIRED
+    }
+    OUTPUT {
+      critical: boolean  REQUIRED
+    }
+  }
+
+  ACTION EmitCriticalResultPacket {
+    DESCRIPTION "Emits CriticalResultPacket to critical result channel for immediate provider notification"
+    DETERMINISTIC true
+    INPUT {
+      result_id: string  REQUIRED
+    }
+    OUTPUT {
+      emitted: boolean  REQUIRED
+    }
+  }
+
+  ACTION ReleaseResultToPortal {
+    DESCRIPTION "Releases result to patient portal after provider review, blocking critical results from auto-release"
+    DETERMINISTIC true
+    INPUT {
+      result_id:    string  REQUIRED
+      force_hold:   boolean DEFAULT false
+    }
+    OUTPUT {
+      released: boolean  REQUIRED
+      hold_reason: string
+    }
+  }
+
+  ACTION CompileChartData {
+    DESCRIPTION "Assembles current problems, medications, allergies, results, and immunizations for CCD generation"
+    DETERMINISTIC true
+    INPUT {
+      patient_id: string  REQUIRED
+    }
+    OUTPUT {
+      chart_snapshot: string  REQUIRED  // JSON
+    }
+  }
+
+  ACTION GenerateCCDDocument {
+    DESCRIPTION "AI generates a patient-readable CCD summary from structured chart data"
+    DETERMINISTIC false
+    AI_MODEL "claude-sonnet-4-6"
+    INPUT {
+      patient_id:     string  REQUIRED
+      chart_snapshot: string  REQUIRED
+      format:         string  DEFAULT "FHIR"  // "FHIR" | "CDA"
+    }
+    OUTPUT {
+      ccd_document: string  REQUIRED
+    }
+  }
+
+  ACTION EmitCCDPacket {
+    DESCRIPTION "Emits CCDPacket to interchange and patient portal channels"
+    DETERMINISTIC true
+    INPUT {
+      patient_id:   string  REQUIRED
+      ccd_document: string  REQUIRED
+    }
+    OUTPUT {
+      emitted: boolean  REQUIRED
+    }
+  }
+
+  ACTION GenerateClinicalNote {
+    DESCRIPTION "AI drafts a SOAP note from encounter data — provider reviews and edits before signing"
+    DETERMINISTIC false
+    AI_MODEL "claude-sonnet-4-6"
+    INPUT {
+      encounter_id:    string  REQUIRED
+      chief_complaint: string  REQUIRED
+      vitals_summary:  string  REQUIRED
+      problem_list:    string  REQUIRED
+      medication_list: string  REQUIRED
+      orders_placed:   string  REQUIRED
+    }
+    OUTPUT {
+      subjective: string  REQUIRED
+      objective:  string  REQUIRED
+      assessment: string  REQUIRED
+      plan:       string  REQUIRED
+    }
+  }
+
+  ACTION SuggestDifferential {
+    DESCRIPTION "AI suggests differential diagnoses given chief complaint, vitals, and problem list"
+    DETERMINISTIC false
+    AI_MODEL "claude-sonnet-4-6"
+    INPUT {
+      chief_complaint:  string  REQUIRED
+      vitals_summary:   string  REQUIRED
+      problem_list:     string  REQUIRED
+      medication_list:  string  REQUIRED
+      relevant_results: string
+    }
+    OUTPUT {
+      differential:     string  REQUIRED  // JSON: [{diagnosis, icd10, probability_rank, reasoning}]
+    }
+  }
+
+  ACTION GenerateReferralLetter {
+    DESCRIPTION "AI generates specialist referral letter with clinical summary and reason for referral"
+    DETERMINISTIC false
+    AI_MODEL "claude-sonnet-4-6"
+    INPUT {
+      patient_id:           string  REQUIRED
+      receiving_specialty:  string  REQUIRED
+      reason_for_referral:  string  REQUIRED
+      relevant_history:     string  REQUIRED
+      relevant_results:     string
+    }
+    OUTPUT {
+      referral_letter: string  REQUIRED
+    }
+  }
+
+  // ── PREFERENCES ───────────────────────────────────────────────────────────
+
+  PREFERENCE critical_result_ack_hours {
+    DEFAULT 1
+    TYPE    number
+    DESCRIPTION "Hours before an unacknowledged critical result triggers escalation"
+  }
+
+  PREFERENCE unsigned_note_hours {
+    DEFAULT 24
+    TYPE    number
+    DESCRIPTION "Hours after encounter before unsigned note triggers flag"
+  }
+
+  PREFERENCE pdmp_check_valid_days {
+    DEFAULT 3
+    TYPE    number
+    DESCRIPTION "Days a PDMP query remains current before another query is required"
+  }
+
+  PREFERENCE result_overdue_hours {
+    DEFAULT 72
+    TYPE    number
+    DESCRIPTION "Hours after result received before unacknowledged result triggers flag"
+  }
+
+}

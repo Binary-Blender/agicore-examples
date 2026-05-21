@@ -1,0 +1,912 @@
+APP accelerando_scheduling {
+  VERSION "1.0.0"
+  PORT 3008
+  DESCRIPTION "Patient scheduling engine — provider templates, appointment booking, waitlist management, recall campaigns, and resource coordination"
+
+  // ── ENTITIES ──────────────────────────────────────────────────────────────
+
+  ENTITY Provider {
+    FIELDS {
+      id:              string   REQUIRED
+      npi:             string   REQUIRED
+      name:            string   REQUIRED
+      specialty:       string   REQUIRED
+      department:      string   REQUIRED
+      active:          boolean  DEFAULT true
+      // schedule template link
+      default_template_id: string
+      // scheduling rules
+      max_patients_per_day: number DEFAULT 24
+      buffer_minutes:       number DEFAULT 5
+    }
+    CRUD [create, read, list, edit]
+  }
+
+  ENTITY ScheduleTemplate {
+    FIELDS {
+      id:              string   REQUIRED
+      provider_id:     string   REQUIRED
+      day_of_week:     number   REQUIRED  // 0=Sun..6=Sat
+      start_time:      string   REQUIRED  // "08:00"
+      end_time:        string   REQUIRED  // "17:00"
+      slot_minutes:    number   REQUIRED  DEFAULT 15
+      lunch_start:     string
+      lunch_end:       string
+      effective_date:  string   REQUIRED
+      active:          boolean  DEFAULT true
+    }
+    CRUD [create, read, list, edit]
+  }
+
+  ENTITY AppointmentType {
+    FIELDS {
+      id:              string   REQUIRED
+      name:            string   REQUIRED  // "New Patient", "Follow-Up", "Annual Wellness", "Urgent"
+      duration_minutes: number  REQUIRED
+      color_hex:       string   DEFAULT "#4A90E2"
+      requires_referral: boolean DEFAULT false
+      telehealth_eligible: boolean DEFAULT false
+      instructions:   string
+    }
+    CRUD [create, read, list, edit]
+  }
+
+  ENTITY Appointment {
+    FIELDS {
+      id:              string   REQUIRED
+      patient_id:      string   REQUIRED
+      provider_id:     string   REQUIRED
+      appointment_type_id: string REQUIRED
+      appointment_date: string  REQUIRED
+      start_time:      string   REQUIRED
+      end_time:        string   REQUIRED
+      room_id:         string
+      status:          string   DEFAULT "requested"
+      telehealth:      boolean  DEFAULT false
+      chief_complaint: string
+      notes:           string
+      // recall linkage
+      recall_task_id:  string
+      // cancellation tracking
+      cancelled_reason: string
+      cancelled_by:    string   // "patient" | "provider" | "system"
+      no_show:         boolean  DEFAULT false
+      // reminders
+      reminder_24h_sent: boolean DEFAULT false
+      reminder_2h_sent:  boolean DEFAULT false
+      // billing linkage
+      encounter_id:    string
+    }
+    STAGES [requested, confirmed, checked_in, in_progress, completed, cancelled, no_show]
+    CRUD [create, read, list, edit]
+  }
+
+  ENTITY WaitlistEntry {
+    FIELDS {
+      id:              string   REQUIRED
+      patient_id:      string   REQUIRED
+      provider_id:     string
+      specialty:       string
+      appointment_type_id: string REQUIRED
+      earliest_date:   string   REQUIRED
+      latest_date:     string
+      added_date:      string   REQUIRED
+      priority:        number   DEFAULT 5  // 1=urgent..10=routine
+      notified:        boolean  DEFAULT false
+      offered_date:    string
+      accepted:        boolean
+      expired:         boolean  DEFAULT false
+      notes:           string
+    }
+    STAGES [waiting, offered, accepted, expired]
+    CRUD [create, read, list, edit]
+  }
+
+  ENTITY RecallTask {
+    FIELDS {
+      id:              string   REQUIRED
+      patient_id:      string   REQUIRED
+      provider_id:     string   REQUIRED
+      recall_reason:   string   REQUIRED  // "Annual Wellness", "6-month follow-up", "Lab review"
+      due_date:        string   REQUIRED
+      // outreach tracking
+      outreach_attempts: number DEFAULT 0
+      last_outreach_date: string
+      outreach_method:  string  // "sms", "email", "phone", "portal"
+      status:           string  DEFAULT "pending"
+      appointment_id:   string
+      // escalation
+      escalated:        boolean DEFAULT false
+      escalation_reason: string
+    }
+    STAGES [pending, outreach_sent, appointment_scheduled, completed, lost_to_followup]
+    CRUD [create, read, list, edit]
+  }
+
+  ENTITY Room {
+    FIELDS {
+      id:              string   REQUIRED
+      name:            string   REQUIRED  // "Exam Room 1", "Procedure Suite A"
+      department:      string   REQUIRED
+      room_type:       string   REQUIRED  // "exam", "procedure", "imaging", "telehealth"
+      capacity:        number   DEFAULT 1
+      equipment_ids:   string   // comma-separated
+      active:          boolean  DEFAULT true
+    }
+    CRUD [create, read, list, edit]
+  }
+
+  ENTITY ScheduleException {
+    FIELDS {
+      id:              string   REQUIRED
+      provider_id:     string   REQUIRED
+      exception_date:  string   REQUIRED
+      exception_type:  string   REQUIRED  // "vacation", "conference", "sick", "half_day"
+      morning_available: boolean DEFAULT false
+      afternoon_available: boolean DEFAULT false
+      notes:           string
+    }
+    CRUD [create, read, list, edit]
+  }
+
+  ENTITY NoShowRecord {
+    FIELDS {
+      id:              string   REQUIRED
+      patient_id:      string   REQUIRED
+      appointment_id:  string   REQUIRED
+      no_show_date:    string   REQUIRED
+      was_reminded:    boolean  DEFAULT false
+      reschedule_offered: boolean DEFAULT false
+      reschedule_accepted: boolean DEFAULT false
+      clinical_note:   string   // for documentation
+    }
+    CRUD [create, read, list]
+  }
+
+  // ── PACKETS ───────────────────────────────────────────────────────────────
+
+  PACKET AppointmentConfirmedPacket {
+    appointment_id:    string   REQUIRED
+    patient_id:        string   REQUIRED
+    provider_id:       string   REQUIRED
+    appointment_date:  string   REQUIRED
+    start_time:        string   REQUIRED
+    appointment_type:  string   REQUIRED
+    telehealth:        boolean  REQUIRED
+    SIGNATURE "accelerando_scheduling"
+  }
+
+  PACKET AppointmentCancelledPacket {
+    appointment_id:    string   REQUIRED
+    patient_id:        string   REQUIRED
+    provider_id:       string   REQUIRED
+    cancelled_reason:  string   REQUIRED
+    cancelled_by:      string   REQUIRED
+    SIGNATURE "accelerando_scheduling"
+  }
+
+  PACKET RecallDuePacket {
+    recall_task_id:    string   REQUIRED
+    patient_id:        string   REQUIRED
+    provider_id:       string   REQUIRED
+    recall_reason:     string   REQUIRED
+    due_date:          string   REQUIRED
+    attempts_made:     number   REQUIRED
+    SIGNATURE "accelerando_scheduling"
+  }
+
+  PACKET NoShowAlertPacket {
+    appointment_id:    string   REQUIRED
+    patient_id:        string   REQUIRED
+    provider_id:       string   REQUIRED
+    no_show_date:      string   REQUIRED
+    no_show_count_ytd: number   REQUIRED
+    SIGNATURE "accelerando_scheduling"
+  }
+
+  // ── CHANNELS ──────────────────────────────────────────────────────────────
+
+  CHANNEL appointment_confirmed_outbound {
+    PACKET AppointmentConfirmedPacket
+    CONSUMERS ["accelerando_clinical", "accelerando_billing", "accelerando_patient_portal"]
+    DELIVERY at_least_once
+  }
+
+  CHANNEL appointment_cancelled_outbound {
+    PACKET AppointmentCancelledPacket
+    CONSUMERS ["accelerando_clinical", "accelerando_billing", "accelerando_patient_portal"]
+    DELIVERY at_least_once
+  }
+
+  CHANNEL recall_due_outbound {
+    PACKET RecallDuePacket
+    CONSUMERS ["accelerando_patient_portal"]
+    DELIVERY at_least_once
+  }
+
+  CHANNEL no_show_alert_outbound {
+    PACKET NoShowAlertPacket
+    CONSUMERS ["accelerando_clinical", "accelerando_population_health"]
+    DELIVERY at_least_once
+  }
+
+  // ── MODULES ───────────────────────────────────────────────────────────────
+
+  MODULE SchedulingEngine {
+
+    FACT SchedulingContext {
+      double_booking_detected:    boolean
+      resource_conflict_detected: boolean
+      provider_over_capacity:     boolean
+      appointment_outside_template: boolean
+      unconfirmed_appointments_24h: boolean
+      back_to_back_no_buffer:     boolean
+    }
+
+    RULE double_booking_prevention {
+      WHEN SchedulingContext.double_booking_detected == true
+      THEN FLAG "double_booking_blocked_slot_already_occupied"
+      SEVERITY critical
+      PRIORITY 100
+    }
+
+    RULE resource_conflict_prevention {
+      WHEN SchedulingContext.resource_conflict_detected == true
+      THEN FLAG "resource_conflict_room_or_equipment_unavailable"
+      SEVERITY critical
+      PRIORITY 100
+    }
+
+    RULE provider_daily_capacity {
+      WHEN SchedulingContext.provider_over_capacity == true
+      THEN FLAG "provider_daily_maximum_reached_schedule_at_risk"
+      SEVERITY warning
+      PRIORITY 85
+    }
+
+    RULE schedule_template_violation {
+      WHEN SchedulingContext.appointment_outside_template == true
+      THEN FLAG "appointment_outside_provider_template_hours"
+      SEVERITY warning
+      PRIORITY 75
+    }
+
+    RULE appointment_buffer_violation {
+      WHEN SchedulingContext.back_to_back_no_buffer == true
+      THEN FLAG "no_buffer_time_between_appointments_provider_at_risk"
+      SEVERITY warning
+      PRIORITY 70
+    }
+
+    RULE confirmation_reminder_24h {
+      WHEN SchedulingContext.unconfirmed_appointments_24h == true
+      THEN FLAG "unconfirmed_appointment_24h_reminder_required"
+      SEVERITY info
+      PRIORITY 50
+    }
+
+  }
+
+  MODULE RecallEngine {
+
+    FACT RecallContext {
+      overdue_recalls_exist:       boolean
+      recall_three_attempts_no_response: boolean
+      high_priority_recall_overdue: boolean
+      recall_escalation_required:  boolean
+    }
+
+    SCORE recall_outreach_score {
+      INITIAL   0
+      MIN       0
+      MAX     100
+      DECAY     0 PER day
+      THRESHOLD responsive AT 75 THEN FLAG "patient_recall_responsive"
+      THRESHOLD lapsed     AT 25 THEN FLAG "recall_patient_lapsed_escalate"
+    }
+
+    RULE recall_overdue {
+      WHEN RecallContext.overdue_recalls_exist == true
+      THEN FLAG "recall_tasks_overdue_outreach_required"
+      SEVERITY warning
+      PRIORITY 80
+    }
+
+    RULE recall_no_response_escalate {
+      WHEN RecallContext.recall_three_attempts_no_response == true
+      THEN FLAG "three_recall_attempts_no_response_provider_review"
+      SEVERITY warning
+      PRIORITY 78
+    }
+
+    RULE high_priority_recall_critical {
+      WHEN RecallContext.high_priority_recall_overdue == true
+      THEN FLAG "high_priority_recall_overdue_clinical_escalation_required"
+      SEVERITY critical
+      PRIORITY 92
+    }
+
+  }
+
+  MODULE WaitlistEngine {
+
+    FACT WaitlistContext {
+      cancellation_slot_available:  boolean
+      high_priority_patient_waiting: boolean
+      waitlist_entry_expired:       boolean
+      same_day_slot_available:      boolean
+    }
+
+    RULE waitlist_fill_on_cancellation {
+      WHEN WaitlistContext.cancellation_slot_available == true
+      THEN FLAG "cancellation_slot_open_notify_waitlist"
+      SEVERITY info
+      PRIORITY 65
+    }
+
+    RULE high_priority_waitlist {
+      WHEN WaitlistContext.high_priority_patient_waiting == true
+      THEN FLAG "high_priority_patient_on_waitlist_expedite"
+      SEVERITY warning
+      PRIORITY 88
+    }
+
+    RULE same_day_waitlist_offer {
+      WHEN WaitlistContext.same_day_slot_available == true
+      THEN FLAG "same_day_slot_available_notify_waitlist_patients"
+      SEVERITY info
+      PRIORITY 60
+    }
+
+  }
+
+  MODULE NoShowEngine {
+
+    FACT NoShowContext {
+      patient_no_show_rate_high:   boolean
+      provider_no_show_rate_high:  boolean
+      repeated_no_show_patient:    boolean
+      no_show_without_reminder:    boolean
+    }
+
+    SCORE patient_reliability_score {
+      INITIAL 100
+      MIN       0
+      MAX     100
+      DECAY     0 PER day
+      THRESHOLD reliable    AT 85 THEN FLAG "patient_reliable_appointment_adherence"
+      THRESHOLD at_risk     AT 70 THEN FLAG "patient_no_show_risk_reminder_protocol"
+      THRESHOLD chronic     AT 50 THEN FLAG "patient_chronic_no_show_policy_review"
+    }
+
+    RULE repeated_no_show {
+      WHEN NoShowContext.repeated_no_show_patient == true
+      THEN FLAG "repeated_no_show_patient_escalate_to_provider"
+      SEVERITY warning
+      PRIORITY 80
+    }
+
+    RULE no_show_without_reminder {
+      WHEN NoShowContext.no_show_without_reminder == true
+      THEN FLAG "no_show_occurred_without_reminder_sent_process_gap"
+      SEVERITY warning
+      PRIORITY 72
+    }
+
+  }
+
+  // ── WORKFLOWS ─────────────────────────────────────────────────────────────
+
+  WORKFLOW book_appointment {
+    IDEMPOTENT false
+    STEPS {
+      STEP check_availability {
+        ACTION FindAvailableSlots
+        ON_FAIL abort
+      }
+      STEP check_double_booking {
+        ACTION ValidateSlot
+        ON_FAIL abort
+      }
+      STEP check_resources {
+        ACTION CheckResourceAvailability
+        ON_FAIL abort
+      }
+      STEP create_appointment {
+        ACTION CreateAppointmentRecord
+        ON_FAIL abort
+      }
+      STEP schedule_reminders {
+        ACTION ScheduleReminders
+        ON_FAIL skip
+      }
+      STEP notify_downstream {
+        ACTION EmitConfirmationPacket
+        ON_FAIL skip
+      }
+    }
+  }
+
+  WORKFLOW cancel_appointment {
+    IDEMPOTENT true
+    STEPS {
+      STEP mark_cancelled {
+        ACTION CancelAppointmentRecord
+        ON_FAIL abort
+      }
+      STEP offer_waitlist {
+        ACTION NotifyWaitlist
+        ON_FAIL skip
+      }
+      STEP notify_downstream {
+        ACTION EmitCancellationPacket
+        ON_FAIL skip
+      }
+    }
+  }
+
+  WORKFLOW reschedule_appointment {
+    IDEMPOTENT false
+    STEPS {
+      STEP cancel_original {
+        ACTION CancelAppointmentRecord
+        ON_FAIL abort
+      }
+      STEP book_new {
+        ACTION CreateAppointmentRecord
+        ON_FAIL abort
+      }
+      STEP update_reminders {
+        ACTION ScheduleReminders
+        ON_FAIL skip
+      }
+      STEP notify_downstream {
+        ACTION EmitConfirmationPacket
+        ON_FAIL skip
+      }
+    }
+  }
+
+  WORKFLOW recall_outreach {
+    IDEMPOTENT false
+    STEPS {
+      STEP identify_overdue {
+        ACTION FindOverdueRecalls
+        ON_FAIL abort
+      }
+      STEP generate_messages {
+        ACTION GenerateRecallMessages
+        ON_FAIL abort
+      }
+      STEP send_outreach {
+        ACTION SendOutreach
+        ON_FAIL skip
+      }
+      STEP record_attempt {
+        ACTION RecordOutreachAttempt
+        ON_FAIL skip
+      }
+    }
+  }
+
+  WORKFLOW process_no_show {
+    IDEMPOTENT true
+    STEPS {
+      STEP mark_no_show {
+        ACTION MarkAppointmentNoShow
+        ON_FAIL abort
+      }
+      STEP record_no_show {
+        ACTION CreateNoShowRecord
+        ON_FAIL skip
+      }
+      STEP update_reliability_score {
+        ACTION UpdatePatientReliabilityScore
+        ON_FAIL skip
+      }
+      STEP offer_reschedule {
+        ACTION OfferReschedule
+        ON_FAIL skip
+      }
+      STEP emit_alert {
+        ACTION EmitNoShowAlert
+        ON_FAIL skip
+      }
+    }
+  }
+
+  WORKFLOW waitlist_fill {
+    IDEMPOTENT false
+    STEPS {
+      STEP find_candidates {
+        ACTION FindWaitlistCandidates
+        ON_FAIL abort
+      }
+      STEP notify_candidates {
+        ACTION NotifyWaitlistPatients
+        ON_FAIL skip
+      }
+      STEP hold_slot {
+        ACTION HoldSlotForWaitlist
+        ON_FAIL abort
+      }
+    }
+  }
+
+  // ── ACTIONS ───────────────────────────────────────────────────────────────
+
+  ACTION FindAvailableSlots {
+    DESCRIPTION "Returns open slots for a provider on requested dates, honoring template, exceptions, and existing appointments"
+    DETERMINISTIC true
+    INPUT {
+      provider_id:        string   REQUIRED
+      appointment_type_id: string  REQUIRED
+      preferred_date:     string   REQUIRED
+      search_days_forward: number  DEFAULT 14
+      telehealth:         boolean  DEFAULT false
+    }
+    OUTPUT {
+      available_slots:    string   REQUIRED  // JSON array of {date, start_time, end_time, room_id}
+    }
+  }
+
+  ACTION ValidateSlot {
+    DESCRIPTION "Confirms slot is free — detects double booking before write"
+    DETERMINISTIC true
+    INPUT {
+      provider_id:     string   REQUIRED
+      appointment_date: string  REQUIRED
+      start_time:      string   REQUIRED
+      end_time:        string   REQUIRED
+    }
+    OUTPUT {
+      slot_available:  boolean  REQUIRED
+      conflict_reason: string
+    }
+  }
+
+  ACTION CheckResourceAvailability {
+    DESCRIPTION "Validates room and equipment are not double-booked"
+    DETERMINISTIC true
+    INPUT {
+      room_id:         string
+      equipment_ids:   string
+      appointment_date: string  REQUIRED
+      start_time:      string   REQUIRED
+      end_time:        string   REQUIRED
+    }
+    OUTPUT {
+      resources_available: boolean REQUIRED
+      conflict_detail:     string
+    }
+  }
+
+  ACTION CreateAppointmentRecord {
+    DESCRIPTION "Writes the appointment record and updates provider slot utilization"
+    DETERMINISTIC true
+    INPUT {
+      patient_id:          string   REQUIRED
+      provider_id:         string   REQUIRED
+      appointment_type_id: string   REQUIRED
+      appointment_date:    string   REQUIRED
+      start_time:          string   REQUIRED
+      end_time:            string   REQUIRED
+      room_id:             string
+      chief_complaint:     string
+      telehealth:          boolean  DEFAULT false
+      recall_task_id:      string
+    }
+    OUTPUT {
+      appointment_id: string REQUIRED
+    }
+  }
+
+  ACTION ScheduleReminders {
+    DESCRIPTION "Queues 24h and 2h appointment reminders via patient preferred channel"
+    DETERMINISTIC true
+    INPUT {
+      appointment_id: string REQUIRED
+      patient_id:     string REQUIRED
+    }
+    OUTPUT {
+      reminders_scheduled: boolean REQUIRED
+    }
+  }
+
+  ACTION EmitConfirmationPacket {
+    DESCRIPTION "Emits AppointmentConfirmedPacket to downstream consumers"
+    DETERMINISTIC true
+    INPUT {
+      appointment_id: string REQUIRED
+    }
+    OUTPUT {
+      emitted: boolean REQUIRED
+    }
+  }
+
+  ACTION CancelAppointmentRecord {
+    DESCRIPTION "Marks appointment cancelled with reason and cancelling party"
+    DETERMINISTIC true
+    INPUT {
+      appointment_id:   string REQUIRED
+      cancelled_reason: string REQUIRED
+      cancelled_by:     string REQUIRED
+    }
+    OUTPUT {
+      cancelled: boolean REQUIRED
+    }
+  }
+
+  ACTION EmitCancellationPacket {
+    DESCRIPTION "Emits AppointmentCancelledPacket to downstream consumers"
+    DETERMINISTIC true
+    INPUT {
+      appointment_id: string REQUIRED
+    }
+    OUTPUT {
+      emitted: boolean REQUIRED
+    }
+  }
+
+  ACTION NotifyWaitlist {
+    DESCRIPTION "Finds waitlist patients whose criteria match the newly cancelled slot and sends offers"
+    DETERMINISTIC true
+    INPUT {
+      provider_id:         string REQUIRED
+      appointment_date:    string REQUIRED
+      start_time:          string REQUIRED
+      appointment_type_id: string REQUIRED
+    }
+    OUTPUT {
+      patients_notified: number REQUIRED
+    }
+  }
+
+  ACTION FindWaitlistCandidates {
+    DESCRIPTION "Queries waitlist by priority score for a given provider and date range"
+    DETERMINISTIC true
+    INPUT {
+      provider_id:    string  REQUIRED
+      slot_date:      string  REQUIRED
+      slot_start:     string  REQUIRED
+      max_candidates: number  DEFAULT 5
+    }
+    OUTPUT {
+      candidates: string REQUIRED  // JSON array of waitlist_entry_ids sorted by priority
+    }
+  }
+
+  ACTION NotifyWaitlistPatients {
+    DESCRIPTION "Sends slot-available notifications to waitlist candidates via preferred channel"
+    DETERMINISTIC true
+    INPUT {
+      candidate_ids:  string  REQUIRED
+      slot_date:      string  REQUIRED
+      slot_start:     string  REQUIRED
+      provider_id:    string  REQUIRED
+    }
+    OUTPUT {
+      notifications_sent: number REQUIRED
+    }
+  }
+
+  ACTION HoldSlotForWaitlist {
+    DESCRIPTION "Temporarily holds slot while first-responding patient confirms"
+    DETERMINISTIC true
+    INPUT {
+      provider_id:      string  REQUIRED
+      slot_date:        string  REQUIRED
+      slot_start:       string  REQUIRED
+      hold_minutes:     number  DEFAULT 60
+    }
+    OUTPUT {
+      hold_expires_at: string  REQUIRED
+    }
+  }
+
+  ACTION FindOverdueRecalls {
+    DESCRIPTION "Returns recall tasks past due_date with fewer than 3 outreach attempts"
+    DETERMINISTIC true
+    INPUT {
+      department:   string
+      days_overdue: number DEFAULT 7
+    }
+    OUTPUT {
+      recall_task_ids: string REQUIRED  // JSON array
+    }
+  }
+
+  ACTION GenerateRecallMessages {
+    DESCRIPTION "AI generates personalized recall outreach message per patient and reason"
+    DETERMINISTIC false
+    AI_MODEL "claude-haiku-4-5-20251001"
+    INPUT {
+      recall_task_id: string REQUIRED
+      patient_name:   string REQUIRED
+      recall_reason:  string REQUIRED
+      outreach_method: string REQUIRED
+      attempt_number: number REQUIRED
+    }
+    OUTPUT {
+      message_subject: string REQUIRED
+      message_body:    string REQUIRED
+    }
+  }
+
+  ACTION SendOutreach {
+    DESCRIPTION "Dispatches recall message via sms, email, or portal based on patient preference"
+    DETERMINISTIC true
+    INPUT {
+      recall_task_id:  string REQUIRED
+      patient_id:      string REQUIRED
+      outreach_method: string REQUIRED
+      message_subject: string REQUIRED
+      message_body:    string REQUIRED
+    }
+    OUTPUT {
+      sent: boolean REQUIRED
+    }
+  }
+
+  ACTION RecordOutreachAttempt {
+    DESCRIPTION "Increments outreach_attempts and records last_outreach_date on recall task"
+    DETERMINISTIC true
+    INPUT {
+      recall_task_id: string  REQUIRED
+      attempt_date:   string  REQUIRED
+      method_used:    string  REQUIRED
+    }
+    OUTPUT {
+      total_attempts: number  REQUIRED
+    }
+  }
+
+  ACTION MarkAppointmentNoShow {
+    DESCRIPTION "Sets appointment status to no_show and records timestamp"
+    DETERMINISTIC true
+    INPUT {
+      appointment_id: string REQUIRED
+    }
+    OUTPUT {
+      marked: boolean REQUIRED
+    }
+  }
+
+  ACTION CreateNoShowRecord {
+    DESCRIPTION "Creates NoShowRecord for tracking and analytics"
+    DETERMINISTIC true
+    INPUT {
+      patient_id:      string  REQUIRED
+      appointment_id:  string  REQUIRED
+      was_reminded:    boolean REQUIRED
+    }
+    OUTPUT {
+      no_show_record_id: string REQUIRED
+    }
+  }
+
+  ACTION UpdatePatientReliabilityScore {
+    DESCRIPTION "Adjusts patient_reliability_score based on cumulative no-show history"
+    DETERMINISTIC true
+    INPUT {
+      patient_id:       string  REQUIRED
+      no_show_count_ytd: number REQUIRED
+      total_appts_ytd:  number  REQUIRED
+    }
+    OUTPUT {
+      new_score: number REQUIRED
+    }
+  }
+
+  ACTION OfferReschedule {
+    DESCRIPTION "Sends patient a reschedule prompt with next available slots"
+    DETERMINISTIC true
+    INPUT {
+      patient_id:          string REQUIRED
+      provider_id:         string REQUIRED
+      appointment_type_id: string REQUIRED
+    }
+    OUTPUT {
+      offered: boolean REQUIRED
+    }
+  }
+
+  ACTION EmitNoShowAlert {
+    DESCRIPTION "Emits NoShowAlertPacket to clinical and population health"
+    DETERMINISTIC true
+    INPUT {
+      appointment_id:    string REQUIRED
+      patient_id:        string REQUIRED
+      no_show_count_ytd: number REQUIRED
+    }
+    OUTPUT {
+      emitted: boolean REQUIRED
+    }
+  }
+
+  ACTION OptimizeScheduleTemplate {
+    DESCRIPTION "AI analyzes historical utilization and no-show patterns to recommend template adjustments"
+    DETERMINISTIC false
+    AI_MODEL "claude-sonnet-4-6"
+    INPUT {
+      provider_id:         string REQUIRED
+      utilization_history: string REQUIRED  // JSON: {date, slots_available, slots_used, no_shows}
+      no_show_patterns:    string REQUIRED
+      appointment_mix:     string REQUIRED
+    }
+    OUTPUT {
+      recommendations: string REQUIRED  // JSON: slot changes, buffer adjustments, overbooking factor
+    }
+  }
+
+  ACTION AssessScheduleHealth {
+    DESCRIPTION "Computes utilization rate, no-show rate, and wait time metrics for a provider or department"
+    DETERMINISTIC true
+    INPUT {
+      provider_id:  string
+      department:   string
+      date_range_start: string REQUIRED
+      date_range_end:   string REQUIRED
+    }
+    OUTPUT {
+      utilization_pct:  number REQUIRED
+      no_show_rate_pct: number REQUIRED
+      avg_wait_days:    number REQUIRED
+      open_slots:       number REQUIRED
+    }
+  }
+
+  // ── PREFERENCES ───────────────────────────────────────────────────────────
+
+  PREFERENCE reminder_24h_hours_before {
+    DEFAULT 24
+    TYPE    number
+    DESCRIPTION "Hours before appointment to send 24h reminder"
+  }
+
+  PREFERENCE reminder_2h_hours_before {
+    DEFAULT 2
+    TYPE    number
+    DESCRIPTION "Hours before appointment to send same-day reminder"
+  }
+
+  PREFERENCE recall_max_outreach_attempts {
+    DEFAULT 3
+    TYPE    number
+    DESCRIPTION "Maximum outreach attempts before escalating recall to provider"
+  }
+
+  PREFERENCE recall_overdue_days_threshold {
+    DEFAULT 7
+    TYPE    number
+    DESCRIPTION "Days past recall due_date before flagging as overdue"
+  }
+
+  PREFERENCE waitlist_hold_minutes {
+    DEFAULT 60
+    TYPE    number
+    DESCRIPTION "Minutes to hold a cancellation slot for a notified waitlist patient"
+  }
+
+  PREFERENCE no_show_chronic_threshold {
+    DEFAULT 3
+    TYPE    number
+    DESCRIPTION "Number of no-shows within 12 months that triggers chronic-no-show protocol"
+  }
+
+  // ── SEED DATA ─────────────────────────────────────────────────────────────
+
+  SEED AppointmentType {
+    RECORDS [
+      { id: "apt-001", name: "New Patient", duration_minutes: 60, color_hex: "#2ECC71", requires_referral: false, telehealth_eligible: true, instructions: "Please arrive 15 minutes early to complete new patient paperwork." }
+      { id: "apt-002", name: "Follow-Up", duration_minutes: 20, color_hex: "#4A90E2", requires_referral: false, telehealth_eligible: true, instructions: "Bring your medication list and any lab results since your last visit." }
+      { id: "apt-003", name: "Annual Wellness Visit", duration_minutes: 45, color_hex: "#9B59B6", requires_referral: false, telehealth_eligible: false, instructions: "Fasting recommended if labs are anticipated. Bring your immunization records." }
+      { id: "apt-004", name: "Urgent Visit", duration_minutes: 30, color_hex: "#E74C3C", requires_referral: false, telehealth_eligible: true, instructions: "Please call if your symptoms worsen before your appointment." }
+      { id: "apt-005", name: "Procedure", duration_minutes: 60, color_hex: "#F39C12", requires_referral: true, telehealth_eligible: false, instructions: "Pre-procedure instructions will be sent to you separately." }
+      { id: "apt-006", name: "Telehealth Visit", duration_minutes: 20, color_hex: "#1ABC9C", requires_referral: false, telehealth_eligible: true, instructions: "You will receive a video link 30 minutes before your appointment." }
+      { id: "apt-007", name: "Pre-Op Clearance", duration_minutes: 45, color_hex: "#E67E22", requires_referral: true, telehealth_eligible: false, instructions: "Bring all current medications and surgical paperwork." }
+      { id: "apt-008", name: "Post-Op Follow-Up", duration_minutes: 30, color_hex: "#3498DB", requires_referral: false, telehealth_eligible: true, instructions: "Bring your discharge summary and any wound care instructions." }
+    ]
+  }
+
+}

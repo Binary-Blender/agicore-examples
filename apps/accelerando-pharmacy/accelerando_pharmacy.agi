@@ -1,0 +1,984 @@
+APP accelerando_pharmacy {
+  VERSION "1.0.0"
+  PORT 3011
+  DESCRIPTION "Pharmacy and e-prescribing — Surescripts NCPDP SCRIPT transmission, real-time formulary checking, PDMP integration, prior authorization, and dispensing safety"
+
+  // ── ENTITIES ──────────────────────────────────────────────────────────────
+
+  ENTITY Prescription {
+    FIELDS {
+      id:              string   REQUIRED
+      patient_id:      string   REQUIRED
+      prescriber_id:   string   REQUIRED
+      // drug
+      drug_name:       string   REQUIRED
+      rxnorm_code:     string   REQUIRED
+      ndc:             string
+      dose:            string   REQUIRED
+      route:           string   REQUIRED
+      frequency:       string   REQUIRED
+      days_supply:     number   REQUIRED
+      quantity:        number   REQUIRED
+      refills:         number   DEFAULT 0
+      // controlled substance
+      controlled:      boolean  DEFAULT false
+      dea_schedule:    string   // "II", "III", "IV", "V"
+      // indication
+      indication:      string
+      diagnosis_code:  string   // ICD-10
+      // transmission
+      pharmacy_id:     string
+      transmitted_at:  string
+      transmission_method: string  // "electronic" | "phone" | "fax" | "print"
+      ncpdp_message_id: string
+      // formulary
+      formulary_tier:  number              // 1=generic..5=specialty
+      formulary_status: string             // "covered", "pa_required", "not_covered", "step_required"
+      prior_auth_required: boolean DEFAULT false
+      // PDMP
+      pdmp_checked:    boolean Default false
+      pdmp_check_date: string
+      pdmp_risk_level: string              // "low", "moderate", "high"
+      // status
+      status:          string   DEFAULT "received"
+    }
+    STAGES [received, formulary_check, prior_auth_pending, ready_to_fill, in_progress, dispensed, rejected, cancelled]
+    CRUD [create, read, list, edit]
+  }
+
+  ENTITY DispensedMedication {
+    FIELDS {
+      id:              string   REQUIRED
+      prescription_id: string   REQUIRED
+      patient_id:      string   REQUIRED
+      dispensed_by:    string   REQUIRED
+      dispensed_at:    string   REQUIRED
+      // dispensed details
+      drug_name:       string   REQUIRED
+      ndc:             string   REQUIRED
+      lot_number:      string
+      expiration_date: string
+      quantity_dispensed: number REQUIRED
+      // verification
+      pharmacist_verified: boolean DEFAULT false
+      pharmacist_id:   string
+      // counseling
+      counseling_offered: boolean Default false
+      counseling_accepted: boolean Default false
+    }
+    CRUD [create, read, list]
+  }
+
+  ENTITY FormularyEntry {
+    FIELDS {
+      id:              string   REQUIRED
+      payer_id:        string   REQUIRED
+      rxnorm_code:     string   REQUIRED
+      drug_name:       string   REQUIRED
+      // tier info
+      tier:            number   REQUIRED   // 1=generic..5=specialty
+      copay_amount:    number
+      // coverage rules
+      covered:         boolean  REQUIRED
+      prior_auth_required: boolean DEFAULT false
+      step_therapy_required: boolean DEFAULT false
+      quantity_limit:  number              // units per fill
+      refills_allowed: number   DEFAULT 11
+      // alternatives
+      preferred_alternatives: string       // JSON: [{rxnorm_code, drug_name, tier}]
+      // effective date
+      effective_date:  string   REQUIRED
+      termination_date: string
+    }
+    CRUD [create, read, list, edit]
+  }
+
+  ENTITY PriorAuthorization {
+    FIELDS {
+      id:              string   REQUIRED
+      prescription_id: string   REQUIRED
+      patient_id:      string   REQUIRED
+      payer_id:        string   REQUIRED
+      // request
+      submitted_at:    string   REQUIRED
+      urgency:         string   DEFAULT "standard"  // "urgent" | "standard"
+      clinical_notes:  string
+      supporting_documents: string  // JSON array of doc references
+      // determination
+      determination:   string              // "approved" | "denied" | "pending" | "partial"
+      auth_number:     string
+      approved_quantity: number
+      approved_refills:  number
+      effective_date:  string
+      expiration_date: string
+      denial_reason:   string
+      // appeal
+      appealed:        boolean  Default false
+      appeal_date:     string
+      appeal_outcome:  string
+    }
+    STAGES [submitted, pending, approved, denied, appealed, expired]
+    CRUD [create, read, list, edit]
+  }
+
+  ENTITY PDMPQuery {
+    FIELDS {
+      id:              string   REQUIRED
+      patient_id:      string   REQUIRED
+      queried_by:      string   REQUIRED   // prescriber or pharmacist
+      queried_at:      string   REQUIRED
+      state:           string   REQUIRED
+      // response summary
+      active_controlled_rx_count: number   DEFAULT 0
+      prescribers_count:          number   DEFAULT 0
+      dispensers_count:           number   DEFAULT 0
+      // risk flags
+      multiple_prescribers:      boolean  Default false  // doctor shopping
+      multiple_pharmacies:       boolean  Default false
+      high_mme_detected:         boolean  Default false  // morphine milligram equivalents
+      concurrent_benzodiazepine: boolean  Default false  // opioid + benzo = high risk
+      // raw response
+      response_summary: string  // JSON
+      risk_level:       string  DEFAULT "low"
+    }
+    CRUD [create, read, list]
+  }
+
+  ENTITY DrugInteractionRecord {
+    FIELDS {
+      id:              string   REQUIRED
+      prescription_id: string   REQUIRED
+      patient_id:      string   REQUIRED
+      // interaction details
+      drug_1_rxnorm:   string   REQUIRED
+      drug_2_rxnorm:   string   REQUIRED
+      drug_1_name:     string   REQUIRED
+      drug_2_name:     string   REQUIRED
+      severity:        string   REQUIRED   // "major", "moderate", "minor", "contraindicated"
+      description:     string   REQUIRED
+      clinical_effect: string
+      // override
+      overridden:      boolean  Default false
+      override_reason: string
+      overriding_provider: string
+      overridden_at:   string
+    }
+    CRUD [create, read, list]
+  }
+
+  ENTITY RefillRequest {
+    FIELDS {
+      id:              string   REQUIRED
+      patient_id:      string   REQUIRED
+      prescription_id: string   REQUIRED
+      requested_at:    string   REQUIRED
+      requested_via:   string   REQUIRED   // "portal", "phone", "app", "pharmacy"
+      // clinical check
+      refill_too_soon:    boolean Default false
+      days_remaining_est: number
+      // approval
+      approved_by:     string
+      approved_at:     string
+      denied_reason:   string
+      // status
+      status:          string   DEFAULT "pending"
+    }
+    STAGES [pending, approved, denied, transmitted]
+    CRUD [create, read, list, edit]
+  }
+
+  ENTITY PharmacyBenefit {
+    FIELDS {
+      id:                string  REQUIRED
+      payer_id:          string  REQUIRED
+      patient_id:        string  REQUIRED
+      pbm_name:          string  REQUIRED    // PBM: Express Scripts, CVS Caremark, OptumRx, etc.
+      bin_number:        string  REQUIRED    // NCPDP BIN
+      pcn_number:        string  REQUIRED
+      member_id:         string  REQUIRED
+      group_number:      string
+      effective_date:    string  REQUIRED
+      termination_date:  string
+      // deductible tracking
+      deductible_amount:    number
+      deductible_met:       number  DEFAULT 0
+      oop_max:              number
+      oop_met:              number  Default 0
+    }
+    CRUD [create, read, list, edit]
+  }
+
+  // ── PACKETS ───────────────────────────────────────────────────────────────
+
+  PACKET PrescriptionReceivedPacket {
+    prescription_id: string  REQUIRED
+    patient_id:      string  REQUIRED
+    prescriber_id:   string  REQUIRED
+    drug_name:       string  REQUIRED
+    rxnorm_code:     string  REQUIRED
+    controlled:      boolean REQUIRED
+    dea_schedule:    string
+    SIGNATURE "accelerando_pharmacy"
+  }
+
+  PACKET PriorAuthRequestPacket {
+    pa_id:           string  REQUIRED
+    prescription_id: string  REQUIRED
+    patient_id:      string  REQUIRED
+    payer_id:        string  REQUIRED
+    drug_name:       string  REQUIRED
+    diagnosis_code:  string  REQUIRED
+    clinical_notes:  string  REQUIRED
+    urgency:         string  REQUIRED
+    SIGNATURE "accelerando_pharmacy"
+  }
+
+  PACKET DispenseConfirmationPacket {
+    dispensed_id:    string  REQUIRED
+    prescription_id: string  REQUIRED
+    patient_id:      string  REQUIRED
+    drug_name:       string  REQUIRED
+    quantity:        number  REQUIRED
+    dispensed_at:    string  REQUIRED
+    SIGNATURE "accelerando_pharmacy"
+  }
+
+  PACKET PDMPHighRiskPacket {
+    pdmp_query_id:   string  REQUIRED
+    patient_id:      string  REQUIRED
+    prescriber_id:   string  REQUIRED
+    risk_level:      string  REQUIRED
+    multiple_prescribers: boolean REQUIRED
+    high_mme:        boolean REQUIRED
+    concurrent_benzo: boolean REQUIRED
+    SIGNATURE "accelerando_pharmacy"
+  }
+
+  // ── CHANNELS ──────────────────────────────────────────────────────────────
+
+  CHANNEL prescription_inbound {
+    PACKET PrescriptionReceivedPacket
+    PRODUCERS ["accelerando_clinical"]
+    DELIVERY exactly_once
+  }
+
+  CHANNEL prior_auth_outbound {
+    PACKET PriorAuthRequestPacket
+    CONSUMERS ["accelerando_billing"]
+    DELIVERY at_least_once
+  }
+
+  CHANNEL dispense_confirm_outbound {
+    PACKET DispenseConfirmationPacket
+    CONSUMERS ["accelerando_clinical", "accelerando_billing"]
+    DELIVERY at_least_once
+  }
+
+  CHANNEL pdmp_high_risk_outbound {
+    PACKET PDMPHighRiskPacket
+    CONSUMERS ["accelerando_clinical", "accelerando_es"]
+    DELIVERY exactly_once
+  }
+
+  // ── MODULES ───────────────────────────────────────────────────────────────
+
+  MODULE ERxEngine {
+
+    FACT ERxContext {
+      transmission_failed:          boolean
+      prescription_not_transmitted_2h: boolean
+      controlled_paper_not_electronic: boolean
+      epcs_credentials_expired:    boolean
+      ncpdp_acknowledgement_error: boolean
+    }
+
+    RULE controlled_must_be_electronic {
+      WHEN ERxContext.controlled_paper_not_electronic == true
+      THEN FLAG "controlled_substance_must_use_EPCS_paper_prescription_blocked"
+      SEVERITY critical
+      PRIORITY 100
+    }
+
+    RULE transmission_failed {
+      WHEN ERxContext.transmission_failed == true
+      THEN FLAG "prescription_transmission_failed_retry_or_alternate_method"
+      SEVERITY critical
+      PRIORITY 95
+    }
+
+    RULE prescription_not_transmitted {
+      WHEN ERxContext.prescription_not_transmitted_2h == true
+      THEN FLAG "prescription_not_transmitted_2h_after_ordering"
+      SEVERITY warning
+      PRIORITY 85
+    }
+
+    RULE epcs_expired {
+      WHEN ERxContext.epcs_credentials_expired == true
+      THEN FLAG "EPCS_credentials_expired_controlled_substance_prescribing_blocked"
+      SEVERITY critical
+      PRIORITY 100
+    }
+
+  }
+
+  MODULE FormularyEngine {
+
+    FACT FormularyContext {
+      not_covered:                  boolean
+      pa_required_no_auth_on_file:  boolean
+      step_therapy_required:        boolean
+      quantity_limit_exceeded:      boolean
+      tier_5_specialty_ordered:     boolean
+    }
+
+    RULE not_covered {
+      WHEN FormularyContext.not_covered == true
+      THEN FLAG "drug_not_on_formulary_alternative_required_or_prior_auth"
+      SEVERITY warning
+      PRIORITY 88
+    }
+
+    RULE pa_required_no_auth {
+      WHEN FormularyContext.pa_required_no_auth_on_file == true
+      THEN FLAG "prior_authorization_required_initiate_before_dispensing"
+      SEVERITY critical
+      PRIORITY 93
+    }
+
+    RULE step_therapy {
+      WHEN FormularyContext.step_therapy_required == true
+      THEN FLAG "step_therapy_required_prescribe_preferred_agent_first"
+      SEVERITY warning
+      PRIORITY 80
+    }
+
+    RULE quantity_limit {
+      WHEN FormularyContext.quantity_limit_exceeded == true
+      THEN FLAG "quantity_exceeds_formulary_limit_requires_prior_auth"
+      SEVERITY warning
+      PRIORITY 82
+    }
+
+    RULE specialty_drug {
+      WHEN FormularyContext.tier_5_specialty_ordered == true
+      THEN FLAG "specialty_drug_ordered_specialty_pharmacy_routing_required"
+      SEVERITY info
+      PRIORITY 65
+    }
+
+  }
+
+  MODULE PDMPEngine {
+
+    FACT PDMPContext {
+      controlled_no_pdmp_query:      boolean
+      pdmp_query_expired_3_days:     boolean
+      high_risk_patient_detected:    boolean
+      doctor_shopping_pattern:       boolean
+      opioid_benzo_combination:      boolean
+      high_mme_threshold_exceeded:   boolean
+    }
+
+    RULE controlled_without_pdmp {
+      WHEN PDMPContext.controlled_no_pdmp_query == true
+      THEN FLAG "controlled_substance_cannot_be_dispensed_without_PDMP_query"
+      SEVERITY critical
+      PRIORITY 100
+    }
+
+    RULE pdmp_query_stale {
+      WHEN PDMPContext.pdmp_query_expired_3_days == true
+      THEN FLAG "PDMP_query_older_than_3_days_requiry_required_before_dispensing"
+      SEVERITY critical
+      PRIORITY 98
+    }
+
+    RULE doctor_shopping {
+      WHEN PDMPContext.doctor_shopping_pattern == true
+      THEN FLAG "PDMP_multiple_prescribers_pattern_detected_notify_prescriber_mandatory"
+      SEVERITY critical
+      PRIORITY 97
+    }
+
+    RULE opioid_benzo_combo {
+      WHEN PDMPContext.opioid_benzo_combination == true
+      THEN FLAG "opioid_plus_benzodiazepine_combination_high_overdose_risk_prescriber_alert"
+      SEVERITY critical
+      PRIORITY 99
+    }
+
+    RULE high_mme {
+      WHEN PDMPContext.high_mme_threshold_exceeded == true
+      THEN FLAG "morphine_milligram_equivalents_above_90_MME_per_day_CDC_guideline"
+      SEVERITY critical
+      PRIORITY 96
+    }
+
+  }
+
+  MODULE InteractionEngine {
+
+    FACT InteractionContext {
+      contraindicated_combination:   boolean
+      major_interaction_detected:    boolean
+      moderate_interaction_detected: boolean
+      duplicate_therapy:             boolean
+      allergy_conflict:              boolean
+    }
+
+    RULE contraindicated_at_dispense {
+      WHEN InteractionContext.contraindicated_combination == true
+      THEN FLAG "contraindicated_drug_combination_dispense_blocked_pharmacist_contact_prescriber"
+      SEVERITY critical
+      PRIORITY 100
+    }
+
+    RULE major_interaction_at_dispense {
+      WHEN InteractionContext.major_interaction_detected == true
+      THEN FLAG "major_drug_interaction_at_dispense_pharmacist_review_required"
+      SEVERITY critical
+      PRIORITY 97
+    }
+
+    RULE allergy_at_dispense {
+      WHEN InteractionContext.allergy_conflict == true
+      THEN FLAG "allergy_conflict_at_dispense_blocked_contact_prescriber"
+      SEVERITY critical
+      PRIORITY 100
+    }
+
+    RULE duplicate_therapy {
+      WHEN InteractionContext.duplicate_therapy == true
+      THEN FLAG "duplicate_therapy_detected_patient_already_on_same_class"
+      SEVERITY warning
+      PRIORITY 80
+    }
+
+  }
+
+  MODULE RefillEngine {
+
+    FACT RefillContext {
+      refill_too_soon:               boolean
+      refill_no_remaining:           boolean
+      controlled_refill_early:       boolean
+      pa_expired_on_refill:          boolean
+    }
+
+    RULE refill_too_soon {
+      WHEN RefillContext.refill_too_soon == true
+      THEN FLAG "refill_too_soon_more_than_25pct_days_remaining"
+      SEVERITY warning
+      PRIORITY 85
+    }
+
+    RULE no_refills_remaining {
+      WHEN RefillContext.refill_no_remaining == true
+      THEN FLAG "no_refills_remaining_contact_prescriber_for_renewal"
+      SEVERITY info
+      PRIORITY 65
+    }
+
+    RULE controlled_early_refill {
+      WHEN RefillContext.controlled_refill_early == true
+      THEN FLAG "controlled_substance_early_refill_blocked_state_law_compliance"
+      SEVERITY critical
+      PRIORITY 100
+    }
+
+    RULE pa_expired_at_refill {
+      WHEN RefillContext.pa_expired_on_refill == true
+      THEN FLAG "prior_authorization_expired_renew_before_dispensing_refill"
+      SEVERITY critical
+      PRIORITY 93
+    }
+
+  }
+
+  // ── REASONER ──────────────────────────────────────────────────────────────
+
+  REASONER pharmacy_safety_reasoner {
+    SCHEDULE "weekly"
+    DESCRIPTION "Analyzes PDMP patterns, interaction overrides, formulary non-adherence, and prior auth burden to surface systemic medication safety issues"
+    INPUT {
+      pdmp_query_summary:      string
+      interaction_override_log: string
+      formulary_adherence_rate: number
+      pa_approval_rates:       string
+    }
+    OUTPUT {
+      high_risk_patient_list:   string
+      top_interaction_overrides: string
+      formulary_opportunity:    string
+      pa_burden_summary:        string
+    }
+  }
+
+  // ── WORKFLOWS ─────────────────────────────────────────────────────────────
+
+  WORKFLOW receive_prescription {
+    IDEMPOTENT true
+    STEPS {
+      STEP validate_prescription {
+        ACTION ValidatePrescription
+        ON_FAIL abort
+      }
+      STEP check_formulary {
+        ACTION CheckFormulary
+        ON_FAIL skip
+      }
+      STEP check_pa_required {
+        ACTION CheckPriorAuthRequired
+        ON_FAIL skip
+      }
+      STEP route_to_fill_or_pa {
+        ACTION RoutePrescritionToWorkflow
+        ON_FAIL abort
+      }
+    }
+  }
+
+  WORKFLOW query_pdmp {
+    IDEMPOTENT false
+    STEPS {
+      STEP submit_pdmp_query {
+        ACTION QueryPDMP
+        ON_FAIL abort
+      }
+      STEP evaluate_response {
+        ACTION EvaluatePDMPResponse
+        ON_FAIL skip
+      }
+      STEP alert_if_high_risk {
+        ACTION EmitPDMPHighRiskAlert
+        ON_FAIL skip
+      }
+    }
+  }
+
+  WORKFLOW fill_prescription {
+    IDEMPOTENT false
+    STEPS {
+      STEP check_allergy {
+        ACTION CheckAllergyAtDispense
+        ON_FAIL abort
+      }
+      STEP check_interactions {
+        ACTION CheckInteractionsAtDispense
+        ON_FAIL abort
+      }
+      STEP check_pdmp_current {
+        ACTION VerifyPDMPCurrent
+        ON_FAIL abort
+      }
+      STEP pharmacist_verify {
+        ACTION PharmacistVerification
+        ON_FAIL abort
+      }
+      STEP dispense {
+        ACTION RecordDispense
+        ON_FAIL abort
+      }
+      STEP emit_confirmation {
+        ACTION EmitDispenseConfirmation
+        ON_FAIL skip
+      }
+    }
+  }
+
+  WORKFLOW initiate_prior_auth {
+    IDEMPOTENT false
+    STEPS {
+      STEP generate_pa_request {
+        ACTION GeneratePARequest
+        ON_FAIL abort
+      }
+      STEP submit_pa {
+        ACTION SubmitPriorAuth
+        ON_FAIL abort
+      }
+      STEP notify_prescriber {
+        ACTION NotifyPrescriberOfPA
+        ON_FAIL skip
+      }
+    }
+  }
+
+  WORKFLOW process_refill {
+    IDEMPOTENT false
+    STEPS {
+      STEP check_refill_eligibility {
+        ACTION CheckRefillEligibility
+        ON_FAIL abort
+      }
+      STEP check_pa_current {
+        ACTION CheckPAStillValid
+        ON_FAIL skip
+      }
+      STEP approve_or_deny {
+        ACTION ApproveOrDenyRefill
+        ON_FAIL abort
+      }
+    }
+  }
+
+  // ── ACTIONS ───────────────────────────────────────────────────────────────
+
+  ACTION ValidatePrescription {
+    DESCRIPTION "Validates prescription completeness: patient ID, DEA number if controlled, days supply, quantity"
+    DETERMINISTIC true
+    INPUT {
+      prescription_id: string  REQUIRED
+    }
+    OUTPUT {
+      valid:            boolean  REQUIRED
+      validation_errors: string
+    }
+  }
+
+  ACTION CheckFormulary {
+    DESCRIPTION "Real-time formulary lookup against patient's pharmacy benefit; returns tier, coverage, and PA requirement"
+    DETERMINISTIC true
+    INPUT {
+      prescription_id: string  REQUIRED
+      patient_id:      string  REQUIRED
+      rxnorm_code:     string  REQUIRED
+      payer_id:        string  REQUIRED
+    }
+    OUTPUT {
+      covered:             boolean  REQUIRED
+      tier:                number   REQUIRED
+      pa_required:         boolean  REQUIRED
+      step_required:       boolean  REQUIRED
+      quantity_limit:      number
+      alternatives:        string   // JSON array
+      formulary_status:    string   REQUIRED
+    }
+  }
+
+  ACTION CheckPriorAuthRequired {
+    DESCRIPTION "Determines if prior auth is needed and whether one is already on file and current"
+    DETERMINISTIC true
+    INPUT {
+      prescription_id: string  REQUIRED
+      patient_id:      string  REQUIRED
+      payer_id:        string  REQUIRED
+      rxnorm_code:     string  REQUIRED
+    }
+    OUTPUT {
+      pa_required:      boolean  REQUIRED
+      pa_on_file:       boolean  REQUIRED
+      pa_id:            string
+      pa_expired:       boolean  REQUIRED
+    }
+  }
+
+  ACTION RoutePrescritionToWorkflow {
+    DESCRIPTION "Routes prescription to fill queue, PA workflow, or rejected based on formulary and PA checks"
+    DETERMINISTIC true
+    INPUT {
+      prescription_id:  string  REQUIRED
+      pa_required:      boolean REQUIRED
+      pa_on_file:       boolean REQUIRED
+      covered:          boolean REQUIRED
+    }
+    OUTPUT {
+      routed_to: string  REQUIRED  // "fill_queue" | "pa_workflow" | "rejected"
+    }
+  }
+
+  ACTION QueryPDMP {
+    DESCRIPTION "Submits real-time PDMP query to state prescription monitoring program via ASAP standard"
+    DETERMINISTIC true
+    INPUT {
+      patient_id:    string  REQUIRED
+      queried_by:    string  REQUIRED
+      state:         string  REQUIRED
+      // patient demographics for matching
+      first_name:    string  REQUIRED
+      last_name:     string  REQUIRED
+      dob:           string  REQUIRED
+    }
+    OUTPUT {
+      pdmp_query_id:         string  REQUIRED
+      controlled_rx_count:   number  REQUIRED
+      prescribers_count:     number  REQUIRED
+      dispensers_count:      number  REQUIRED
+      risk_level:            string  REQUIRED
+    }
+  }
+
+  ACTION EvaluatePDMPResponse {
+    DESCRIPTION "Parses PDMP response and sets PDMPContext flags for doctor shopping, MME, and benzo combinations"
+    DETERMINISTIC true
+    INPUT {
+      pdmp_query_id: string  REQUIRED
+    }
+    OUTPUT {
+      doctor_shopping:    boolean  REQUIRED
+      high_mme:           boolean  REQUIRED
+      benzo_combo:        boolean  REQUIRED
+      multiple_pharmacies: boolean REQUIRED
+    }
+  }
+
+  ACTION EmitPDMPHighRiskAlert {
+    DESCRIPTION "Emits PDMPHighRiskPacket to clinical and governance channels when risk is high or critical"
+    DETERMINISTIC true
+    INPUT {
+      pdmp_query_id:  string  REQUIRED
+      prescription_id: string REQUIRED
+    }
+    OUTPUT {
+      emitted: boolean  REQUIRED
+    }
+  }
+
+  ACTION CheckAllergyAtDispense {
+    DESCRIPTION "Final allergy check at point of dispense against patient allergy list"
+    DETERMINISTIC true
+    INPUT {
+      patient_id:   string  REQUIRED
+      rxnorm_code:  string  REQUIRED
+    }
+    OUTPUT {
+      conflict:       boolean  REQUIRED
+      allergen:       string
+      severity:       string
+    }
+  }
+
+  ACTION CheckInteractionsAtDispense {
+    DESCRIPTION "Drug interaction check at dispense — catches anything that changed since prescribing"
+    DETERMINISTIC true
+    INPUT {
+      patient_id:      string  REQUIRED
+      new_rxnorm_code: string  REQUIRED
+    }
+    OUTPUT {
+      contraindicated: boolean  REQUIRED
+      major:           boolean  REQUIRED
+      interactions:    string   // JSON array
+    }
+  }
+
+  ACTION VerifyPDMPCurrent {
+    DESCRIPTION "Confirms a current PDMP query exists for controlled substance prescriptions"
+    DETERMINISTIC true
+    INPUT {
+      patient_id:    string  REQUIRED
+      dea_schedule:  string  REQUIRED
+      controlled:    boolean REQUIRED
+    }
+    OUTPUT {
+      pdmp_current:    boolean  REQUIRED
+      last_query_date: string
+      block_dispense:  boolean  REQUIRED
+    }
+  }
+
+  ACTION PharmacistVerification {
+    DESCRIPTION "Records pharmacist final verification before dispense — required for all prescriptions"
+    DETERMINISTIC true
+    INPUT {
+      prescription_id: string  REQUIRED
+      pharmacist_id:   string  REQUIRED
+    }
+    OUTPUT {
+      verified: boolean  REQUIRED
+    }
+  }
+
+  ACTION RecordDispense {
+    DESCRIPTION "Records dispensed medication with NDC, lot number, and quantity"
+    DETERMINISTIC true
+    INPUT {
+      prescription_id:   string  REQUIRED
+      dispensed_by:      string  REQUIRED
+      ndc:               string  REQUIRED
+      lot_number:        string
+      expiration_date:   string
+      quantity_dispensed: number REQUIRED
+    }
+    OUTPUT {
+      dispensed_id: string  REQUIRED
+    }
+  }
+
+  ACTION EmitDispenseConfirmation {
+    DESCRIPTION "Emits DispenseConfirmationPacket to clinical and billing channels"
+    DETERMINISTIC true
+    INPUT {
+      dispensed_id: string REQUIRED
+    }
+    OUTPUT {
+      emitted: boolean REQUIRED
+    }
+  }
+
+  ACTION GeneratePARequest {
+    DESCRIPTION "AI generates prior authorization clinical criteria narrative for payer submission"
+    DETERMINISTIC false
+    AI_MODEL "claude-sonnet-4-6"
+    INPUT {
+      prescription_id:   string  REQUIRED
+      drug_name:         string  REQUIRED
+      diagnosis_code:    string  REQUIRED
+      clinical_context:  string  REQUIRED
+      payer_pa_criteria: string  REQUIRED
+    }
+    OUTPUT {
+      clinical_narrative: string  REQUIRED
+      supporting_criteria: string REQUIRED
+    }
+  }
+
+  ACTION SubmitPriorAuth {
+    DESCRIPTION "Submits prior auth to payer via NCPDP SCRIPT PA or fax gateway"
+    DETERMINISTIC true
+    INPUT {
+      prescription_id:    string  REQUIRED
+      payer_id:           string  REQUIRED
+      clinical_narrative: string  REQUIRED
+      urgency:            string  DEFAULT "standard"
+    }
+    OUTPUT {
+      pa_id:       string  REQUIRED
+      tracking_number: string REQUIRED
+    }
+  }
+
+  ACTION NotifyPrescriberOfPA {
+    DESCRIPTION "Notifies prescriber that prior auth has been initiated and they may receive PA questions"
+    DETERMINISTIC true
+    INPUT {
+      prescription_id: string  REQUIRED
+      pa_id:           string  REQUIRED
+      prescriber_id:   string  REQUIRED
+    }
+    OUTPUT {
+      notified: boolean  REQUIRED
+    }
+  }
+
+  ACTION CheckRefillEligibility {
+    DESCRIPTION "Evaluates whether refill is eligible: days remaining, refills remaining, too-soon rule"
+    DETERMINISTIC true
+    INPUT {
+      prescription_id:  string  REQUIRED
+      patient_id:       string  REQUIRED
+    }
+    OUTPUT {
+      eligible:           boolean  REQUIRED
+      days_remaining_est: number   REQUIRED
+      refills_remaining:  number   REQUIRED
+      denial_reason:      string
+    }
+  }
+
+  ACTION CheckPAStillValid {
+    DESCRIPTION "Confirms prior authorization has not expired before processing a refill"
+    DETERMINISTIC true
+    INPUT {
+      prescription_id: string  REQUIRED
+    }
+    OUTPUT {
+      pa_valid:     boolean  REQUIRED
+      pa_expires:   string
+      pa_expired:   boolean  REQUIRED
+    }
+  }
+
+  ACTION ApproveOrDenyRefill {
+    DESCRIPTION "Records refill approval or denial decision and initiates transmission if approved"
+    DETERMINISTIC true
+    INPUT {
+      refill_request_id: string  REQUIRED
+      approved:          boolean REQUIRED
+      denial_reason:     string
+      approved_by:       string  REQUIRED
+    }
+    OUTPUT {
+      decision_recorded: boolean  REQUIRED
+    }
+  }
+
+  ACTION TransmitPrescription {
+    DESCRIPTION "Transmits prescription to pharmacy via NCPDP SCRIPT 10.6 or 2017071"
+    DETERMINISTIC true
+    INPUT {
+      prescription_id:  string  REQUIRED
+      pharmacy_id:      string  REQUIRED
+      controlled:       boolean REQUIRED
+    }
+    OUTPUT {
+      transmitted:        boolean  REQUIRED
+      ncpdp_message_id:   string   REQUIRED
+      transmission_at:    string   REQUIRED
+    }
+  }
+
+  ACTION FindFormularyAlternatives {
+    DESCRIPTION "Returns preferred lower-tier alternatives to a non-covered or high-tier drug"
+    DETERMINISTIC true
+    INPUT {
+      rxnorm_code: string  REQUIRED
+      payer_id:    string  REQUIRED
+      indication:  string
+    }
+    OUTPUT {
+      alternatives: string  REQUIRED  // JSON: [{rxnorm_code, drug_name, tier, pa_required}]
+    }
+  }
+
+  // ── PREFERENCES ───────────────────────────────────────────────────────────
+
+  PREFERENCE pdmp_query_valid_days {
+    DEFAULT 3
+    TYPE    number
+    DESCRIPTION "Days a PDMP query result remains current before re-query is required"
+  }
+
+  PREFERENCE refill_too_soon_pct {
+    DEFAULT 25
+    TYPE    number
+    DESCRIPTION "Percentage of days remaining below which refill is blocked (too-soon rule)"
+  }
+
+  PREFERENCE mme_per_day_threshold {
+    DEFAULT 90
+    TYPE    number
+    DESCRIPTION "Morphine Milligram Equivalents per day above which CDC guideline alert fires (CDC 2022: 90 MME)"
+  }
+
+  PREFERENCE pa_response_days_urgent {
+    DEFAULT 1
+    TYPE    number
+    DESCRIPTION "Business days for urgent prior auth turnaround"
+  }
+
+  PREFERENCE pa_response_days_standard {
+    DEFAULT 3
+    TYPE    number
+    DESCRIPTION "Business days for standard prior auth turnaround"
+  }
+
+  PREFERENCE epcs_credential_warning_days {
+    DEFAULT 30
+    TYPE    number
+    DESCRIPTION "Days before EPCS credential expiration to generate renewal warning"
+  }
+
+  // ── SEED DATA ─────────────────────────────────────────────────────────────
+
+  SEED FormularyEntry {
+    RECORDS [
+      { id: "frm-001", payer_id: "bcbs-001", rxnorm_code: "314076", drug_name: "lisinopril 10mg", tier: 1, covered: true, prior_auth_required: false, step_therapy_required: false, refills_allowed: 11, effective_date: "2026-01-01" }
+      { id: "frm-002", payer_id: "bcbs-001", rxnorm_code: "198440", drug_name: "metformin 500mg", tier: 1, covered: true, prior_auth_required: false, step_therapy_required: false, refills_allowed: 11, effective_date: "2026-01-01" }
+      { id: "frm-003", payer_id: "bcbs-001", rxnorm_code: "476357", drug_name: "atorvastatin 40mg", tier: 2, covered: true, prior_auth_required: false, step_therapy_required: false, refills_allowed: 11, effective_date: "2026-01-01" }
+      { id: "frm-004", payer_id: "bcbs-001", rxnorm_code: "753532", drug_name: "adalimumab 40mg/0.8mL", tier: 5, covered: true, prior_auth_required: true, step_therapy_required: true, quantity_limit: 2, refills_allowed: 5, effective_date: "2026-01-01" }
+    ]
+  }
+
+}

@@ -1,0 +1,978 @@
+APP accelerando_radiology {
+  VERSION "1.0.0"
+  PORT 3010
+  DESCRIPTION "Radiology Information System — DICOM Modality Worklist, structured reporting, critical findings communication, peer review, and dose tracking"
+
+  // ── ENTITIES ──────────────────────────────────────────────────────────────
+
+  ENTITY ImagingOrder {
+    FIELDS {
+      id:              string   REQUIRED
+      patient_id:      string   REQUIRED
+      ordering_provider_id: string REQUIRED
+      order_date:      string   REQUIRED
+      modality:        string   REQUIRED   // "CT", "MRI", "XR", "US", "NM", "PET", "DEXA", "MAMMO", "FLUORO"
+      procedure_code:  string   REQUIRED   // CPT
+      procedure_name:  string   REQUIRED
+      body_part:       string   REQUIRED
+      laterality:      string              // "L", "R", "B", "N/A"
+      priority:        string   DEFAULT "routine"  // "stat", "urgent", "routine", "scheduled"
+      clinical_indication: string REQUIRED
+      contrast_required: boolean DEFAULT false
+      // contrast screening
+      contrast_consent_obtained: boolean DEFAULT false
+      creatinine_checked:       boolean DEFAULT false
+      creatinine_value:         number
+      contrast_allergy_known:   boolean DEFAULT false
+      // scheduling
+      scheduled_date:  string
+      scheduled_time:  string
+      modality_id:     string
+      room_id:         string
+      // study linkage
+      study_id:        string
+      accession_number: string  REQUIRED
+      // referral/auth
+      prior_auth_required: boolean DEFAULT false
+      auth_number:     string
+    }
+    STAGES [ordered, scheduled, in_progress, images_acquired, pending_read, preliminary_read, final_report, addendum, cancelled]
+    CRUD [create, read, list, edit]
+  }
+
+  ENTITY Study {
+    FIELDS {
+      id:              string   REQUIRED
+      order_id:        string   REQUIRED
+      patient_id:      string   REQUIRED
+      accession_number: string  REQUIRED
+      modality:        string   REQUIRED
+      // DICOM identifiers
+      study_instance_uid: string
+      series_count:    number   DEFAULT 0
+      image_count:     number   DEFAULT 0
+      // acquisition
+      acquired_date:   string
+      acquired_by:     string   // technologist
+      // reading
+      assigned_radiologist_id: string
+      read_start_time:  string
+      read_end_time:    string
+      // report
+      report_id:       string
+      report_status:   string   DEFAULT "pending"
+      // peer review
+      peer_review_id:  string
+    }
+    CRUD [create, read, list, edit]
+  }
+
+  ENTITY RadiologyReport {
+    FIELDS {
+      id:              string   REQUIRED
+      study_id:        string   REQUIRED
+      order_id:        string   REQUIRED
+      patient_id:      string   REQUIRED
+      radiologist_id:  string   REQUIRED
+      report_date:     string   REQUIRED
+      // structured sections
+      technique:       string
+      comparison:      string
+      findings:        string   REQUIRED
+      impression:      string   REQUIRED
+      // addenda
+      addenda:         string   // JSON array: {author, date, text}
+      // status
+      status:          string   DEFAULT "draft"  // "draft" | "preliminary" | "final" | "addended"
+      signed_at:       string
+      // critical finding flag
+      critical_finding: boolean DEFAULT false
+      critical_finding_type: string
+      critical_communicated: boolean DEFAULT false
+      critical_communicated_at: string
+      critical_communicated_to: string
+    }
+    STAGES [draft, preliminary, final, addended]
+    CRUD [create, read, list, edit]
+  }
+
+  ENTITY CriticalFinding {
+    FIELDS {
+      id:              string   REQUIRED
+      report_id:       string   REQUIRED
+      study_id:        string   REQUIRED
+      patient_id:      string   REQUIRED
+      radiologist_id:  string   REQUIRED
+      finding_type:    string   REQUIRED   // "pneumothorax", "PE", "ICH", "aortic_dissection", "fracture", etc.
+      finding_description: string REQUIRED
+      detected_at:     string   REQUIRED
+      // communication tracking — ACR practice guidelines: communicate within 60 minutes
+      communication_required_by: string  REQUIRED  // detected_at + 60 minutes
+      communicated_at: string
+      communicated_to: string
+      communication_method: string  // "phone", "secure_message", "pager"
+      callback_number: string
+      // overdue flag
+      communication_overdue: boolean DEFAULT false
+    }
+    STAGES [detected, communicated, acknowledged, documented]
+    CRUD [create, read, list, edit]
+  }
+
+  ENTITY PeerReview {
+    FIELDS {
+      id:              string   REQUIRED
+      study_id:        string   REQUIRED
+      report_id:       string   REQUIRED
+      original_radiologist_id: string REQUIRED
+      reviewer_id:     string   REQUIRED  // must NOT be same as original
+      assigned_date:   string   REQUIRED
+      due_date:        string   REQUIRED
+      completed_date:  string
+      // scoring (ACR RADPEER)
+      score:           number              // 1=agree, 2=disagree_minor, 3=disagree_significant, 4=disagree_critical
+      score_detail:    string
+      // discrepancy
+      discrepancy_detected: boolean DEFAULT false
+      discrepancy_type:     string   // "major" | "minor" | "clinically_significant"
+      discrepancy_description: string
+      // action
+      action_required:      boolean Default false
+      action_description:   string
+    }
+    STAGES [assigned, in_progress, completed, discrepancy_escalated]
+    CRUD [create, read, list, edit]
+  }
+
+  ENTITY DoseRecord {
+    FIELDS {
+      id:              string   REQUIRED
+      study_id:        string   REQUIRED
+      patient_id:      string   REQUIRED
+      modality:        string   REQUIRED
+      procedure_code:  string   REQUIRED
+      // CT dose metrics (DICOM RDSR)
+      ctdi_vol:        number              // CT Dose Index Volume (mGy)
+      dlp:             number              // Dose-Length Product (mGy·cm)
+      // fluoroscopy
+      fluoroscopy_time_min: number
+      dap:             number              // Dose-Area Product
+      // reference levels (ACR / DRL)
+      dlp_drl:         number              // Diagnostic Reference Level for this exam
+      ctdi_drl:        number
+      exceeds_drl:     boolean Default false
+      drl_multiple:    number              // how many times the DRL (e.g., 1.5 = 50% above)
+      // cumulative patient dose
+      cumulative_effective_dose_msv: number
+    }
+    CRUD [create, read, list]
+  }
+
+  ENTITY Modality {
+    FIELDS {
+      id:              string   REQUIRED
+      name:            string   REQUIRED   // "CT-1", "MRI-3T-A", "US-1"
+      modality_type:   string   REQUIRED   // "CT", "MRI", "US", "XR", "NM", "FLUORO"
+      location:        string   REQUIRED
+      ae_title:        string   REQUIRED   // DICOM Application Entity Title
+      worklist_enabled: boolean DEFAULT true
+      active:          boolean  DEFAULT true
+      // maintenance
+      last_pm_date:    string
+      next_pm_date:    string
+      out_of_service:  boolean  DEFAULT false
+    }
+    CRUD [create, read, list, edit]
+  }
+
+  ENTITY ImagingProtocol {
+    FIELDS {
+      id:              string   REQUIRED
+      procedure_code:  string   REQUIRED
+      procedure_name:  string   REQUIRED
+      modality:        string   REQUIRED
+      protocol_name:   string   REQUIRED
+      // parameters (stored as JSON — modality-specific)
+      parameters:      string   REQUIRED
+      // contrast
+      contrast_protocol: string
+      // dose limits
+      target_ctdi_vol: number
+      target_dlp:      number
+      last_reviewed:   string   REQUIRED
+      reviewed_by:     string   REQUIRED
+    }
+    CRUD [create, read, list, edit]
+  }
+
+  // ── PACKETS ───────────────────────────────────────────────────────────────
+
+  PACKET ModalityWorklistPacket {
+    accession_number:    string  REQUIRED
+    patient_id:          string  REQUIRED
+    patient_name:        string  REQUIRED
+    dob:                 string  REQUIRED
+    procedure_code:      string  REQUIRED
+    procedure_name:      string  REQUIRED
+    modality:            string  REQUIRED
+    scheduled_date:      string  REQUIRED
+    scheduled_time:      string  REQUIRED
+    ae_title:            string  REQUIRED
+    SIGNATURE "accelerando_radiology"
+  }
+
+  PACKET CriticalFindingAlertPacket {
+    critical_finding_id: string  REQUIRED
+    patient_id:          string  REQUIRED
+    study_id:            string  REQUIRED
+    finding_type:        string  REQUIRED
+    finding_description: string  REQUIRED
+    detected_at:         string  REQUIRED
+    communicate_by:      string  REQUIRED
+    ordering_provider_id: string REQUIRED
+    radiologist_id:      string  REQUIRED
+    SIGNATURE "accelerando_radiology"
+  }
+
+  PACKET FinalReportPacket {
+    report_id:           string  REQUIRED
+    study_id:            string  REQUIRED
+    order_id:            string  REQUIRED
+    patient_id:          string  REQUIRED
+    radiologist_id:      string  REQUIRED
+    impression:          string  REQUIRED
+    critical_finding:    boolean REQUIRED
+    SIGNATURE "accelerando_radiology"
+  }
+
+  PACKET DoseAlertPacket {
+    dose_record_id:      string  REQUIRED
+    patient_id:          string  REQUIRED
+    study_id:            string  REQUIRED
+    modality:            string  REQUIRED
+    dlp:                 number  REQUIRED
+    dlp_drl:             number  REQUIRED
+    drl_multiple:        number  REQUIRED
+    SIGNATURE "accelerando_radiology"
+  }
+
+  // ── CHANNELS ──────────────────────────────────────────────────────────────
+
+  CHANNEL worklist_outbound {
+    PACKET ModalityWorklistPacket
+    CONSUMERS ["dicom_worklist_gateway"]
+    DELIVERY at_least_once
+  }
+
+  CHANNEL critical_finding_outbound {
+    PACKET CriticalFindingAlertPacket
+    CONSUMERS ["accelerando_clinical", "accelerando_patient_portal"]
+    DELIVERY exactly_once
+  }
+
+  CHANNEL final_report_outbound {
+    PACKET FinalReportPacket
+    CONSUMERS ["accelerando_clinical", "accelerando_patient_portal"]
+    DELIVERY at_least_once
+  }
+
+  CHANNEL dose_alert_outbound {
+    PACKET DoseAlertPacket
+    CONSUMERS ["accelerando_es"]
+    DELIVERY at_least_once
+  }
+
+  // ── MODULES ───────────────────────────────────────────────────────────────
+
+  MODULE RISEngine {
+
+    FACT RISContext {
+      stat_order_not_started_60m:   boolean
+      urgent_order_not_started_4h:  boolean
+      modality_out_of_service_orders_pending: boolean
+      contrast_allergy_no_consent:  boolean
+      creatinine_not_checked_contrast: boolean
+      orders_without_indication:    boolean
+      accession_number_collision:   boolean
+    }
+
+    RULE stat_imaging_overdue {
+      WHEN RISContext.stat_order_not_started_60m == true
+      THEN FLAG "stat_imaging_order_not_started_60_minutes_escalate"
+      SEVERITY critical
+      PRIORITY 97
+    }
+
+    RULE contrast_allergy_blocked {
+      WHEN RISContext.contrast_allergy_no_consent == true
+      THEN FLAG "contrast_ordered_known_contrast_allergy_consent_and_premedication_required"
+      SEVERITY critical
+      PRIORITY 100
+    }
+
+    RULE creatinine_not_checked {
+      WHEN RISContext.creatinine_not_checked_contrast == true
+      THEN FLAG "iv_contrast_ordered_creatinine_not_checked_AKI_risk"
+      SEVERITY critical
+      PRIORITY 98
+    }
+
+    RULE modality_out_of_service {
+      WHEN RISContext.modality_out_of_service_orders_pending == true
+      THEN FLAG "modality_out_of_service_pending_orders_require_rescheduling"
+      SEVERITY critical
+      PRIORITY 95
+    }
+
+    RULE accession_collision {
+      WHEN RISContext.accession_number_collision == true
+      THEN FLAG "accession_number_collision_data_integrity_risk"
+      SEVERITY critical
+      PRIORITY 100
+    }
+
+    RULE urgent_imaging_overdue {
+      WHEN RISContext.urgent_order_not_started_4h == true
+      THEN FLAG "urgent_imaging_order_not_started_4_hours_escalate"
+      SEVERITY warning
+      PRIORITY 88
+    }
+
+  }
+
+  MODULE ReportingEngine {
+
+    FACT ReportingContext {
+      critical_finding_not_communicated_60m: boolean
+      preliminary_report_unsigned_4h:        boolean
+      final_report_not_signed_24h:           boolean
+      addendum_required_unaddressed:         boolean
+      report_without_impression:             boolean
+    }
+
+    RULE critical_finding_communication {
+      WHEN ReportingContext.critical_finding_not_communicated_60m == true
+      THEN FLAG "critical_finding_communication_overdue_60_minutes_ACR_guideline_violated"
+      SEVERITY critical
+      PRIORITY 100
+    }
+
+    RULE final_report_overdue {
+      WHEN ReportingContext.final_report_not_signed_24h == true
+      THEN FLAG "final_radiology_report_not_signed_24h_quality_issue"
+      SEVERITY warning
+      PRIORITY 82
+    }
+
+    RULE report_missing_impression {
+      WHEN ReportingContext.report_without_impression == true
+      THEN FLAG "radiology_report_missing_impression_section_incomplete"
+      SEVERITY critical
+      PRIORITY 95
+    }
+
+    RULE preliminary_report_overdue {
+      WHEN ReportingContext.preliminary_report_unsigned_4h == true
+      THEN FLAG "preliminary_report_not_signed_4h_after_image_acquisition"
+      SEVERITY warning
+      PRIORITY 78
+    }
+
+  }
+
+  MODULE PeerReviewEngine {
+
+    FACT PeerReviewContext {
+      peer_review_overdue:                 boolean
+      peer_review_discrepancy_major:       boolean
+      peer_review_discrepancy_significant: boolean
+      reviewer_independence_violated:      boolean
+      peer_review_quota_unmet_ytd:         boolean
+    }
+
+    SCORE peer_review_concordance {
+      INITIAL 100
+      MIN       0
+      MAX     100
+      DECAY     0 PER day
+      THRESHOLD excellent   AT 95 THEN FLAG "peer_review_concordance_excellent"
+      THRESHOLD acceptable  AT 85 THEN FLAG "peer_review_concordance_acceptable"
+      THRESHOLD concerning  AT 75 THEN FLAG "peer_review_concordance_concerning_quality_review"
+      THRESHOLD critical    AT 60 THEN FLAG "peer_review_concordance_critical_formal_review_required"
+    }
+
+    RULE reviewer_independence {
+      WHEN PeerReviewContext.reviewer_independence_violated == true
+      THEN FLAG "peer_review_self_review_blocked_same_radiologist_cannot_review_own_study"
+      SEVERITY critical
+      PRIORITY 100
+    }
+
+    RULE major_discrepancy {
+      WHEN PeerReviewContext.peer_review_discrepancy_major == true
+      THEN FLAG "major_peer_review_discrepancy_escalate_to_section_chief"
+      SEVERITY critical
+      PRIORITY 95
+    }
+
+    RULE significant_discrepancy {
+      WHEN PeerReviewContext.peer_review_discrepancy_significant == true
+      THEN FLAG "clinically_significant_discrepancy_ordering_provider_notification_required"
+      SEVERITY warning
+      PRIORITY 88
+    }
+
+    RULE peer_review_overdue {
+      WHEN PeerReviewContext.peer_review_overdue == true
+      THEN FLAG "peer_review_not_completed_by_due_date"
+      SEVERITY warning
+      PRIORITY 75
+    }
+
+    RULE peer_review_quota {
+      WHEN PeerReviewContext.peer_review_quota_unmet_ytd == true
+      THEN FLAG "annual_peer_review_quota_not_met_accreditation_at_risk"
+      SEVERITY warning
+      PRIORITY 80
+    }
+
+  }
+
+  MODULE DoseEngine {
+
+    FACT DoseContext {
+      exceeds_drl_study:         boolean
+      exceeds_drl_3x:            boolean
+      cumulative_dose_high:      boolean
+      dose_optimization_possible: boolean
+      protocol_deviation:        boolean
+    }
+
+    SCORE dose_optimization_score {
+      INITIAL 100
+      MIN       0
+      MAX     100
+      DECAY     0 PER day
+      THRESHOLD optimal     AT 90 THEN FLAG "dose_optimization_excellent"
+      THRESHOLD acceptable  AT 75 THEN FLAG "dose_optimization_acceptable"
+      THRESHOLD concerning  AT 60 THEN FLAG "dose_optimization_review_required"
+    }
+
+    RULE dose_exceeds_drl_significantly {
+      WHEN DoseContext.exceeds_drl_3x == true
+      THEN FLAG "dose_exceeds_DRL_3x_immediate_physics_review_required"
+      SEVERITY critical
+      PRIORITY 97
+    }
+
+    RULE dose_exceeds_drl {
+      WHEN DoseContext.exceeds_drl_study == true
+      THEN FLAG "study_dose_exceeds_diagnostic_reference_level_review_technique"
+      SEVERITY warning
+      PRIORITY 80
+    }
+
+    RULE cumulative_dose_alert {
+      WHEN DoseContext.cumulative_dose_high == true
+      THEN FLAG "patient_cumulative_radiation_dose_high_discuss_imaging_strategy"
+      SEVERITY warning
+      PRIORITY 75
+    }
+
+    RULE protocol_deviation {
+      WHEN DoseContext.protocol_deviation == true
+      THEN FLAG "imaging_protocol_deviation_document_clinical_justification"
+      SEVERITY warning
+      PRIORITY 72
+    }
+
+  }
+
+  MODULE ProtocolEngine {
+
+    FACT ProtocolContext {
+      no_protocol_for_procedure:   boolean
+      protocol_review_overdue:     boolean
+      contrast_premedication_due:  boolean
+    }
+
+    RULE missing_protocol {
+      WHEN ProtocolContext.no_protocol_for_procedure == true
+      THEN FLAG "no_imaging_protocol_for_ordered_procedure_physicist_review_required"
+      SEVERITY warning
+      PRIORITY 85
+    }
+
+    RULE protocol_review_overdue {
+      WHEN ProtocolContext.protocol_review_overdue == true
+      THEN FLAG "imaging_protocol_annual_review_overdue"
+      SEVERITY warning
+      PRIORITY 70
+    }
+
+    RULE contrast_premedication {
+      WHEN ProtocolContext.contrast_premedication_due == true
+      THEN FLAG "contrast_allergy_premedication_protocol_required_before_exam"
+      SEVERITY critical
+      PRIORITY 98
+    }
+
+  }
+
+  // ── REASONER ──────────────────────────────────────────────────────────────
+
+  REASONER radiology_quality_reasoner {
+    SCHEDULE "weekly"
+    DESCRIPTION "Analyzes report turnaround times, critical finding communication compliance, peer review concordance trends, and dose optimization opportunities"
+    INPUT {
+      turnaround_data:       string
+      critical_finding_log:  string
+      peer_review_results:   string
+      dose_trending:         string
+    }
+    OUTPUT {
+      turnaround_summary:       string
+      communication_compliance: number
+      concordance_trend:        string
+      dose_opportunity_list:    string
+    }
+  }
+
+  // ── WORKFLOWS ─────────────────────────────────────────────────────────────
+
+  WORKFLOW schedule_imaging {
+    IDEMPOTENT false
+    STEPS {
+      STEP check_contrast_screening {
+        ACTION CheckContrastScreening
+        ON_FAIL abort
+      }
+      STEP select_protocol {
+        ACTION SelectImagingProtocol
+        ON_FAIL skip
+      }
+      STEP assign_modality_slot {
+        ACTION AssignModalitySlot
+        ON_FAIL abort
+      }
+      STEP emit_worklist {
+        ACTION EmitModalityWorklist
+        ON_FAIL skip
+      }
+    }
+  }
+
+  WORKFLOW complete_study {
+    IDEMPOTENT false
+    STEPS {
+      STEP record_study {
+        ACTION RecordStudyCompletion
+        ON_FAIL abort
+      }
+      STEP record_dose {
+        ACTION RecordDoseMetrics
+        ON_FAIL skip
+      }
+      STEP evaluate_dose {
+        ACTION EvaluateDoseAgainstDRL
+        ON_FAIL skip
+      }
+      STEP assign_radiologist {
+        ACTION AssignRadiologist
+        ON_FAIL abort
+      }
+    }
+  }
+
+  WORKFLOW sign_report {
+    IDEMPOTENT false
+    STEPS {
+      STEP validate_report {
+        ACTION ValidateReportCompleteness
+        ON_FAIL abort
+      }
+      STEP check_critical_findings {
+        ACTION IdentifyCriticalFindings
+        ON_FAIL skip
+      }
+      STEP sign {
+        ACTION SignRadiologyReport
+        ON_FAIL abort
+      }
+      STEP communicate_critical {
+        ACTION CommunicateCriticalFinding
+        ON_FAIL skip
+      }
+      STEP emit_final_report {
+        ACTION EmitFinalReportPacket
+        ON_FAIL skip
+      }
+    }
+  }
+
+  WORKFLOW peer_review_assignment {
+    IDEMPOTENT false
+    STEPS {
+      STEP select_studies {
+        ACTION SelectStudiesForPeerReview
+        ON_FAIL abort
+      }
+      STEP assign_reviewers {
+        ACTION AssignPeerReviewers
+        ON_FAIL abort
+      }
+    }
+  }
+
+  WORKFLOW communicate_critical_finding {
+    IDEMPOTENT false
+    STEPS {
+      STEP log_critical {
+        ACTION CreateCriticalFindingRecord
+        ON_FAIL abort
+      }
+      STEP alert_providers {
+        ACTION EmitCriticalFindingAlert
+        ON_FAIL abort
+      }
+      STEP monitor_communication {
+        ACTION MonitorCriticalFindingAcknowledgement
+        ON_FAIL skip
+      }
+    }
+  }
+
+  // ── ACTIONS ───────────────────────────────────────────────────────────────
+
+  ACTION CheckContrastScreening {
+    DESCRIPTION "Evaluates contrast allergy history and renal function before IV contrast is administered"
+    DETERMINISTIC true
+    INPUT {
+      patient_id:        string  REQUIRED
+      contrast_required: boolean REQUIRED
+    }
+    OUTPUT {
+      cleared_for_contrast:     boolean  REQUIRED
+      allergy_flag:             boolean  REQUIRED
+      creatinine_flag:          boolean  REQUIRED
+      premedication_required:   boolean  REQUIRED
+      block_reason:             string
+    }
+  }
+
+  ACTION SelectImagingProtocol {
+    DESCRIPTION "AI selects the appropriate imaging protocol given clinical indication and patient characteristics"
+    DETERMINISTIC false
+    AI_MODEL "claude-sonnet-4-6"
+    INPUT {
+      procedure_code:      string  REQUIRED
+      clinical_indication: string  REQUIRED
+      modality:            string  REQUIRED
+      patient_age:         number  REQUIRED
+      weight_kg:           number
+      contrast_required:   boolean REQUIRED
+    }
+    OUTPUT {
+      protocol_id:         string  REQUIRED
+      protocol_name:       string  REQUIRED
+      technique_notes:     string
+      dose_targets:        string  // JSON: {ctdi_vol_target, dlp_target}
+    }
+  }
+
+  ACTION AssignModalitySlot {
+    DESCRIPTION "Finds and reserves an available time slot on the appropriate modality"
+    DETERMINISTIC true
+    INPUT {
+      modality:         string  REQUIRED
+      order_id:         string  REQUIRED
+      priority:         string  REQUIRED
+      preferred_date:   string
+    }
+    OUTPUT {
+      modality_id:      string  REQUIRED
+      scheduled_date:   string  REQUIRED
+      scheduled_time:   string  REQUIRED
+      room_id:          string  REQUIRED
+    }
+  }
+
+  ACTION EmitModalityWorklist {
+    DESCRIPTION "Sends ModalityWorklistPacket to DICOM gateway for modality pickup"
+    DETERMINISTIC true
+    INPUT {
+      order_id: string REQUIRED
+    }
+    OUTPUT {
+      emitted: boolean REQUIRED
+    }
+  }
+
+  ACTION RecordStudyCompletion {
+    DESCRIPTION "Records DICOM study metadata after image acquisition is complete"
+    DETERMINISTIC true
+    INPUT {
+      order_id:              string  REQUIRED
+      study_instance_uid:    string  REQUIRED
+      series_count:          number  REQUIRED
+      image_count:           number  REQUIRED
+      acquired_by:           string  REQUIRED
+    }
+    OUTPUT {
+      study_id: string REQUIRED
+    }
+  }
+
+  ACTION RecordDoseMetrics {
+    DESCRIPTION "Records dose metrics from DICOM Radiation Dose Structured Report"
+    DETERMINISTIC true
+    INPUT {
+      study_id:         string  REQUIRED
+      modality:         string  REQUIRED
+      procedure_code:   string  REQUIRED
+      ctdi_vol:         number
+      dlp:              number
+      fluoroscopy_time: number
+      dap:              number
+    }
+    OUTPUT {
+      dose_record_id: string  REQUIRED
+    }
+  }
+
+  ACTION EvaluateDoseAgainstDRL {
+    DESCRIPTION "Compares study dose to ACR Diagnostic Reference Levels and emits alert if exceeded"
+    DETERMINISTIC true
+    INPUT {
+      dose_record_id: string  REQUIRED
+    }
+    OUTPUT {
+      exceeds_drl:    boolean  REQUIRED
+      drl_multiple:   number   REQUIRED
+      alert_emitted:  boolean  REQUIRED
+    }
+  }
+
+  ACTION AssignRadiologist {
+    DESCRIPTION "Assigns study to next available radiologist using specialty-based routing and workload balancing"
+    DETERMINISTIC true
+    INPUT {
+      study_id:  string  REQUIRED
+      modality:  string  REQUIRED
+      priority:  string  REQUIRED
+      body_part: string  REQUIRED
+    }
+    OUTPUT {
+      radiologist_id: string  REQUIRED
+    }
+  }
+
+  ACTION ValidateReportCompleteness {
+    DESCRIPTION "Confirms findings and impression sections are populated before signing"
+    DETERMINISTIC true
+    INPUT {
+      report_id: string REQUIRED
+    }
+    OUTPUT {
+      complete:          boolean  REQUIRED
+      missing_sections:  string
+    }
+  }
+
+  ACTION IdentifyCriticalFindings {
+    DESCRIPTION "AI scans report text for critical findings requiring immediate communication per ACR guidelines"
+    DETERMINISTIC false
+    AI_MODEL "claude-sonnet-4-6"
+    INPUT {
+      report_id:   string  REQUIRED
+      findings:    string  REQUIRED
+      impression:  string  REQUIRED
+      modality:    string  REQUIRED
+    }
+    OUTPUT {
+      critical_detected:    boolean  REQUIRED
+      finding_type:         string
+      finding_description:  string
+      confidence:           number
+    }
+  }
+
+  ACTION SignRadiologyReport {
+    DESCRIPTION "Applies radiologist signature, timestamps the report, and marks it final"
+    DETERMINISTIC true
+    INPUT {
+      report_id:      string  REQUIRED
+      radiologist_id: string  REQUIRED
+      report_status:  string  DEFAULT "final"
+    }
+    OUTPUT {
+      signed: boolean  REQUIRED
+      signed_at: string REQUIRED
+    }
+  }
+
+  ACTION CreateCriticalFindingRecord {
+    DESCRIPTION "Creates CriticalFinding entity and sets the 60-minute communication deadline"
+    DETERMINISTIC true
+    INPUT {
+      report_id:           string  REQUIRED
+      study_id:            string  REQUIRED
+      patient_id:          string  REQUIRED
+      radiologist_id:      string  REQUIRED
+      finding_type:        string  REQUIRED
+      finding_description: string  REQUIRED
+    }
+    OUTPUT {
+      critical_finding_id:        string  REQUIRED
+      communicate_required_by:    string  REQUIRED
+    }
+  }
+
+  ACTION EmitCriticalFindingAlert {
+    DESCRIPTION "Emits CriticalFindingAlertPacket to clinical and patient portal channels"
+    DETERMINISTIC true
+    INPUT {
+      critical_finding_id: string REQUIRED
+    }
+    OUTPUT {
+      emitted: boolean REQUIRED
+    }
+  }
+
+  ACTION MonitorCriticalFindingAcknowledgement {
+    DESCRIPTION "Checks whether ordering provider has acknowledged the critical finding within 60 minutes"
+    DETERMINISTIC true
+    INPUT {
+      critical_finding_id: string REQUIRED
+    }
+    OUTPUT {
+      acknowledged:        boolean  REQUIRED
+      minutes_elapsed:     number   REQUIRED
+      escalation_required: boolean  REQUIRED
+    }
+  }
+
+  ACTION CommunicateCriticalFinding {
+    DESCRIPTION "Records the communication event for an acknowledged critical finding"
+    DETERMINISTIC true
+    INPUT {
+      critical_finding_id:  string  REQUIRED
+      communicated_to:      string  REQUIRED
+      communication_method: string  REQUIRED
+      callback_number:      string
+    }
+    OUTPUT {
+      documented: boolean  REQUIRED
+    }
+  }
+
+  ACTION EmitFinalReportPacket {
+    DESCRIPTION "Emits FinalReportPacket to clinical and patient portal channels"
+    DETERMINISTIC true
+    INPUT {
+      report_id: string REQUIRED
+    }
+    OUTPUT {
+      emitted: boolean REQUIRED
+    }
+  }
+
+  ACTION SelectStudiesForPeerReview {
+    DESCRIPTION "Randomly selects 5% of signed studies per radiologist for peer review, per ACR RADPEER"
+    DETERMINISTIC true
+    INPUT {
+      radiologist_id:     string  REQUIRED
+      review_period_days: number  DEFAULT 30
+    }
+    OUTPUT {
+      selected_study_ids: string  REQUIRED  // JSON array
+    }
+  }
+
+  ACTION AssignPeerReviewers {
+    DESCRIPTION "Assigns peer reviewers to selected studies, enforcing independence"
+    DETERMINISTIC true
+    INPUT {
+      study_ids:              string  REQUIRED  // JSON array
+      original_radiologist_id: string REQUIRED
+    }
+    OUTPUT {
+      assignments: string  REQUIRED  // JSON: [{study_id, reviewer_id, due_date}]
+    }
+  }
+
+  ACTION GenerateRadiologyReport {
+    DESCRIPTION "AI drafts structured radiology report from study metadata and prior reports — radiologist reviews before signing"
+    DETERMINISTIC false
+    AI_MODEL "claude-sonnet-4-6"
+    INPUT {
+      study_id:            string  REQUIRED
+      modality:            string  REQUIRED
+      procedure_name:      string  REQUIRED
+      clinical_indication: string  REQUIRED
+      prior_report_ids:    string
+    }
+    OUTPUT {
+      technique:   string  REQUIRED
+      comparison:  string  REQUIRED
+      findings:    string  REQUIRED
+      impression:  string  REQUIRED
+    }
+  }
+
+  ACTION GeneratePeerReviewReport {
+    DESCRIPTION "AI generates structured peer review summary from reviewer score and discrepancy notes"
+    DETERMINISTIC false
+    AI_MODEL "claude-haiku-4-5-20251001"
+    INPUT {
+      peer_review_id:      string  REQUIRED
+      score:               number  REQUIRED
+      score_detail:        string  REQUIRED
+      discrepancy_detected: boolean REQUIRED
+    }
+    OUTPUT {
+      review_summary:  string  REQUIRED
+      action_required: boolean REQUIRED
+      action_detail:   string
+    }
+  }
+
+  // ── PREFERENCES ───────────────────────────────────────────────────────────
+
+  PREFERENCE critical_finding_communication_minutes {
+    DEFAULT 60
+    TYPE    number
+    DESCRIPTION "Minutes from critical finding detection to required communication (ACR guideline: 60)"
+  }
+
+  PREFERENCE peer_review_percentage {
+    DEFAULT 5
+    TYPE    number
+    DESCRIPTION "Percentage of studies selected for peer review per radiologist per month"
+  }
+
+  PREFERENCE final_report_turnaround_hours {
+    DEFAULT 24
+    TYPE    number
+    DESCRIPTION "Hours from image acquisition to signed final report target"
+  }
+
+  PREFERENCE stat_read_turnaround_minutes {
+    DEFAULT 30
+    TYPE    number
+    DESCRIPTION "Minutes from image acquisition to signed report for STAT exams"
+  }
+
+  PREFERENCE creatinine_threshold_contrast {
+    DEFAULT 1.5
+    TYPE    number
+    DESCRIPTION "Serum creatinine mg/dL above which IV contrast requires nephrology clearance"
+  }
+
+  PREFERENCE dose_alert_drl_multiple {
+    DEFAULT 3.0
+    TYPE    number
+    DESCRIPTION "DRL multiple above which a dose physics review is automatically triggered"
+  }
+
+}

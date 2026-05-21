@@ -1,0 +1,965 @@
+APP accelerando_patient_portal {
+  VERSION "1.0.0"
+  PORT 3013
+  DESCRIPTION "Patient self-service portal — secure messaging, result delivery with safety controls, appointment self-scheduling, refill requests, health summaries, and consent management"
+
+  // ── ENTITIES ──────────────────────────────────────────────────────────────
+
+  ENTITY PortalAccount {
+    FIELDS {
+      id:              string   REQUIRED
+      patient_id:      string   REQUIRED
+      // authentication
+      username:        string   REQUIRED
+      email:           string   REQUIRED
+      phone:           string
+      mfa_enabled:     boolean  DEFAULT true
+      mfa_method:      string   DEFAULT "sms"   // "sms" | "authenticator" | "email"
+      // identity verification (NIST 800-63 IAL2)
+      identity_verified: boolean DEFAULT false
+      identity_verified_at: string
+      identity_verification_method: string    // "in_person", "remote_proofing", "knowledge_based"
+      // proxy access
+      is_proxy:        boolean  DEFAULT false
+      proxy_for_patient_id: string
+      proxy_relationship: string              // "parent", "guardian", "authorized_rep"
+      proxy_expires:   string
+      // preferences
+      preferred_language: string DEFAULT "English"
+      notification_preference: string DEFAULT "email"  // "email" | "sms" | "both"
+      // status
+      active:          boolean  DEFAULT true
+      locked:          boolean  DEFAULT false
+      locked_reason:   string
+      last_login:      string
+      failed_login_attempts: number DEFAULT 0
+    }
+    CRUD [create, read, list, edit]
+  }
+
+  ENTITY SecureMessage {
+    FIELDS {
+      id:              string   REQUIRED
+      patient_id:      string   REQUIRED
+      // direction
+      direction:       string   REQUIRED   // "patient_to_provider" | "provider_to_patient"
+      from_account_id: string   REQUIRED
+      to_provider_id:  string
+      to_department:   string
+      // content
+      subject:         string   REQUIRED
+      body:            string   REQUIRED
+      // threading
+      thread_id:       string
+      reply_to_id:     string
+      // read status
+      read_by_recipient: boolean DEFAULT false
+      read_at:         string
+      // response tracking
+      response_due_by: string  // SLA: typically 2 business days
+      response_overdue: boolean DEFAULT false
+      // attachments
+      has_attachment:  boolean DEFAULT false
+      attachment_ids:  string   // JSON array
+    }
+    STAGES [sent, read, replied, closed, escalated]
+    CRUD [create, read, list, edit]
+  }
+
+  ENTITY ResultRelease {
+    FIELDS {
+      id:              string   REQUIRED
+      result_id:       string   REQUIRED
+      patient_id:      string   REQUIRED
+      // release timing
+      release_held:    boolean  DEFAULT false
+      hold_reason:     string   // "abnormal_pending_review", "critical_never_release", "provider_hold"
+      // review
+      reviewed_by:     string
+      reviewed_at:     string
+      release_approved: boolean DEFAULT false
+      release_approved_at: string
+      // patient notification
+      notification_sent: boolean DEFAULT false
+      notification_sent_at: string
+      notification_method: string
+      // patient viewed
+      patient_viewed:  boolean  DEFAULT false
+      patient_viewed_at: string
+    }
+    STAGES [pending_review, approved, released, viewed, held]
+    CRUD [create, read, list, edit]
+  }
+
+  ENTITY AppointmentRequest {
+    FIELDS {
+      id:              string   REQUIRED
+      patient_id:      string   REQUIRED
+      // request details
+      provider_id:     string
+      specialty:       string
+      appointment_type_id: string REQUIRED
+      preferred_dates: string   REQUIRED   // JSON: [{date, morning_ok, afternoon_ok}]
+      preferred_provider: boolean DEFAULT false
+      telehealth_preferred: boolean DEFAULT false
+      reason:          string   REQUIRED
+      // processing
+      processed_by:    string
+      processed_at:    string
+      appointment_id:  string   // linked confirmed appointment
+      denial_reason:   string
+    }
+    STAGES [submitted, processing, confirmed, denied, cancelled]
+    CRUD [create, read, list, edit]
+  }
+
+  ENTITY RefillRequest {
+    FIELDS {
+      id:              string   REQUIRED
+      patient_id:      string   REQUIRED
+      medication_id:   string   REQUIRED
+      prescription_id: string   REQUIRED
+      // request
+      requested_at:    string   REQUIRED
+      pharmacy_id:     string   REQUIRED
+      patient_notes:   string
+      // clinical review
+      reviewed_by:     string
+      reviewed_at:     string
+      approved:        boolean
+      denial_reason:   string
+      // transmission
+      transmitted_at:  string
+    }
+    STAGES [submitted, pending_review, approved, denied, transmitted]
+    CRUD [create, read, list, edit]
+  }
+
+  ENTITY HealthSummary {
+    FIELDS {
+      id:              string   REQUIRED
+      patient_id:      string   REQUIRED
+      generated_at:    string   REQUIRED
+      generated_by:    string   REQUIRED  // "patient_request", "care_team", "discharge"
+      // content (patient-friendly language)
+      summary_text:    string   REQUIRED
+      // clinical data included
+      problems_included:      boolean DEFAULT true
+      medications_included:   boolean DEFAULT true
+      allergies_included:     boolean DEFAULT true
+      immunizations_included: boolean DEFAULT true
+      recent_results_included: boolean DEFAULT true
+      care_plan_included:     boolean DEFAULT false
+      // format
+      format:          string   DEFAULT "pdf"   // "pdf" | "html" | "fhir"
+      ccd_document:    string
+      // access
+      patient_viewed:  boolean  DEFAULT false
+      patient_viewed_at: string
+    }
+    CRUD [create, read, list]
+  }
+
+  ENTITY ConsentRecord {
+    FIELDS {
+      id:              string   REQUIRED
+      patient_id:      string   REQUIRED
+      consent_type:    string   REQUIRED   // "treatment", "research", "release_of_info", "telehealth", "portal_tos"
+      consent_text:    string   REQUIRED
+      version:         string   REQUIRED
+      // action
+      action:          string   REQUIRED   // "granted" | "revoked"
+      action_date:     string   REQUIRED
+      action_by:       string   REQUIRED   // patient or proxy
+      // witnesses / signature
+      ip_address:      string
+      signature_hash:  string
+      // disclosure
+      disclosed_to:    string
+      disclosed_purpose: string
+    }
+    CRUD [create, read, list]
+  }
+
+  ENTITY HealthGoal {
+    FIELDS {
+      id:              string   REQUIRED
+      patient_id:      string   REQUIRED
+      goal_type:       string   REQUIRED   // "weight", "steps", "blood_pressure", "blood_glucose", "medication_adherence"
+      target_value:    number
+      current_value:   number
+      unit:            string
+      start_date:      string   REQUIRED
+      target_date:     string
+      // tracking
+      readings:        string   // JSON: [{date, value}]
+      on_track:        boolean  Default false
+      // provider visibility
+      shared_with_provider: boolean DEFAULT true
+    }
+    STAGES [active, achieved, abandoned]
+    CRUD [create, read, list, edit]
+  }
+
+  // ── PACKETS ───────────────────────────────────────────────────────────────
+
+  PACKET PortalMessagePacket {
+    message_id:      string  REQUIRED
+    patient_id:      string  REQUIRED
+    to_provider_id:  string  REQUIRED
+    subject:         string  REQUIRED
+    priority:        string  REQUIRED
+    SIGNATURE "accelerando_patient_portal"
+  }
+
+  PACKET RefillRequestPacket {
+    refill_request_id: string REQUIRED
+    patient_id:        string REQUIRED
+    medication_id:     string REQUIRED
+    prescription_id:   string REQUIRED
+    pharmacy_id:       string REQUIRED
+    SIGNATURE "accelerando_patient_portal"
+  }
+
+  PACKET AppointmentRequestPacket {
+    appt_request_id:    string REQUIRED
+    patient_id:         string REQUIRED
+    appointment_type_id: string REQUIRED
+    specialty:          string
+    preferred_dates:    string REQUIRED
+    telehealth:         boolean REQUIRED
+    SIGNATURE "accelerando_patient_portal"
+  }
+
+  PACKET ResultViewedPacket {
+    result_release_id: string REQUIRED
+    patient_id:        string REQUIRED
+    result_id:         string REQUIRED
+    viewed_at:         string REQUIRED
+    SIGNATURE "accelerando_patient_portal"
+  }
+
+  // ── CHANNELS ──────────────────────────────────────────────────────────────
+
+  CHANNEL portal_message_outbound {
+    PACKET PortalMessagePacket
+    CONSUMERS ["accelerando_clinical"]
+    DELIVERY at_least_once
+  }
+
+  CHANNEL refill_request_outbound {
+    PACKET RefillRequestPacket
+    CONSUMERS ["accelerando_pharmacy"]
+    DELIVERY exactly_once
+  }
+
+  CHANNEL appt_request_outbound {
+    PACKET AppointmentRequestPacket
+    CONSUMERS ["accelerando_scheduling"]
+    DELIVERY at_least_once
+  }
+
+  CHANNEL result_viewed_outbound {
+    PACKET ResultViewedPacket
+    CONSUMERS ["accelerando_clinical"]
+    DELIVERY at_least_once
+  }
+
+  // ── MODULES ───────────────────────────────────────────────────────────────
+
+  MODULE ResultsEngine {
+
+    FACT ResultsContext {
+      critical_result_auto_release_attempted: boolean
+      abnormal_result_unreview_release_attempted: boolean
+      result_released_without_provider_review: boolean
+      result_overdue_release_7_days:          boolean
+      patient_notified_of_critical_not_viewed: boolean
+    }
+
+    RULE critical_result_never_auto_release {
+      WHEN ResultsContext.critical_result_auto_release_attempted == true
+      THEN FLAG "critical_result_auto_release_blocked_provider_must_release_manually"
+      SEVERITY critical
+      PRIORITY 100
+    }
+
+    RULE abnormal_result_requires_review {
+      WHEN ResultsContext.abnormal_result_unreview_release_attempted == true
+      THEN FLAG "abnormal_result_release_blocked_pending_provider_review"
+      SEVERITY critical
+      PRIORITY 100
+    }
+
+    RULE result_released_without_review {
+      WHEN ResultsContext.result_released_without_provider_review == true
+      THEN FLAG "result_released_to_portal_without_provider_review_audit_required"
+      SEVERITY critical
+      PRIORITY 98
+    }
+
+    RULE result_overdue_release {
+      WHEN ResultsContext.result_overdue_release_7_days == true
+      THEN FLAG "normal_result_held_more_than_7_days_release_required"
+      SEVERITY warning
+      PRIORITY 80
+    }
+
+    RULE critical_not_viewed_7_days {
+      WHEN ResultsContext.patient_notified_of_critical_not_viewed == true
+      THEN FLAG "patient_not_viewed_critical_result_after_notification_escalate"
+      SEVERITY warning
+      PRIORITY 85
+    }
+
+  }
+
+  MODULE MessagingEngine {
+
+    FACT MessagingContext {
+      message_unresponded_2_business_days: boolean
+      urgent_message_unresponded_4h:       boolean
+      message_volume_spike:                boolean
+      after_hours_urgent_message:          boolean
+    }
+
+    RULE urgent_message_unresponded {
+      WHEN MessagingContext.urgent_message_unresponded_4h == true
+      THEN FLAG "urgent_portal_message_unresponded_4h_escalate_to_on_call"
+      SEVERITY critical
+      PRIORITY 92
+    }
+
+    RULE message_response_sla {
+      WHEN MessagingContext.message_unresponded_2_business_days == true
+      THEN FLAG "portal_message_unresponded_2_business_days_sla_breach"
+      SEVERITY warning
+      PRIORITY 80
+    }
+
+    RULE after_hours_urgent {
+      WHEN MessagingContext.after_hours_urgent_message == true
+      THEN FLAG "after_hours_urgent_portal_message_route_to_on_call"
+      SEVERITY critical
+      PRIORITY 90
+    }
+
+  }
+
+  MODULE AccessEngine {
+
+    FACT AccessContext {
+      account_not_identity_verified:   boolean
+      account_locked_failed_logins:    boolean
+      proxy_access_expired:            boolean
+      mfa_disabled:                    boolean
+      account_inactive_90_days:        boolean
+      minor_patient_direct_access:     boolean  // no proxy — depends on state law
+    }
+
+    RULE identity_not_verified {
+      WHEN AccessContext.account_not_identity_verified == true
+      THEN FLAG "portal_account_identity_not_verified_limit_access_to_non_clinical"
+      SEVERITY warning
+      PRIORITY 85
+    }
+
+    RULE account_locked {
+      WHEN AccessContext.account_locked_failed_logins == true
+      THEN FLAG "portal_account_locked_failed_login_attempts_identity_verify_before_unlock"
+      SEVERITY critical
+      PRIORITY 95
+    }
+
+    RULE proxy_expired {
+      WHEN AccessContext.proxy_access_expired == true
+      THEN FLAG "proxy_access_expired_renew_or_revoke"
+      SEVERITY warning
+      PRIORITY 82
+    }
+
+    RULE mfa_disabled {
+      WHEN AccessContext.mfa_disabled == true
+      THEN FLAG "mfa_disabled_on_portal_account_security_risk"
+      SEVERITY warning
+      PRIORITY 78
+    }
+
+    RULE minor_without_proxy {
+      WHEN AccessContext.minor_patient_direct_access == true
+      THEN FLAG "minor_patient_direct_portal_access_review_state_law_requirements"
+      SEVERITY warning
+      PRIORITY 80
+    }
+
+  }
+
+  MODULE RefillEngine {
+
+    FACT RefillPortalContext {
+      refill_for_controlled_via_portal: boolean
+      refill_overdue_clinical_review:   boolean
+      patient_refill_requests_high_frequency: boolean
+    }
+
+    RULE controlled_via_portal_blocked {
+      WHEN RefillPortalContext.refill_for_controlled_via_portal == true
+      THEN FLAG "controlled_substance_refill_via_portal_blocked_phone_or_office_visit_required"
+      SEVERITY critical
+      PRIORITY 100
+    }
+
+    RULE refill_review_overdue {
+      WHEN RefillPortalContext.refill_overdue_clinical_review == true
+      THEN FLAG "portal_refill_request_awaiting_clinical_review_48h"
+      SEVERITY warning
+      PRIORITY 78
+    }
+
+  }
+
+  // ── REASONER ──────────────────────────────────────────────────────────────
+
+  REASONER portal_engagement_reasoner {
+    SCHEDULE "weekly"
+    DESCRIPTION "Analyzes portal adoption, message volume patterns, result viewing rates, and patient engagement to identify barriers to care and self-management opportunities"
+    INPUT {
+      adoption_metrics:       string
+      message_volume:         string
+      result_viewing_rates:   string
+      refill_request_rates:   string
+      appointment_self_schedule_rate: number
+    }
+    OUTPUT {
+      engagement_summary:     string
+      low_adoption_segments:  string
+      message_burden_report:  string
+      patient_activation_score: number
+    }
+  }
+
+  // ── WORKFLOWS ─────────────────────────────────────────────────────────────
+
+  WORKFLOW enroll_patient {
+    IDEMPOTENT false
+    STEPS {
+      STEP create_account {
+        ACTION CreatePortalAccount
+        ON_FAIL abort
+      }
+      STEP initiate_identity_verification {
+        ACTION InitiateIdentityVerification
+        ON_FAIL skip
+      }
+      STEP send_welcome {
+        ACTION SendWelcomeMessage
+        ON_FAIL skip
+      }
+      STEP record_consent {
+        ACTION RecordPortalConsent
+        ON_FAIL skip
+      }
+    }
+  }
+
+  WORKFLOW send_message {
+    IDEMPOTENT false
+    STEPS {
+      STEP validate_account {
+        ACTION ValidatePortalAccountAccess
+        ON_FAIL abort
+      }
+      STEP create_message {
+        ACTION CreateSecureMessage
+        ON_FAIL abort
+      }
+      STEP route_message {
+        ACTION RouteMessageToProvider
+        ON_FAIL abort
+      }
+      STEP notify_provider {
+        ACTION NotifyProviderOfMessage
+        ON_FAIL skip
+      }
+    }
+  }
+
+  WORKFLOW release_result {
+    IDEMPOTENT false
+    STEPS {
+      STEP check_release_eligibility {
+        ACTION CheckResultReleaseEligibility
+        ON_FAIL abort
+      }
+      STEP create_release_record {
+        ACTION CreateResultReleaseRecord
+        ON_FAIL abort
+      }
+      STEP notify_patient {
+        ACTION NotifyPatientOfResult
+        ON_FAIL skip
+      }
+    }
+  }
+
+  WORKFLOW submit_refill_request {
+    IDEMPOTENT false
+    STEPS {
+      STEP validate_request {
+        ACTION ValidateRefillRequest
+        ON_FAIL abort
+      }
+      STEP create_request {
+        ACTION CreatePortalRefillRequest
+        ON_FAIL abort
+      }
+      STEP route_to_clinical {
+        ACTION EmitRefillRequestPacket
+        ON_FAIL abort
+      }
+    }
+  }
+
+  WORKFLOW self_schedule_appointment {
+    IDEMPOTENT false
+    STEPS {
+      STEP validate_eligibility {
+        ACTION ValidateSelfScheduleEligibility
+        ON_FAIL abort
+      }
+      STEP create_request {
+        ACTION CreateAppointmentRequest
+        ON_FAIL abort
+      }
+      STEP route_to_scheduling {
+        ACTION EmitAppointmentRequestPacket
+        ON_FAIL abort
+      }
+    }
+  }
+
+  WORKFLOW generate_health_summary {
+    IDEMPOTENT false
+    STEPS {
+      STEP compile_data {
+        ACTION CompileHealthSummaryData
+        ON_FAIL abort
+      }
+      STEP generate_summary {
+        ACTION GeneratePatientHealthSummary
+        ON_FAIL abort
+      }
+      STEP deliver {
+        ACTION DeliverHealthSummary
+        ON_FAIL skip
+      }
+    }
+  }
+
+  WORKFLOW manage_proxy_access {
+    IDEMPOTENT false
+    STEPS {
+      STEP validate_proxy_relationship {
+        ACTION ValidateProxyRelationship
+        ON_FAIL abort
+      }
+      STEP create_proxy_account {
+        ACTION CreateProxyPortalAccount
+        ON_FAIL abort
+      }
+      STEP record_proxy_consent {
+        ACTION RecordProxyConsentGrant
+        ON_FAIL skip
+      }
+    }
+  }
+
+  // ── ACTIONS ───────────────────────────────────────────────────────────────
+
+  ACTION CreatePortalAccount {
+    DESCRIPTION "Creates portal account and links to patient record"
+    DETERMINISTIC true
+    INPUT {
+      patient_id:   string  REQUIRED
+      email:        string  REQUIRED
+      phone:        string
+      username:     string  REQUIRED
+      mfa_method:   string  DEFAULT "sms"
+    }
+    OUTPUT {
+      account_id: string  REQUIRED
+    }
+  }
+
+  ACTION InitiateIdentityVerification {
+    DESCRIPTION "Initiates NIST IAL2 identity proofing workflow via preferred method"
+    DETERMINISTIC true
+    INPUT {
+      account_id:          string  REQUIRED
+      verification_method: string  DEFAULT "knowledge_based"
+    }
+    OUTPUT {
+      verification_initiated: boolean  REQUIRED
+      verification_session_id: string  REQUIRED
+    }
+  }
+
+  ACTION SendWelcomeMessage {
+    DESCRIPTION "Sends welcome email/SMS with portal setup instructions and identity verification link"
+    DETERMINISTIC true
+    INPUT {
+      account_id: string  REQUIRED
+      patient_id: string  REQUIRED
+    }
+    OUTPUT {
+      sent: boolean  REQUIRED
+    }
+  }
+
+  ACTION RecordPortalConsent {
+    DESCRIPTION "Records patient's consent to portal Terms of Service and Privacy Notice"
+    DETERMINISTIC true
+    INPUT {
+      patient_id:      string  REQUIRED
+      account_id:      string  REQUIRED
+      consent_version: string  REQUIRED
+      ip_address:      string  REQUIRED
+    }
+    OUTPUT {
+      consent_id: string  REQUIRED
+    }
+  }
+
+  ACTION ValidatePortalAccountAccess {
+    DESCRIPTION "Confirms account is active, not locked, identity verified, and MFA cleared"
+    DETERMINISTIC true
+    INPUT {
+      account_id: string  REQUIRED
+    }
+    OUTPUT {
+      access_granted: boolean  REQUIRED
+      denial_reason:  string
+    }
+  }
+
+  ACTION CreateSecureMessage {
+    DESCRIPTION "Creates SecureMessage record and attaches to patient thread"
+    DETERMINISTIC true
+    INPUT {
+      patient_id:      string  REQUIRED
+      from_account_id: string  REQUIRED
+      to_provider_id:  string
+      to_department:   string
+      subject:         string  REQUIRED
+      body:            string  REQUIRED
+      thread_id:       string
+      reply_to_id:     string
+    }
+    OUTPUT {
+      message_id: string  REQUIRED
+      thread_id:  string  REQUIRED
+    }
+  }
+
+  ACTION RouteMessageToProvider {
+    DESCRIPTION "Routes message to correct inbox based on subject categorization and care team"
+    DETERMINISTIC true
+    INPUT {
+      message_id:  string  REQUIRED
+      patient_id:  string  REQUIRED
+    }
+    OUTPUT {
+      routed_to_provider_id: string  REQUIRED
+      priority:              string  REQUIRED
+    }
+  }
+
+  ACTION NotifyProviderOfMessage {
+    DESCRIPTION "Sends in-app and email notification to provider of new portal message"
+    DETERMINISTIC true
+    INPUT {
+      message_id:  string  REQUIRED
+      provider_id: string  REQUIRED
+    }
+    OUTPUT {
+      notified: boolean  REQUIRED
+    }
+  }
+
+  ACTION CheckResultReleaseEligibility {
+    DESCRIPTION "Determines whether a result can be released to the patient portal based on result type, abnormality, and provider review status"
+    DETERMINISTIC true
+    INPUT {
+      result_id:    string  REQUIRED
+      patient_id:   string  REQUIRED
+    }
+    OUTPUT {
+      can_release:       boolean  REQUIRED
+      hold_reason:       string
+      reviewed_by:       string
+      reviewed_at:       string
+    }
+  }
+
+  ACTION CreateResultReleaseRecord {
+    DESCRIPTION "Creates ResultRelease record and sets the result as available in patient view"
+    DETERMINISTIC true
+    INPUT {
+      result_id:        string  REQUIRED
+      patient_id:       string  REQUIRED
+      release_approved: boolean REQUIRED
+      reviewed_by:      string  REQUIRED
+    }
+    OUTPUT {
+      release_id: string  REQUIRED
+    }
+  }
+
+  ACTION NotifyPatientOfResult {
+    DESCRIPTION "Sends result available notification via patient's preferred channel"
+    DETERMINISTIC true
+    INPUT {
+      result_release_id: string  REQUIRED
+      patient_id:        string  REQUIRED
+    }
+    OUTPUT {
+      notified: boolean  REQUIRED
+    }
+  }
+
+  ACTION ValidateRefillRequest {
+    DESCRIPTION "Validates refill request: medication active, not controlled, pharmacy on file"
+    DETERMINISTIC true
+    INPUT {
+      patient_id:       string  REQUIRED
+      medication_id:    string  REQUIRED
+      prescription_id:  string  REQUIRED
+    }
+    OUTPUT {
+      valid:         boolean  REQUIRED
+      block_reason:  string
+    }
+  }
+
+  ACTION CreatePortalRefillRequest {
+    DESCRIPTION "Creates RefillRequest record in pending_review status"
+    DETERMINISTIC true
+    INPUT {
+      patient_id:      string  REQUIRED
+      medication_id:   string  REQUIRED
+      prescription_id: string  REQUIRED
+      pharmacy_id:     string  REQUIRED
+      patient_notes:   string
+    }
+    OUTPUT {
+      refill_request_id: string  REQUIRED
+    }
+  }
+
+  ACTION EmitRefillRequestPacket {
+    DESCRIPTION "Emits RefillRequestPacket to pharmacy and clinical channels"
+    DETERMINISTIC true
+    INPUT {
+      refill_request_id: string REQUIRED
+    }
+    OUTPUT {
+      emitted: boolean REQUIRED
+    }
+  }
+
+  ACTION ValidateSelfScheduleEligibility {
+    DESCRIPTION "Confirms patient is eligible to self-schedule: identity verified, no holds, appointment type allows self-schedule"
+    DETERMINISTIC true
+    INPUT {
+      patient_id:          string  REQUIRED
+      appointment_type_id: string  REQUIRED
+    }
+    OUTPUT {
+      eligible:     boolean  REQUIRED
+      block_reason: string
+    }
+  }
+
+  ACTION CreateAppointmentRequest {
+    DESCRIPTION "Creates AppointmentRequest record for scheduling staff processing"
+    DETERMINISTIC true
+    INPUT {
+      patient_id:          string  REQUIRED
+      appointment_type_id: string  REQUIRED
+      preferred_dates:     string  REQUIRED
+      provider_id:         string
+      specialty:           string
+      telehealth:          boolean DEFAULT false
+      reason:              string  REQUIRED
+    }
+    OUTPUT {
+      request_id: string  REQUIRED
+    }
+  }
+
+  ACTION EmitAppointmentRequestPacket {
+    DESCRIPTION "Emits AppointmentRequestPacket to scheduling channel"
+    DETERMINISTIC true
+    INPUT {
+      request_id: string REQUIRED
+    }
+    OUTPUT {
+      emitted: boolean REQUIRED
+    }
+  }
+
+  ACTION CompileHealthSummaryData {
+    DESCRIPTION "Assembles problems, medications, allergies, immunizations, and recent results for health summary generation"
+    DETERMINISTIC true
+    INPUT {
+      patient_id:  string  REQUIRED
+      include_results_days: number DEFAULT 90
+    }
+    OUTPUT {
+      health_data: string  REQUIRED  // JSON structured snapshot
+    }
+  }
+
+  ACTION GeneratePatientHealthSummary {
+    DESCRIPTION "AI generates a patient-readable health summary in plain language from structured clinical data"
+    DETERMINISTIC false
+    AI_MODEL "claude-sonnet-4-6"
+    INPUT {
+      patient_id:         string  REQUIRED
+      patient_name:       string  REQUIRED
+      preferred_language: string  DEFAULT "English"
+      health_data:        string  REQUIRED
+      reading_level:      string  DEFAULT "8th_grade"
+    }
+    OUTPUT {
+      summary_text: string  REQUIRED
+    }
+  }
+
+  ACTION DeliverHealthSummary {
+    DESCRIPTION "Makes health summary available in portal and optionally emails a PDF"
+    DETERMINISTIC true
+    INPUT {
+      summary_id:  string  REQUIRED
+      patient_id:  string  REQUIRED
+    }
+    OUTPUT {
+      delivered: boolean  REQUIRED
+    }
+  }
+
+  ACTION ValidateProxyRelationship {
+    DESCRIPTION "Confirms proxy relationship is valid, documented, and appropriate under applicable law"
+    DETERMINISTIC true
+    INPUT {
+      patient_id:           string  REQUIRED
+      proxy_patient_id:     string  REQUIRED
+      proxy_relationship:   string  REQUIRED
+      proxy_auth_document:  string
+    }
+    OUTPUT {
+      approved:       boolean  REQUIRED
+      denial_reason:  string
+      expiration_date: string  REQUIRED
+    }
+  }
+
+  ACTION CreateProxyPortalAccount {
+    DESCRIPTION "Creates proxy portal account linked to the patient they represent"
+    DETERMINISTIC true
+    INPUT {
+      patient_id:           string  REQUIRED
+      proxy_patient_id:     string  REQUIRED
+      proxy_relationship:   string  REQUIRED
+      email:                string  REQUIRED
+      phone:                string
+      expiration_date:      string  REQUIRED
+    }
+    OUTPUT {
+      proxy_account_id: string  REQUIRED
+    }
+  }
+
+  ACTION RecordProxyConsentGrant {
+    DESCRIPTION "Records patient's documented consent granting proxy portal access"
+    DETERMINISTIC true
+    INPUT {
+      patient_id:       string  REQUIRED
+      proxy_account_id: string  REQUIRED
+      granted_by:       string  REQUIRED
+    }
+    OUTPUT {
+      consent_id: string  REQUIRED
+    }
+  }
+
+  ACTION RevokeProxyAccess {
+    DESCRIPTION "Revokes proxy portal access and records the revocation with reason"
+    DETERMINISTIC true
+    INPUT {
+      proxy_account_id: string  REQUIRED
+      revoked_by:       string  REQUIRED
+      revoked_reason:   string  REQUIRED
+    }
+    OUTPUT {
+      revoked: boolean  REQUIRED
+    }
+  }
+
+  // ── PREFERENCES ───────────────────────────────────────────────────────────
+
+  PREFERENCE message_response_sla_business_days {
+    DEFAULT 2
+    TYPE    number
+    DESCRIPTION "Business days before an unanswered portal message triggers SLA breach flag"
+  }
+
+  PREFERENCE urgent_message_response_hours {
+    DEFAULT 4
+    TYPE    number
+    DESCRIPTION "Hours before an unanswered urgent message triggers escalation"
+  }
+
+  PREFERENCE result_release_hold_days_normal {
+    DEFAULT 0
+    TYPE    number
+    DESCRIPTION "Days to hold normal results before auto-release (0 = release immediately after provider review)"
+  }
+
+  PREFERENCE result_release_hold_days_abnormal {
+    DEFAULT 0
+    TYPE    number
+    DESCRIPTION "Days to hold abnormal results before release; provider must review first regardless"
+  }
+
+  PREFERENCE failed_login_lockout_threshold {
+    DEFAULT 5
+    TYPE    number
+    DESCRIPTION "Consecutive failed logins before account locks"
+  }
+
+  PREFERENCE proxy_access_default_years {
+    DEFAULT 1
+    TYPE    number
+    DESCRIPTION "Default proxy access duration in years before re-authorization required"
+  }
+
+  PREFERENCE health_summary_reading_level {
+    DEFAULT "8th_grade"
+    TYPE    string
+    DESCRIPTION "Target reading level for AI-generated patient health summaries"
+  }
+
+  PREFERENCE refill_request_controlled_blocked {
+    DEFAULT true
+    TYPE    boolean
+    DESCRIPTION "Block portal refill requests for controlled substances (must call or visit)"
+  }
+
+  PREFERENCE identity_verification_required {
+    DEFAULT true
+    TYPE    boolean
+    DESCRIPTION "Require NIST IAL2 identity verification before full clinical portal access"
+  }
+
+}
