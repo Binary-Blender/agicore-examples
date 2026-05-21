@@ -808,7 +808,6 @@ APP accelerando_clinical {
 
   ACTION CreateEncounterRecord {
     DESCRIPTION "Creates encounter, links to appointment, sets initial status"
-    DETERMINISTIC true
     INPUT {
       patient_id:      string   REQUIRED
       provider_id:     string   REQUIRED
@@ -823,7 +822,6 @@ APP accelerando_clinical {
 
   ACTION CheckAllergyConflict {
     DESCRIPTION "Checks ordered drug against patient's allergy list using RxNorm cross-sensitivity rules"
-    DETERMINISTIC true
     INPUT {
       patient_id:   string   REQUIRED
       rxnorm_code:  string   REQUIRED
@@ -838,7 +836,6 @@ APP accelerando_clinical {
 
   ACTION CheckDrugInteractions {
     DESCRIPTION "Queries drug interaction database for all active medications plus the new drug"
-    DETERMINISTIC true
     INPUT {
       patient_id:       string   REQUIRED
       new_rxnorm_code:  string   REQUIRED
@@ -852,7 +849,6 @@ APP accelerando_clinical {
 
   ACTION CheckPDMPRequirement {
     DESCRIPTION "Verifies PDMP has been queried before a controlled substance can be ordered"
-    DETERMINISTIC true
     INPUT {
       patient_id:       string   REQUIRED
       prescriber_id:    string   REQUIRED
@@ -868,7 +864,6 @@ APP accelerando_clinical {
 
   ACTION CheckRenalHepaticDose {
     DESCRIPTION "Evaluates dose appropriateness given patient's renal and hepatic function"
-    DETERMINISTIC true
     INPUT {
       patient_id:    string   REQUIRED
       rxnorm_code:   string   REQUIRED
@@ -884,7 +879,6 @@ APP accelerando_clinical {
 
   ACTION CreateMedicationOrder {
     DESCRIPTION "Writes medication order to patient chart after safety checks pass"
-    DETERMINISTIC true
     INPUT {
       patient_id:    string   REQUIRED
       encounter_id:  string   REQUIRED
@@ -906,7 +900,6 @@ APP accelerando_clinical {
 
   ACTION EmitPrescriptionPacket {
     DESCRIPTION "Emits PrescriptionPacket to pharmacy channel for e-prescribing"
-    DETERMINISTIC true
     INPUT {
       order_id: string REQUIRED
     }
@@ -917,7 +910,6 @@ APP accelerando_clinical {
 
   ACTION RecordVitals {
     DESCRIPTION "Saves vital signs to the encounter, computes BMI if height and weight provided"
-    DETERMINISTIC true
     INPUT {
       patient_id:         string  REQUIRED
       encounter_id:       string  REQUIRED
@@ -940,7 +932,6 @@ APP accelerando_clinical {
 
   ACTION EvaluateVitalSigns {
     DESCRIPTION "Compares vitals against clinical thresholds and sets VitalsContext flags"
-    DETERMINISTIC true
     INPUT {
       vital_id: string REQUIRED
     }
@@ -951,7 +942,6 @@ APP accelerando_clinical {
 
   ACTION GenerateVitalAlert {
     DESCRIPTION "Creates ClinicalAlert records for out-of-range vitals"
-    DETERMINISTIC true
     INPUT {
       patient_id:   string  REQUIRED
       encounter_id: string  REQUIRED
@@ -964,7 +954,6 @@ APP accelerando_clinical {
 
   ACTION CheckScreeningDue {
     DESCRIPTION "Evaluates USPSTF screening schedules for this patient and generates care reminders"
-    DETERMINISTIC true
     INPUT {
       patient_id: string REQUIRED
       encounter_id: string REQUIRED
@@ -976,7 +965,6 @@ APP accelerando_clinical {
 
   ACTION CheckCareGaps {
     DESCRIPTION "Identifies open care gaps from population health and presents them at encounter open"
-    DETERMINISTIC true
     INPUT {
       patient_id:   string  REQUIRED
       encounter_id: string  REQUIRED
@@ -988,7 +976,6 @@ APP accelerando_clinical {
 
   ACTION LoadActiveAlerts {
     DESCRIPTION "Loads unacknowledged clinical alerts for display at encounter start"
-    DETERMINISTIC true
     INPUT {
       patient_id: string REQUIRED
     }
@@ -999,7 +986,6 @@ APP accelerando_clinical {
 
   ACTION ValidateNoteCompleteness {
     DESCRIPTION "Checks that SOAP sections are populated and vitals recorded before allowing sign"
-    DETERMINISTIC true
     INPUT {
       note_id:      string  REQUIRED
       encounter_id: string  REQUIRED
@@ -1012,7 +998,6 @@ APP accelerando_clinical {
 
   ACTION CheckCosignRequired {
     DESCRIPTION "Determines if note requires co-signature based on provider role and encounter type"
-    DETERMINISTIC true
     INPUT {
       author_id:    string  REQUIRED
       encounter_id: string  REQUIRED
@@ -1025,7 +1010,6 @@ APP accelerando_clinical {
 
   ACTION SignClinicalNote {
     DESCRIPTION "Applies provider signature and timestamp to the note, marks it immutable"
-    DETERMINISTIC true
     INPUT {
       note_id:      string  REQUIRED
       signed_by:    string  REQUIRED
@@ -1038,7 +1022,6 @@ APP accelerando_clinical {
 
   ACTION CloseEncounterRecord {
     DESCRIPTION "Transitions encounter to signed/closed and marks billing as ready"
-    DETERMINISTIC true
     INPUT {
       encounter_id: string  REQUIRED
     }
@@ -1049,7 +1032,6 @@ APP accelerando_clinical {
 
   ACTION EmitEncounterPacket {
     DESCRIPTION "Emits NewEncounterPacket to billing and population health channels"
-    DETERMINISTIC true
     INPUT {
       encounter_id: string  REQUIRED
     }
@@ -1060,7 +1042,6 @@ APP accelerando_clinical {
 
   ACTION AcknowledgeResult {
     DESCRIPTION "Marks result as acknowledged and records the acknowledging provider"
-    DETERMINISTIC true
     INPUT {
       result_id:        string  REQUIRED
       acknowledged_by:  string  REQUIRED
@@ -1072,7 +1053,6 @@ APP accelerando_clinical {
 
   ACTION CheckResultCritical {
     DESCRIPTION "Evaluates result against critical value thresholds and sets critical flag"
-    DETERMINISTIC true
     INPUT {
       result_id: string  REQUIRED
     }
@@ -1083,7 +1063,6 @@ APP accelerando_clinical {
 
   ACTION EmitCriticalResultPacket {
     DESCRIPTION "Emits CriticalResultPacket to critical result channel for immediate provider notification"
-    DETERMINISTIC true
     INPUT {
       result_id: string  REQUIRED
     }
@@ -1094,7 +1073,6 @@ APP accelerando_clinical {
 
   ACTION ReleaseResultToPortal {
     DESCRIPTION "Releases result to patient portal after provider review, blocking critical results from auto-release"
-    DETERMINISTIC true
     INPUT {
       result_id:    string  REQUIRED
       force_hold:   boolean DEFAULT false
@@ -1107,7 +1085,6 @@ APP accelerando_clinical {
 
   ACTION CompileChartData {
     DESCRIPTION "Assembles current problems, medications, allergies, results, and immunizations for CCD generation"
-    DETERMINISTIC true
     INPUT {
       patient_id: string  REQUIRED
     }
@@ -1118,8 +1095,7 @@ APP accelerando_clinical {
 
   ACTION GenerateCCDDocument {
     DESCRIPTION "AI generates a patient-readable CCD summary from structured chart data"
-    DETERMINISTIC false
-    AI_MODEL "claude-sonnet-4-6"
+    MODEL "claude-sonnet-4-6"
     INPUT {
       patient_id:     string  REQUIRED
       chart_snapshot: string  REQUIRED
@@ -1132,7 +1108,6 @@ APP accelerando_clinical {
 
   ACTION EmitCCDPacket {
     DESCRIPTION "Emits CCDPacket to interchange and patient portal channels"
-    DETERMINISTIC true
     INPUT {
       patient_id:   string  REQUIRED
       ccd_document: string  REQUIRED
@@ -1144,8 +1119,7 @@ APP accelerando_clinical {
 
   ACTION GenerateClinicalNote {
     DESCRIPTION "AI drafts a SOAP note from encounter data — provider reviews and edits before signing"
-    DETERMINISTIC false
-    AI_MODEL "claude-sonnet-4-6"
+    MODEL "claude-sonnet-4-6"
     INPUT {
       encounter_id:    string  REQUIRED
       chief_complaint: string  REQUIRED
@@ -1164,8 +1138,7 @@ APP accelerando_clinical {
 
   ACTION SuggestDifferential {
     DESCRIPTION "AI suggests differential diagnoses given chief complaint, vitals, and problem list"
-    DETERMINISTIC false
-    AI_MODEL "claude-sonnet-4-6"
+    MODEL "claude-sonnet-4-6"
     INPUT {
       chief_complaint:  string  REQUIRED
       vitals_summary:   string  REQUIRED
@@ -1180,8 +1153,7 @@ APP accelerando_clinical {
 
   ACTION GenerateReferralLetter {
     DESCRIPTION "AI generates specialist referral letter with clinical summary and reason for referral"
-    DETERMINISTIC false
-    AI_MODEL "claude-sonnet-4-6"
+    MODEL "claude-sonnet-4-6"
     INPUT {
       patient_id:           string  REQUIRED
       receiving_specialty:  string  REQUIRED

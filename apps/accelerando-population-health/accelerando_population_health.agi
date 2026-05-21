@@ -576,7 +576,6 @@ APP accelerando_population_health {
 
   ACTION RunHEDISCareGapLogic {
     DESCRIPTION "Runs HEDIS measure logic against patient records to identify open care gaps; returns gap records for creation"
-    DETERMINISTIC true
     INPUT {
       cohort_id:       string  REQUIRED
       measure_ids:     string  REQUIRED   // JSON array of HEDIS measure IDs to evaluate
@@ -590,7 +589,6 @@ APP accelerando_population_health {
 
   ACTION ScoreCareGapPriority {
     DESCRIPTION "Assigns priority_score (1-10) to each care gap based on clinical urgency, patient risk tier, and measure performance impact"
-    DETERMINISTIC true
     INPUT {
       care_gap_ids:  string  REQUIRED  // JSON array
     }
@@ -601,7 +599,6 @@ APP accelerando_population_health {
 
   ACTION EmitNewCareGaps {
     DESCRIPTION "Emits CareGapOpenedPacket for each newly identified care gap"
-    DETERMINISTIC true
     INPUT {
       care_gap_ids:  string  REQUIRED
     }
@@ -612,7 +609,6 @@ APP accelerando_population_health {
 
   ACTION StratifyRiskPanel {
     DESCRIPTION "Computes RAF, Charlson, ED utilization risk, and avoidable admit risk for a patient panel"
-    DETERMINISTIC true
     INPUT {
       cohort_id:    string  REQUIRED
       as_of_date:   string  REQUIRED
@@ -624,7 +620,6 @@ APP accelerando_population_health {
 
   ACTION AssignRiskTiers {
     DESCRIPTION "Assigns risk tier (low/moderate/high/rising_risk) based on computed scores"
-    DETERMINISTIC true
     INPUT {
       cohort_id: string  REQUIRED
     }
@@ -635,7 +630,6 @@ APP accelerando_population_health {
 
   ACTION EnrollHighRiskPatients {
     DESCRIPTION "Identifies high-risk patients not yet in care management and initiates enrollment workflow"
-    DETERMINISTIC true
     INPUT {
       cohort_id: string  REQUIRED
     }
@@ -646,7 +640,6 @@ APP accelerando_population_health {
 
   ACTION EmitHighRiskAlerts {
     DESCRIPTION "Emits HighRiskPatientPacket for each newly identified high-risk patient"
-    DETERMINISTIC true
     INPUT {
       patient_ids: string  REQUIRED  // JSON array of newly high-risk patients
     }
@@ -657,7 +650,6 @@ APP accelerando_population_health {
 
   ACTION CalculateQualityMeasures {
     DESCRIPTION "Recalculates numerator, denominator, and performance rate for all active quality measures"
-    DETERMINISTIC true
     INPUT {
       reporting_year: number  REQUIRED
       measure_ids:    string  REQUIRED  // JSON array, empty = all
@@ -669,7 +661,6 @@ APP accelerando_population_health {
 
   ACTION IdentifyMeasureGaps {
     DESCRIPTION "From recalculated measures, identifies specific patients who are in denominators but not numerators"
-    DETERMINISTIC true
     INPUT {
       measure_id:      string  REQUIRED
       reporting_year:  number  REQUIRED
@@ -681,7 +672,6 @@ APP accelerando_population_health {
 
   ACTION EmitQualityMeasureReport {
     DESCRIPTION "Emits QualityMeasureReportPacket for governance and leadership dashboards"
-    DETERMINISTIC true
     INPUT {
       measure_ids:    string  REQUIRED
       reporting_year: number  REQUIRED
@@ -693,7 +683,6 @@ APP accelerando_population_health {
 
   ACTION IdentifyOutreachTargets {
     DESCRIPTION "Selects patients from cohort for outreach based on open care gaps, risk tier, and prior outreach response"
-    DETERMINISTIC true
     INPUT {
       campaign_id:    string  REQUIRED
       max_batch:      number  DEFAULT 500
@@ -705,8 +694,7 @@ APP accelerando_population_health {
 
   ACTION GenerateOutreachMessages {
     DESCRIPTION "AI generates personalized outreach messages per patient, care gap, and channel"
-    DETERMINISTIC false
-    AI_MODEL "claude-haiku-4-5-20251001"
+    MODEL "claude-haiku-4-5-20251001"
     INPUT {
       campaign_id:    string  REQUIRED
       patient_id:     string  REQUIRED
@@ -722,7 +710,6 @@ APP accelerando_population_health {
 
   ACTION ExecuteOutreachCampaign {
     DESCRIPTION "Dispatches personalized outreach messages via the configured channels"
-    DETERMINISTIC true
     INPUT {
       campaign_id:    string  REQUIRED
       message_batch:  string  REQUIRED  // JSON: [{patient_id, channel, subject, body}]
@@ -735,7 +722,6 @@ APP accelerando_population_health {
 
   ACTION RecordOutreachActivity {
     DESCRIPTION "Updates care gap outreach_count, last_outreach, and campaign metrics"
-    DETERMINISTIC true
     INPUT {
       campaign_id:      string  REQUIRED
       patient_ids_sent: string  REQUIRED
@@ -748,7 +734,6 @@ APP accelerando_population_health {
 
   ACTION AssessCareManagementEligibility {
     DESCRIPTION "Evaluates patient against care management enrollment criteria: risk tier, complexity, condition count"
-    DETERMINISTIC true
     INPUT {
       patient_id:  string  REQUIRED
     }
@@ -762,7 +747,6 @@ APP accelerando_population_health {
 
   ACTION CreateCareManagementEnrollment {
     DESCRIPTION "Creates CareManagementEnrollment entity and notifies the assigned care manager"
-    DETERMINISTIC true
     INPUT {
       patient_id:        string  REQUIRED
       enrollment_reason: string  REQUIRED
@@ -775,7 +759,6 @@ APP accelerando_population_health {
 
   ACTION AssignCareManager {
     DESCRIPTION "Routes enrollment to the appropriate care manager based on caseload and patient conditions"
-    DETERMINISTIC true
     INPUT {
       enrollment_id: string  REQUIRED
       patient_id:    string  REQUIRED
@@ -788,7 +771,6 @@ APP accelerando_population_health {
 
   ACTION ScheduleFirstContact {
     DESCRIPTION "Schedules initial care management contact within 48 hours of enrollment"
-    DETERMINISTIC true
     INPUT {
       enrollment_id:  string  REQUIRED
       care_manager_id: string REQUIRED
@@ -800,7 +782,6 @@ APP accelerando_population_health {
 
   ACTION IdentifyHCCRecaptureDue {
     DESCRIPTION "Finds HCC codes from prior years that require recapture in the current plan year"
-    DETERMINISTIC true
     INPUT {
       cohort_id:      string  REQUIRED
       plan_year:      number  REQUIRED
@@ -812,7 +793,6 @@ APP accelerando_population_health {
 
   ACTION EmitHCCRecapturePackets {
     DESCRIPTION "Emits HCCRecapturePacket to clinical for provider action at next encounter"
-    DETERMINISTIC true
     INPUT {
       recapture_records: string  REQUIRED
     }
@@ -823,8 +803,7 @@ APP accelerando_population_health {
 
   ACTION GeneratePopulationReport {
     DESCRIPTION "AI generates executive population health report: risk distribution, quality performance, care gap trends, and care management outcomes"
-    DETERMINISTIC false
-    AI_MODEL "claude-sonnet-4-6"
+    MODEL "claude-sonnet-4-6"
     INPUT {
       report_period:       string  REQUIRED
       risk_tier_data:      string  REQUIRED
@@ -841,7 +820,6 @@ APP accelerando_population_health {
 
   ACTION CloseCareGap {
     DESCRIPTION "Records care gap closure with reason and closing encounter"
-    DETERMINISTIC true
     INPUT {
       care_gap_id:         string  REQUIRED
       closed_reason:       string  REQUIRED

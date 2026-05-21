@@ -627,7 +627,6 @@ APP accelerando_pharmacy {
 
   ACTION ValidatePrescription {
     DESCRIPTION "Validates prescription completeness: patient ID, DEA number if controlled, days supply, quantity"
-    DETERMINISTIC true
     INPUT {
       prescription_id: string  REQUIRED
     }
@@ -639,7 +638,6 @@ APP accelerando_pharmacy {
 
   ACTION CheckFormulary {
     DESCRIPTION "Real-time formulary lookup against patient's pharmacy benefit; returns tier, coverage, and PA requirement"
-    DETERMINISTIC true
     INPUT {
       prescription_id: string  REQUIRED
       patient_id:      string  REQUIRED
@@ -659,7 +657,6 @@ APP accelerando_pharmacy {
 
   ACTION CheckPriorAuthRequired {
     DESCRIPTION "Determines if prior auth is needed and whether one is already on file and current"
-    DETERMINISTIC true
     INPUT {
       prescription_id: string  REQUIRED
       patient_id:      string  REQUIRED
@@ -676,7 +673,6 @@ APP accelerando_pharmacy {
 
   ACTION RoutePrescritionToWorkflow {
     DESCRIPTION "Routes prescription to fill queue, PA workflow, or rejected based on formulary and PA checks"
-    DETERMINISTIC true
     INPUT {
       prescription_id:  string  REQUIRED
       pa_required:      boolean REQUIRED
@@ -690,7 +686,6 @@ APP accelerando_pharmacy {
 
   ACTION QueryPDMP {
     DESCRIPTION "Submits real-time PDMP query to state prescription monitoring program via ASAP standard"
-    DETERMINISTIC true
     INPUT {
       patient_id:    string  REQUIRED
       queried_by:    string  REQUIRED
@@ -711,7 +706,6 @@ APP accelerando_pharmacy {
 
   ACTION EvaluatePDMPResponse {
     DESCRIPTION "Parses PDMP response and sets PDMPContext flags for doctor shopping, MME, and benzo combinations"
-    DETERMINISTIC true
     INPUT {
       pdmp_query_id: string  REQUIRED
     }
@@ -725,7 +719,6 @@ APP accelerando_pharmacy {
 
   ACTION EmitPDMPHighRiskAlert {
     DESCRIPTION "Emits PDMPHighRiskPacket to clinical and governance channels when risk is high or critical"
-    DETERMINISTIC true
     INPUT {
       pdmp_query_id:  string  REQUIRED
       prescription_id: string REQUIRED
@@ -737,7 +730,6 @@ APP accelerando_pharmacy {
 
   ACTION CheckAllergyAtDispense {
     DESCRIPTION "Final allergy check at point of dispense against patient allergy list"
-    DETERMINISTIC true
     INPUT {
       patient_id:   string  REQUIRED
       rxnorm_code:  string  REQUIRED
@@ -751,7 +743,6 @@ APP accelerando_pharmacy {
 
   ACTION CheckInteractionsAtDispense {
     DESCRIPTION "Drug interaction check at dispense — catches anything that changed since prescribing"
-    DETERMINISTIC true
     INPUT {
       patient_id:      string  REQUIRED
       new_rxnorm_code: string  REQUIRED
@@ -765,7 +756,6 @@ APP accelerando_pharmacy {
 
   ACTION VerifyPDMPCurrent {
     DESCRIPTION "Confirms a current PDMP query exists for controlled substance prescriptions"
-    DETERMINISTIC true
     INPUT {
       patient_id:    string  REQUIRED
       dea_schedule:  string  REQUIRED
@@ -780,7 +770,6 @@ APP accelerando_pharmacy {
 
   ACTION PharmacistVerification {
     DESCRIPTION "Records pharmacist final verification before dispense — required for all prescriptions"
-    DETERMINISTIC true
     INPUT {
       prescription_id: string  REQUIRED
       pharmacist_id:   string  REQUIRED
@@ -792,7 +781,6 @@ APP accelerando_pharmacy {
 
   ACTION RecordDispense {
     DESCRIPTION "Records dispensed medication with NDC, lot number, and quantity"
-    DETERMINISTIC true
     INPUT {
       prescription_id:   string  REQUIRED
       dispensed_by:      string  REQUIRED
@@ -808,7 +796,6 @@ APP accelerando_pharmacy {
 
   ACTION EmitDispenseConfirmation {
     DESCRIPTION "Emits DispenseConfirmationPacket to clinical and billing channels"
-    DETERMINISTIC true
     INPUT {
       dispensed_id: string REQUIRED
     }
@@ -819,8 +806,7 @@ APP accelerando_pharmacy {
 
   ACTION GeneratePARequest {
     DESCRIPTION "AI generates prior authorization clinical criteria narrative for payer submission"
-    DETERMINISTIC false
-    AI_MODEL "claude-sonnet-4-6"
+    MODEL "claude-sonnet-4-6"
     INPUT {
       prescription_id:   string  REQUIRED
       drug_name:         string  REQUIRED
@@ -836,7 +822,6 @@ APP accelerando_pharmacy {
 
   ACTION SubmitPriorAuth {
     DESCRIPTION "Submits prior auth to payer via NCPDP SCRIPT PA or fax gateway"
-    DETERMINISTIC true
     INPUT {
       prescription_id:    string  REQUIRED
       payer_id:           string  REQUIRED
@@ -851,7 +836,6 @@ APP accelerando_pharmacy {
 
   ACTION NotifyPrescriberOfPA {
     DESCRIPTION "Notifies prescriber that prior auth has been initiated and they may receive PA questions"
-    DETERMINISTIC true
     INPUT {
       prescription_id: string  REQUIRED
       pa_id:           string  REQUIRED
@@ -864,7 +848,6 @@ APP accelerando_pharmacy {
 
   ACTION CheckRefillEligibility {
     DESCRIPTION "Evaluates whether refill is eligible: days remaining, refills remaining, too-soon rule"
-    DETERMINISTIC true
     INPUT {
       prescription_id:  string  REQUIRED
       patient_id:       string  REQUIRED
@@ -879,7 +862,6 @@ APP accelerando_pharmacy {
 
   ACTION CheckPAStillValid {
     DESCRIPTION "Confirms prior authorization has not expired before processing a refill"
-    DETERMINISTIC true
     INPUT {
       prescription_id: string  REQUIRED
     }
@@ -892,7 +874,6 @@ APP accelerando_pharmacy {
 
   ACTION ApproveOrDenyRefill {
     DESCRIPTION "Records refill approval or denial decision and initiates transmission if approved"
-    DETERMINISTIC true
     INPUT {
       refill_request_id: string  REQUIRED
       approved:          boolean REQUIRED
@@ -906,7 +887,6 @@ APP accelerando_pharmacy {
 
   ACTION TransmitPrescription {
     DESCRIPTION "Transmits prescription to pharmacy via NCPDP SCRIPT 10.6 or 2017071"
-    DETERMINISTIC true
     INPUT {
       prescription_id:  string  REQUIRED
       pharmacy_id:      string  REQUIRED
@@ -921,7 +901,6 @@ APP accelerando_pharmacy {
 
   ACTION FindFormularyAlternatives {
     DESCRIPTION "Returns preferred lower-tier alternatives to a non-covered or high-tier drug"
-    DETERMINISTIC true
     INPUT {
       rxnorm_code: string  REQUIRED
       payer_id:    string  REQUIRED

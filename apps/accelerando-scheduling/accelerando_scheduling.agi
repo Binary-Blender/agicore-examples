@@ -537,7 +537,6 @@ APP accelerando_scheduling {
 
   ACTION FindAvailableSlots {
     DESCRIPTION "Returns open slots for a provider on requested dates, honoring template, exceptions, and existing appointments"
-    DETERMINISTIC true
     INPUT {
       provider_id:        string   REQUIRED
       appointment_type_id: string  REQUIRED
@@ -552,7 +551,6 @@ APP accelerando_scheduling {
 
   ACTION ValidateSlot {
     DESCRIPTION "Confirms slot is free — detects double booking before write"
-    DETERMINISTIC true
     INPUT {
       provider_id:     string   REQUIRED
       appointment_date: string  REQUIRED
@@ -567,7 +565,6 @@ APP accelerando_scheduling {
 
   ACTION CheckResourceAvailability {
     DESCRIPTION "Validates room and equipment are not double-booked"
-    DETERMINISTIC true
     INPUT {
       room_id:         string
       equipment_ids:   string
@@ -583,7 +580,6 @@ APP accelerando_scheduling {
 
   ACTION CreateAppointmentRecord {
     DESCRIPTION "Writes the appointment record and updates provider slot utilization"
-    DETERMINISTIC true
     INPUT {
       patient_id:          string   REQUIRED
       provider_id:         string   REQUIRED
@@ -603,7 +599,6 @@ APP accelerando_scheduling {
 
   ACTION ScheduleReminders {
     DESCRIPTION "Queues 24h and 2h appointment reminders via patient preferred channel"
-    DETERMINISTIC true
     INPUT {
       appointment_id: string REQUIRED
       patient_id:     string REQUIRED
@@ -615,7 +610,6 @@ APP accelerando_scheduling {
 
   ACTION EmitConfirmationPacket {
     DESCRIPTION "Emits AppointmentConfirmedPacket to downstream consumers"
-    DETERMINISTIC true
     INPUT {
       appointment_id: string REQUIRED
     }
@@ -626,7 +620,6 @@ APP accelerando_scheduling {
 
   ACTION CancelAppointmentRecord {
     DESCRIPTION "Marks appointment cancelled with reason and cancelling party"
-    DETERMINISTIC true
     INPUT {
       appointment_id:   string REQUIRED
       cancelled_reason: string REQUIRED
@@ -639,7 +632,6 @@ APP accelerando_scheduling {
 
   ACTION EmitCancellationPacket {
     DESCRIPTION "Emits AppointmentCancelledPacket to downstream consumers"
-    DETERMINISTIC true
     INPUT {
       appointment_id: string REQUIRED
     }
@@ -650,7 +642,6 @@ APP accelerando_scheduling {
 
   ACTION NotifyWaitlist {
     DESCRIPTION "Finds waitlist patients whose criteria match the newly cancelled slot and sends offers"
-    DETERMINISTIC true
     INPUT {
       provider_id:         string REQUIRED
       appointment_date:    string REQUIRED
@@ -664,7 +655,6 @@ APP accelerando_scheduling {
 
   ACTION FindWaitlistCandidates {
     DESCRIPTION "Queries waitlist by priority score for a given provider and date range"
-    DETERMINISTIC true
     INPUT {
       provider_id:    string  REQUIRED
       slot_date:      string  REQUIRED
@@ -678,7 +668,6 @@ APP accelerando_scheduling {
 
   ACTION NotifyWaitlistPatients {
     DESCRIPTION "Sends slot-available notifications to waitlist candidates via preferred channel"
-    DETERMINISTIC true
     INPUT {
       candidate_ids:  string  REQUIRED
       slot_date:      string  REQUIRED
@@ -692,7 +681,6 @@ APP accelerando_scheduling {
 
   ACTION HoldSlotForWaitlist {
     DESCRIPTION "Temporarily holds slot while first-responding patient confirms"
-    DETERMINISTIC true
     INPUT {
       provider_id:      string  REQUIRED
       slot_date:        string  REQUIRED
@@ -706,7 +694,6 @@ APP accelerando_scheduling {
 
   ACTION FindOverdueRecalls {
     DESCRIPTION "Returns recall tasks past due_date with fewer than 3 outreach attempts"
-    DETERMINISTIC true
     INPUT {
       department:   string
       days_overdue: number DEFAULT 7
@@ -718,8 +705,7 @@ APP accelerando_scheduling {
 
   ACTION GenerateRecallMessages {
     DESCRIPTION "AI generates personalized recall outreach message per patient and reason"
-    DETERMINISTIC false
-    AI_MODEL "claude-haiku-4-5-20251001"
+    MODEL "claude-haiku-4-5-20251001"
     INPUT {
       recall_task_id: string REQUIRED
       patient_name:   string REQUIRED
@@ -735,7 +721,6 @@ APP accelerando_scheduling {
 
   ACTION SendOutreach {
     DESCRIPTION "Dispatches recall message via sms, email, or portal based on patient preference"
-    DETERMINISTIC true
     INPUT {
       recall_task_id:  string REQUIRED
       patient_id:      string REQUIRED
@@ -750,7 +735,6 @@ APP accelerando_scheduling {
 
   ACTION RecordOutreachAttempt {
     DESCRIPTION "Increments outreach_attempts and records last_outreach_date on recall task"
-    DETERMINISTIC true
     INPUT {
       recall_task_id: string  REQUIRED
       attempt_date:   string  REQUIRED
@@ -763,7 +747,6 @@ APP accelerando_scheduling {
 
   ACTION MarkAppointmentNoShow {
     DESCRIPTION "Sets appointment status to no_show and records timestamp"
-    DETERMINISTIC true
     INPUT {
       appointment_id: string REQUIRED
     }
@@ -774,7 +757,6 @@ APP accelerando_scheduling {
 
   ACTION CreateNoShowRecord {
     DESCRIPTION "Creates NoShowRecord for tracking and analytics"
-    DETERMINISTIC true
     INPUT {
       patient_id:      string  REQUIRED
       appointment_id:  string  REQUIRED
@@ -787,7 +769,6 @@ APP accelerando_scheduling {
 
   ACTION UpdatePatientReliabilityScore {
     DESCRIPTION "Adjusts patient_reliability_score based on cumulative no-show history"
-    DETERMINISTIC true
     INPUT {
       patient_id:       string  REQUIRED
       no_show_count_ytd: number REQUIRED
@@ -800,7 +781,6 @@ APP accelerando_scheduling {
 
   ACTION OfferReschedule {
     DESCRIPTION "Sends patient a reschedule prompt with next available slots"
-    DETERMINISTIC true
     INPUT {
       patient_id:          string REQUIRED
       provider_id:         string REQUIRED
@@ -813,7 +793,6 @@ APP accelerando_scheduling {
 
   ACTION EmitNoShowAlert {
     DESCRIPTION "Emits NoShowAlertPacket to clinical and population health"
-    DETERMINISTIC true
     INPUT {
       appointment_id:    string REQUIRED
       patient_id:        string REQUIRED
@@ -826,8 +805,7 @@ APP accelerando_scheduling {
 
   ACTION OptimizeScheduleTemplate {
     DESCRIPTION "AI analyzes historical utilization and no-show patterns to recommend template adjustments"
-    DETERMINISTIC false
-    AI_MODEL "claude-sonnet-4-6"
+    MODEL "claude-sonnet-4-6"
     INPUT {
       provider_id:         string REQUIRED
       utilization_history: string REQUIRED  // JSON: {date, slots_available, slots_used, no_shows}
@@ -841,7 +819,6 @@ APP accelerando_scheduling {
 
   ACTION AssessScheduleHealth {
     DESCRIPTION "Computes utilization rate, no-show rate, and wait time metrics for a provider or department"
-    DETERMINISTIC true
     INPUT {
       provider_id:  string
       department:   string

@@ -578,7 +578,6 @@ APP accelerando_patient_portal {
 
   ACTION CreatePortalAccount {
     DESCRIPTION "Creates portal account and links to patient record"
-    DETERMINISTIC true
     INPUT {
       patient_id:   string  REQUIRED
       email:        string  REQUIRED
@@ -593,7 +592,6 @@ APP accelerando_patient_portal {
 
   ACTION InitiateIdentityVerification {
     DESCRIPTION "Initiates NIST IAL2 identity proofing workflow via preferred method"
-    DETERMINISTIC true
     INPUT {
       account_id:          string  REQUIRED
       verification_method: string  DEFAULT "knowledge_based"
@@ -606,7 +604,6 @@ APP accelerando_patient_portal {
 
   ACTION SendWelcomeMessage {
     DESCRIPTION "Sends welcome email/SMS with portal setup instructions and identity verification link"
-    DETERMINISTIC true
     INPUT {
       account_id: string  REQUIRED
       patient_id: string  REQUIRED
@@ -618,7 +615,6 @@ APP accelerando_patient_portal {
 
   ACTION RecordPortalConsent {
     DESCRIPTION "Records patient's consent to portal Terms of Service and Privacy Notice"
-    DETERMINISTIC true
     INPUT {
       patient_id:      string  REQUIRED
       account_id:      string  REQUIRED
@@ -632,7 +628,6 @@ APP accelerando_patient_portal {
 
   ACTION ValidatePortalAccountAccess {
     DESCRIPTION "Confirms account is active, not locked, identity verified, and MFA cleared"
-    DETERMINISTIC true
     INPUT {
       account_id: string  REQUIRED
     }
@@ -644,7 +639,6 @@ APP accelerando_patient_portal {
 
   ACTION CreateSecureMessage {
     DESCRIPTION "Creates SecureMessage record and attaches to patient thread"
-    DETERMINISTIC true
     INPUT {
       patient_id:      string  REQUIRED
       from_account_id: string  REQUIRED
@@ -663,7 +657,6 @@ APP accelerando_patient_portal {
 
   ACTION RouteMessageToProvider {
     DESCRIPTION "Routes message to correct inbox based on subject categorization and care team"
-    DETERMINISTIC true
     INPUT {
       message_id:  string  REQUIRED
       patient_id:  string  REQUIRED
@@ -676,7 +669,6 @@ APP accelerando_patient_portal {
 
   ACTION NotifyProviderOfMessage {
     DESCRIPTION "Sends in-app and email notification to provider of new portal message"
-    DETERMINISTIC true
     INPUT {
       message_id:  string  REQUIRED
       provider_id: string  REQUIRED
@@ -688,7 +680,6 @@ APP accelerando_patient_portal {
 
   ACTION CheckResultReleaseEligibility {
     DESCRIPTION "Determines whether a result can be released to the patient portal based on result type, abnormality, and provider review status"
-    DETERMINISTIC true
     INPUT {
       result_id:    string  REQUIRED
       patient_id:   string  REQUIRED
@@ -703,7 +694,6 @@ APP accelerando_patient_portal {
 
   ACTION CreateResultReleaseRecord {
     DESCRIPTION "Creates ResultRelease record and sets the result as available in patient view"
-    DETERMINISTIC true
     INPUT {
       result_id:        string  REQUIRED
       patient_id:       string  REQUIRED
@@ -717,7 +707,6 @@ APP accelerando_patient_portal {
 
   ACTION NotifyPatientOfResult {
     DESCRIPTION "Sends result available notification via patient's preferred channel"
-    DETERMINISTIC true
     INPUT {
       result_release_id: string  REQUIRED
       patient_id:        string  REQUIRED
@@ -729,7 +718,6 @@ APP accelerando_patient_portal {
 
   ACTION ValidateRefillRequest {
     DESCRIPTION "Validates refill request: medication active, not controlled, pharmacy on file"
-    DETERMINISTIC true
     INPUT {
       patient_id:       string  REQUIRED
       medication_id:    string  REQUIRED
@@ -743,7 +731,6 @@ APP accelerando_patient_portal {
 
   ACTION CreatePortalRefillRequest {
     DESCRIPTION "Creates RefillRequest record in pending_review status"
-    DETERMINISTIC true
     INPUT {
       patient_id:      string  REQUIRED
       medication_id:   string  REQUIRED
@@ -758,7 +745,6 @@ APP accelerando_patient_portal {
 
   ACTION EmitRefillRequestPacket {
     DESCRIPTION "Emits RefillRequestPacket to pharmacy and clinical channels"
-    DETERMINISTIC true
     INPUT {
       refill_request_id: string REQUIRED
     }
@@ -769,7 +755,6 @@ APP accelerando_patient_portal {
 
   ACTION ValidateSelfScheduleEligibility {
     DESCRIPTION "Confirms patient is eligible to self-schedule: identity verified, no holds, appointment type allows self-schedule"
-    DETERMINISTIC true
     INPUT {
       patient_id:          string  REQUIRED
       appointment_type_id: string  REQUIRED
@@ -782,7 +767,6 @@ APP accelerando_patient_portal {
 
   ACTION CreateAppointmentRequest {
     DESCRIPTION "Creates AppointmentRequest record for scheduling staff processing"
-    DETERMINISTIC true
     INPUT {
       patient_id:          string  REQUIRED
       appointment_type_id: string  REQUIRED
@@ -799,7 +783,6 @@ APP accelerando_patient_portal {
 
   ACTION EmitAppointmentRequestPacket {
     DESCRIPTION "Emits AppointmentRequestPacket to scheduling channel"
-    DETERMINISTIC true
     INPUT {
       request_id: string REQUIRED
     }
@@ -810,7 +793,6 @@ APP accelerando_patient_portal {
 
   ACTION CompileHealthSummaryData {
     DESCRIPTION "Assembles problems, medications, allergies, immunizations, and recent results for health summary generation"
-    DETERMINISTIC true
     INPUT {
       patient_id:  string  REQUIRED
       include_results_days: number DEFAULT 90
@@ -822,8 +804,7 @@ APP accelerando_patient_portal {
 
   ACTION GeneratePatientHealthSummary {
     DESCRIPTION "AI generates a patient-readable health summary in plain language from structured clinical data"
-    DETERMINISTIC false
-    AI_MODEL "claude-sonnet-4-6"
+    MODEL "claude-sonnet-4-6"
     INPUT {
       patient_id:         string  REQUIRED
       patient_name:       string  REQUIRED
@@ -838,7 +819,6 @@ APP accelerando_patient_portal {
 
   ACTION DeliverHealthSummary {
     DESCRIPTION "Makes health summary available in portal and optionally emails a PDF"
-    DETERMINISTIC true
     INPUT {
       summary_id:  string  REQUIRED
       patient_id:  string  REQUIRED
@@ -850,7 +830,6 @@ APP accelerando_patient_portal {
 
   ACTION ValidateProxyRelationship {
     DESCRIPTION "Confirms proxy relationship is valid, documented, and appropriate under applicable law"
-    DETERMINISTIC true
     INPUT {
       patient_id:           string  REQUIRED
       proxy_patient_id:     string  REQUIRED
@@ -866,7 +845,6 @@ APP accelerando_patient_portal {
 
   ACTION CreateProxyPortalAccount {
     DESCRIPTION "Creates proxy portal account linked to the patient they represent"
-    DETERMINISTIC true
     INPUT {
       patient_id:           string  REQUIRED
       proxy_patient_id:     string  REQUIRED
@@ -882,7 +860,6 @@ APP accelerando_patient_portal {
 
   ACTION RecordProxyConsentGrant {
     DESCRIPTION "Records patient's documented consent granting proxy portal access"
-    DETERMINISTIC true
     INPUT {
       patient_id:       string  REQUIRED
       proxy_account_id: string  REQUIRED
@@ -895,7 +872,6 @@ APP accelerando_patient_portal {
 
   ACTION RevokeProxyAccess {
     DESCRIPTION "Revokes proxy portal access and records the revocation with reason"
-    DETERMINISTIC true
     INPUT {
       proxy_account_id: string  REQUIRED
       revoked_by:       string  REQUIRED

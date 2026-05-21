@@ -646,7 +646,6 @@ APP accelerando_radiology {
 
   ACTION CheckContrastScreening {
     DESCRIPTION "Evaluates contrast allergy history and renal function before IV contrast is administered"
-    DETERMINISTIC true
     INPUT {
       patient_id:        string  REQUIRED
       contrast_required: boolean REQUIRED
@@ -662,8 +661,7 @@ APP accelerando_radiology {
 
   ACTION SelectImagingProtocol {
     DESCRIPTION "AI selects the appropriate imaging protocol given clinical indication and patient characteristics"
-    DETERMINISTIC false
-    AI_MODEL "claude-sonnet-4-6"
+    MODEL "claude-sonnet-4-6"
     INPUT {
       procedure_code:      string  REQUIRED
       clinical_indication: string  REQUIRED
@@ -682,7 +680,6 @@ APP accelerando_radiology {
 
   ACTION AssignModalitySlot {
     DESCRIPTION "Finds and reserves an available time slot on the appropriate modality"
-    DETERMINISTIC true
     INPUT {
       modality:         string  REQUIRED
       order_id:         string  REQUIRED
@@ -699,7 +696,6 @@ APP accelerando_radiology {
 
   ACTION EmitModalityWorklist {
     DESCRIPTION "Sends ModalityWorklistPacket to DICOM gateway for modality pickup"
-    DETERMINISTIC true
     INPUT {
       order_id: string REQUIRED
     }
@@ -710,7 +706,6 @@ APP accelerando_radiology {
 
   ACTION RecordStudyCompletion {
     DESCRIPTION "Records DICOM study metadata after image acquisition is complete"
-    DETERMINISTIC true
     INPUT {
       order_id:              string  REQUIRED
       study_instance_uid:    string  REQUIRED
@@ -725,7 +720,6 @@ APP accelerando_radiology {
 
   ACTION RecordDoseMetrics {
     DESCRIPTION "Records dose metrics from DICOM Radiation Dose Structured Report"
-    DETERMINISTIC true
     INPUT {
       study_id:         string  REQUIRED
       modality:         string  REQUIRED
@@ -742,7 +736,6 @@ APP accelerando_radiology {
 
   ACTION EvaluateDoseAgainstDRL {
     DESCRIPTION "Compares study dose to ACR Diagnostic Reference Levels and emits alert if exceeded"
-    DETERMINISTIC true
     INPUT {
       dose_record_id: string  REQUIRED
     }
@@ -755,7 +748,6 @@ APP accelerando_radiology {
 
   ACTION AssignRadiologist {
     DESCRIPTION "Assigns study to next available radiologist using specialty-based routing and workload balancing"
-    DETERMINISTIC true
     INPUT {
       study_id:  string  REQUIRED
       modality:  string  REQUIRED
@@ -769,7 +761,6 @@ APP accelerando_radiology {
 
   ACTION ValidateReportCompleteness {
     DESCRIPTION "Confirms findings and impression sections are populated before signing"
-    DETERMINISTIC true
     INPUT {
       report_id: string REQUIRED
     }
@@ -781,8 +772,7 @@ APP accelerando_radiology {
 
   ACTION IdentifyCriticalFindings {
     DESCRIPTION "AI scans report text for critical findings requiring immediate communication per ACR guidelines"
-    DETERMINISTIC false
-    AI_MODEL "claude-sonnet-4-6"
+    MODEL "claude-sonnet-4-6"
     INPUT {
       report_id:   string  REQUIRED
       findings:    string  REQUIRED
@@ -799,7 +789,6 @@ APP accelerando_radiology {
 
   ACTION SignRadiologyReport {
     DESCRIPTION "Applies radiologist signature, timestamps the report, and marks it final"
-    DETERMINISTIC true
     INPUT {
       report_id:      string  REQUIRED
       radiologist_id: string  REQUIRED
@@ -813,7 +802,6 @@ APP accelerando_radiology {
 
   ACTION CreateCriticalFindingRecord {
     DESCRIPTION "Creates CriticalFinding entity and sets the 60-minute communication deadline"
-    DETERMINISTIC true
     INPUT {
       report_id:           string  REQUIRED
       study_id:            string  REQUIRED
@@ -830,7 +818,6 @@ APP accelerando_radiology {
 
   ACTION EmitCriticalFindingAlert {
     DESCRIPTION "Emits CriticalFindingAlertPacket to clinical and patient portal channels"
-    DETERMINISTIC true
     INPUT {
       critical_finding_id: string REQUIRED
     }
@@ -841,7 +828,6 @@ APP accelerando_radiology {
 
   ACTION MonitorCriticalFindingAcknowledgement {
     DESCRIPTION "Checks whether ordering provider has acknowledged the critical finding within 60 minutes"
-    DETERMINISTIC true
     INPUT {
       critical_finding_id: string REQUIRED
     }
@@ -854,7 +840,6 @@ APP accelerando_radiology {
 
   ACTION CommunicateCriticalFinding {
     DESCRIPTION "Records the communication event for an acknowledged critical finding"
-    DETERMINISTIC true
     INPUT {
       critical_finding_id:  string  REQUIRED
       communicated_to:      string  REQUIRED
@@ -868,7 +853,6 @@ APP accelerando_radiology {
 
   ACTION EmitFinalReportPacket {
     DESCRIPTION "Emits FinalReportPacket to clinical and patient portal channels"
-    DETERMINISTIC true
     INPUT {
       report_id: string REQUIRED
     }
@@ -879,7 +863,6 @@ APP accelerando_radiology {
 
   ACTION SelectStudiesForPeerReview {
     DESCRIPTION "Randomly selects 5% of signed studies per radiologist for peer review, per ACR RADPEER"
-    DETERMINISTIC true
     INPUT {
       radiologist_id:     string  REQUIRED
       review_period_days: number  DEFAULT 30
@@ -891,7 +874,6 @@ APP accelerando_radiology {
 
   ACTION AssignPeerReviewers {
     DESCRIPTION "Assigns peer reviewers to selected studies, enforcing independence"
-    DETERMINISTIC true
     INPUT {
       study_ids:              string  REQUIRED  // JSON array
       original_radiologist_id: string REQUIRED
@@ -903,8 +885,7 @@ APP accelerando_radiology {
 
   ACTION GenerateRadiologyReport {
     DESCRIPTION "AI drafts structured radiology report from study metadata and prior reports — radiologist reviews before signing"
-    DETERMINISTIC false
-    AI_MODEL "claude-sonnet-4-6"
+    MODEL "claude-sonnet-4-6"
     INPUT {
       study_id:            string  REQUIRED
       modality:            string  REQUIRED
@@ -922,8 +903,7 @@ APP accelerando_radiology {
 
   ACTION GeneratePeerReviewReport {
     DESCRIPTION "AI generates structured peer review summary from reviewer score and discrepancy notes"
-    DETERMINISTIC false
-    AI_MODEL "claude-haiku-4-5-20251001"
+    MODEL "claude-haiku-4-5-20251001"
     INPUT {
       peer_review_id:      string  REQUIRED
       score:               number  REQUIRED
