@@ -1,0 +1,854 @@
+APP accelerando_lms {
+  TITLE "Accelerando Compliance Training"
+  DB    accelerando_lms
+  PORT  3005
+}
+
+TARGET web { RUNTIME axum  FRONTEND react  DEPLOY docker }
+AUTH   { STRATEGY jwt  EXPIRY "8h"  REFRESH true }
+TENANT { MODEL row_level  ISOLATE strict }
+
+// Annual compliance training is not just ineffective. In high-stakes domains,
+// it is actively dangerous.
+//
+// The problem: humans forget 70% of content within a week (Ebbinghaus, 1885).
+// Annual training proves attendance. It does not prove retention.
+// A healthcare worker who passed HIPAA training 11 months ago and has forgotten
+// the PHI de-identification rules is not compliant. They are a liability.
+//
+// The solution: daily micro-assessment + spaced repetition + adaptive refreshers.
+// Three questions. Sixty seconds. Every day.
+// Fail a question → five-minute refresher appears, targeted to that subtopic.
+// Score drops below threshold → manager notified, access flags updated.
+// Score updates in real time. Compliance is not a date. It is a current state.
+//
+// Gamification is not decoration. It is the mechanism that makes people
+// actually do the 60-second daily check-in. Streaks, points, leaderboards,
+// badges — the same psychology that makes Duolingo work, applied to OSHA.
+// If the daily habit is enjoyable, people form the habit. If compliance training
+// is a 3-hour annual slog, people check the box and forget it immediately.
+//
+// Compliance is not a training event. It is a knowledge state.
+// This system measures the state. Daily.
+
+// ─────────────────────────────────────────────────────────────────────────────
+// ENTITIES
+// ─────────────────────────────────────────────────────────────────────────────
+
+ENTITY ComplianceDomain {
+  tenant_id:              string  REQUIRED
+  domain_code:            string  REQUIRED   // HIPAA_PRIVACY, OSHA, CYBERSECURITY, etc.
+  domain_name:            string  REQUIRED
+  description:            string
+  regulatory_basis:       string             // the law, regulation, or policy
+  passing_score:          number  = 75       // minimum score to be considered compliant
+  critical_score:         number  = 60       // below this → manager notification
+  question_count:         number  = 0        // total questions in bank
+  refresher_module_id:    string             // default refresher when score drops
+  active:                 bool    = true
+  applies_to_all:         bool    = true     // or role-specific
+  applies_to_roles:       string             // JSON: ["nurse", "admin"] if not all
+  TIMESTAMPS
+  CRUD create, read, list, edit
+}
+
+ENTITY TrainingModule {
+  tenant_id:              string  REQUIRED
+  domain_id:              string  REQUIRED
+  module_name:            string  REQUIRED
+  module_type:            string  = "refresher"   // onboarding, refresher, deep_dive
+  content_type:           string  = "text"        // text, video, scenario, quiz_only
+  content_url:            string
+  content_text:           string
+  estimated_minutes:      number  = 5
+  version:                string  = "1.0"
+  status:                 string  = "draft"
+  subtopic:               string             // which subtopic within domain this covers
+  TIMESTAMPS
+  CRUD create, read, list, edit
+}
+
+ENTITY Question {
+  tenant_id:              string  REQUIRED
+  domain_id:              string  REQUIRED
+  subtopic:               string  REQUIRED   // granular topic within domain
+  difficulty:             string  = "medium" // easy, medium, hard
+  question_text:          string  REQUIRED
+  answer_a:               string  REQUIRED
+  answer_b:               string  REQUIRED
+  answer_c:               string  REQUIRED
+  answer_d:               string  REQUIRED
+  correct_answer:         string  REQUIRED   // "a", "b", "c", or "d"
+  explanation:            string  REQUIRED   // shown after answering — the teaching moment
+  times_served:           number  = 0
+  times_correct:          number  = 0
+  active:                 bool    = true
+  ai_generated:           bool    = false
+  TIMESTAMPS
+  CRUD create, read, list, edit
+}
+
+ENTITY LearnerProfile {
+  tenant_id:              string  REQUIRED
+  employee_id:            string  REQUIRED
+  name:                   string  REQUIRED
+  email:                  string  REQUIRED
+  department:             string  REQUIRED
+  role:                   string  REQUIRED
+  hire_date:              date    REQUIRED
+  manager_id:             string
+  current_streak_days:    number  = 0
+  longest_streak_days:    number  = 0
+  total_points:           number  = 0
+  assessments_completed:  number  = 0
+  overall_compliance:     float   = 0.0      // average across all applicable domains
+  active:                 bool    = true
+  TIMESTAMPS
+  CRUD create, read, list, edit
+}
+
+ENTITY ComplianceScore {
+  tenant_id:              string  REQUIRED
+  learner_id:             string  REQUIRED
+  domain_id:              string  REQUIRED
+  current_score:          float   = 100.0    // knowledge retention score, 0–100
+  questions_answered:     number  = 0
+  questions_correct:      number  = 0
+  consecutive_correct:    number  = 0        // per domain — used for difficulty escalation
+  weak_subtopic:          string             // last failed subtopic — drives next question
+  last_assessed_at:       datetime
+  last_correct_at:        datetime
+  status:                 string  = "current"  // current, at_risk, non_compliant, critical
+  refresher_assigned:     bool    = false
+  refresher_completed_at: datetime
+  TIMESTAMPS
+  CRUD create, read, list, edit
+}
+
+ENTITY DailyAssessment {
+  tenant_id:              string  REQUIRED
+  learner_id:             string  REQUIRED
+  assessment_date:        date    REQUIRED
+  status:                 string  = "pending"   // pending, in_progress, completed, expired
+  questions_served:       number  = 0
+  questions_correct:      number  = 0
+  points_earned:          number  = 0
+  streak_day:             number  = 0
+  domains_covered:        string                // JSON: domain_ids covered today
+  started_at:             datetime
+  completed_at:           datetime
+  TIMESTAMPS
+  CRUD create, read, list
+}
+
+ENTITY AssessmentResponse {
+  tenant_id:              string  REQUIRED
+  assessment_id:          string  REQUIRED
+  learner_id:             string  REQUIRED
+  question_id:            string  REQUIRED
+  domain_id:              string  REQUIRED
+  answer_given:           string  REQUIRED   // "a", "b", "c", or "d"
+  is_correct:             bool    REQUIRED
+  response_time_seconds:  number  = 0
+  points_awarded:         number  = 0
+  explanation_viewed:     bool    = false
+  TIMESTAMPS
+  CRUD create, read, list
+}
+
+ENTITY RefresherAssignment {
+  tenant_id:              string  REQUIRED
+  learner_id:             string  REQUIRED
+  domain_id:              string  REQUIRED
+  module_id:              string  REQUIRED
+  assigned_at:            datetime REQUIRED
+  due_date:               date    REQUIRED
+  status:                 string  = "assigned"  // assigned, in_progress, completed, overdue
+  trigger_score:          float               // score that triggered this assignment
+  trigger_subtopic:       string              // specific subtopic that failed
+  started_at:             datetime
+  completed_at:           datetime
+  TIMESTAMPS
+  CRUD create, read, list, edit
+}
+
+ENTITY ComplianceBadge {
+  tenant_id:              string  REQUIRED
+  learner_id:             string  REQUIRED
+  badge_type:             string  REQUIRED   // streak_7, streak_30, streak_90, streak_365, points_500, domain_expert, perfect_week, comeback
+  badge_name:             string  REQUIRED
+  description:            string  REQUIRED
+  earned_at:              datetime REQUIRED
+  TIMESTAMPS
+  CRUD create, read, list
+}
+
+ENTITY DepartmentCompliance {
+  tenant_id:              string  REQUIRED
+  department:             string  REQUIRED
+  domain_id:              string  REQUIRED
+  employee_count:         number  = 0
+  compliant_count:        number  = 0
+  at_risk_count:          number  = 0
+  non_compliant_count:    number  = 0
+  avg_score:              float   = 0.0
+  compliance_rate:        float   = 0.0
+  last_calculated_at:     datetime
+  TIMESTAMPS
+  CRUD read, list
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// STAGES
+// ─────────────────────────────────────────────────────────────────────────────
+
+STAGES DailyAssessment.status {
+  pending -> in_progress -> completed / expired
+}
+
+STAGES RefresherAssignment.status {
+  assigned -> in_progress -> completed / overdue
+}
+
+STAGES TrainingModule.status {
+  draft -> published -> archived
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// MODULES
+// ─────────────────────────────────────────────────────────────────────────────
+
+MODULE AdaptiveAssessmentEngine {
+
+  FACT AssessmentContext {
+    learner_id:                    string
+    today_assessment_pending:      bool   = false  // daily assessment not yet completed
+    today_assessment_expired:      bool   = false  // window closed without completion
+    questions_remaining:           number = 0
+    current_question_domain:       string = ""
+    weak_domain_id:                string = ""     // domain with lowest score today
+    streak_at_risk:                bool   = false  // assessment window closing in 2h
+    PERSISTENT
+  }
+
+  RULE daily_assessment_reminder {
+    WHEN AssessmentContext.today_assessment_pending == true
+    AND  AssessmentContext.streak_at_risk == true
+    THEN FLAG "daily_assessment_window_closing_soon"
+    SEVERITY warning
+    PRIORITY 80
+  }
+
+  RULE assessment_expired_streak_broken {
+    WHEN AssessmentContext.today_assessment_expired == true
+    THEN FLAG "streak_broken_assessment_not_completed"
+    SEVERITY warning
+    PRIORITY 75
+  }
+
+  STATE AssessmentFlow {
+    INITIAL idle
+
+    idle {
+      ON_ENTER   LogTrainingEvent
+      TRANSITION WHEN AssessmentContext.today_assessment_pending == true -> serving
+    }
+
+    serving {
+      ON_ENTER   SelectDailyQuestions
+      TRANSITION WHEN AssessmentContext.questions_remaining == 0 -> scoring
+    }
+
+    scoring {
+      ON_ENTER   ScoreAssessment
+      TRANSITION WHEN AssessmentContext.today_assessment_pending == false -> idle
+    }
+  }
+}
+
+MODULE ComplianceTracker {
+
+  FACT ComplianceContext {
+    org_employee_count:            number = 0
+    employees_non_compliant:       number = 0
+    employees_critical:            number = 0
+    critical_domain_failures_today: bool  = false  // any employee failed critical domain today
+    departments_at_risk:           number = 0
+    org_compliance_rate:           float  = 0.0
+    regulatory_deadline_days:      number = 999
+    regulatory_deadline_near:      bool   = false
+    PERSISTENT
+  }
+
+  SCORE org_compliance {
+    INITIAL  100
+    MIN        0
+    MAX      100
+    DECAY      0 PER day
+    THRESHOLD at_risk  AT 85 THEN FLAG "org_compliance_below_85pct_alert"
+    THRESHOLD critical AT 70 THEN FLAG "org_compliance_critical_leadership_notify"
+  }
+
+  RULE critical_domain_failure_today {
+    WHEN ComplianceContext.critical_domain_failures_today == true
+    THEN FLAG "critical_compliance_failure_notify_cco"
+    SEVERITY critical
+    PRIORITY 100
+  }
+
+  RULE regulatory_deadline_approaching {
+    WHEN ComplianceContext.regulatory_deadline_near == true
+    THEN FLAG "regulatory_deadline_compliance_gap_detected"
+    SEVERITY critical
+    PRIORITY 95
+  }
+
+  RULE departments_below_threshold {
+    WHEN ComplianceContext.departments_at_risk > 0
+    THEN FLAG "departments_below_compliance_threshold"
+    SEVERITY warning
+    PRIORITY 80
+  }
+}
+
+MODULE GamificationEngine {
+
+  FACT GamificationContext {
+    streak_milestone_reached:      bool   = false  // 7, 30, 90, 365 day threshold hit
+    points_milestone_reached:      bool   = false  // 500, 2000, 5000 point threshold hit
+    perfect_week_achieved:         bool   = false  // 7 days, all questions correct
+    comeback_eligible:             bool   = false  // completed after broken streak
+    leaderboard_position:          number = 0
+    PERSISTENT
+  }
+
+  SCORE learner_points {
+    INITIAL      0
+    MIN          0
+    MAX     999999
+    DECAY        0 PER day
+    THRESHOLD contributor  AT   500 THEN FLAG "badge_points_contributor"
+    THRESHOLD achiever     AT  2000 THEN FLAG "badge_points_achiever"
+    THRESHOLD expert       AT  5000 THEN FLAG "badge_points_expert"
+    THRESHOLD master       AT 10000 THEN FLAG "badge_points_master"
+  }
+
+  RULE award_streak_milestone {
+    WHEN GamificationContext.streak_milestone_reached == true
+    THEN AwardBadge
+    SEVERITY info
+    PRIORITY 60
+  }
+
+  RULE award_points_milestone {
+    WHEN GamificationContext.points_milestone_reached == true
+    THEN AwardBadge
+    SEVERITY info
+    PRIORITY 60
+  }
+
+  RULE award_perfect_week {
+    WHEN GamificationContext.perfect_week_achieved == true
+    THEN AwardBadge
+    SEVERITY info
+    PRIORITY 60
+  }
+
+  RULE award_comeback {
+    WHEN GamificationContext.comeback_eligible == true
+    THEN AwardBadge
+    SEVERITY info
+    PRIORITY 60
+  }
+}
+
+MODULE RefresherEngine {
+
+  FACT RefresherContext {
+    learner_has_score_below_threshold: bool   = false  // any domain score < passing_score
+    learner_has_critical_score:        bool   = false  // any domain score < critical_score
+    refresher_overdue:                 bool   = false  // assigned refresher past due_date
+    manager_notified:                  bool   = false
+    PERSISTENT
+  }
+
+  RULE assign_refresher_on_low_score {
+    WHEN RefresherContext.learner_has_score_below_threshold == true
+    THEN AssignRefresher
+    SEVERITY warning
+    PRIORITY 85
+  }
+
+  RULE notify_manager_on_critical_score {
+    WHEN RefresherContext.learner_has_critical_score == true
+    AND  RefresherContext.manager_notified == false
+    THEN NotifyManager
+    SEVERITY critical
+    PRIORITY 95
+  }
+
+  RULE escalate_overdue_refresher {
+    WHEN RefresherContext.refresher_overdue == true
+    THEN FLAG "refresher_overdue_escalate_to_manager"
+    SEVERITY critical
+    PRIORITY 90
+  }
+
+  STATE RefresherFlow {
+    INITIAL monitoring
+
+    monitoring {
+      ON_ENTER   LogTrainingEvent
+      TRANSITION WHEN RefresherContext.learner_has_score_below_threshold == true -> triggered
+    }
+
+    triggered {
+      ON_ENTER   AssignRefresher
+      TRANSITION WHEN RefresherContext.learner_has_score_below_threshold == false -> monitoring
+    }
+  }
+}
+
+MODULE CurriculumEngine {
+
+  FACT CurriculumContext {
+    question_bank_needs_refresh:   bool   = false  // question bank < minimum per domain
+    stale_content_detected:        bool   = false  // module version unchanged > 12 months
+    new_regulation_detected:       bool   = false  // regulatory basis updated
+    PERSISTENT
+  }
+
+  RULE question_bank_below_minimum {
+    WHEN CurriculumContext.question_bank_needs_refresh == true
+    THEN FLAG "question_bank_refresh_required_run_generate_questions"
+    SEVERITY warning
+    PRIORITY 70
+  }
+
+  RULE content_stale_refresh_needed {
+    WHEN CurriculumContext.stale_content_detected == true
+    THEN FLAG "training_content_stale_review_required"
+    SEVERITY warning
+    PRIORITY 65
+  }
+
+  RULE regulation_changed_update_curriculum {
+    WHEN CurriculumContext.new_regulation_detected == true
+    THEN FLAG "regulatory_change_curriculum_update_required"
+    SEVERITY critical
+    PRIORITY 90
+  }
+}
+
+MODULE ReportingEngine {
+
+  FACT ReportContext {
+    audit_export_requested:        bool   = false
+    regulatory_report_due:         bool   = false
+    weekly_summary_due:            bool   = false
+    PERSISTENT
+  }
+
+  RULE generate_audit_export {
+    WHEN ReportContext.audit_export_requested == true
+    THEN ExportComplianceAuditRecord
+    SEVERITY info
+    PRIORITY 70
+  }
+
+  RULE regulatory_report_due {
+    WHEN ReportContext.regulatory_report_due == true
+    THEN GenerateRegulatoryComplianceReport
+    SEVERITY warning
+    PRIORITY 85
+  }
+
+  RULE weekly_summary {
+    WHEN ReportContext.weekly_summary_due == true
+    THEN GenerateWeeklySummary
+    SEVERITY info
+    PRIORITY 60
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// REASONER — Compliance Intelligence
+// ─────────────────────────────────────────────────────────────────────────────
+
+REASONER compliance_intelligence_reasoner {
+  SCHEDULE "weekly"
+  INPUT    DepartmentCompliance, ComplianceScore, RefresherAssignment
+  PROMPT   "Review compliance training data for the past 7 days across all departments and domains. Identify: (1) which departments or roles show systemic knowledge gaps — not individual failures but patterns that suggest the training content or delivery is the problem, (2) which domains have declining scores organization-wide (content may be stale or unclear), (3) which refresher assignments are being completed vs. ignored — completion patterns reveal whether the refresher content is effective, (4) whether any combination of domain failures suggests a systemic compliance risk (e.g., HIPAA Privacy AND HIPAA Security both declining in the same department). Tone: factual, actionable. Output: a ranked list of interventions, most urgent first, with the data rationale for each."
+  OUTPUT   DepartmentCompliance
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// ACTIONS
+// ─────────────────────────────────────────────────────────────────────────────
+
+// Build-time AI: reads training content, regulatory requirements → generates
+// question bank for the domain. Run when onboarding a new domain or when
+// regulatory requirements change. Output is Question records, not runtime AI.
+ACTION GenerateQuestions {
+  INPUT  domain_id: string, content_source: string, question_count: number
+  OUTPUT questions_created: number
+  AI     "Generate [question_count] multiple-choice compliance training questions for the specified domain. For each question: (1) write a clear, scenario-based question that tests applied knowledge, not just recall, (2) provide four plausible answer choices (a/b/c/d) where the distractors represent common misconceptions, (3) identify the correct answer, (4) write a 2-3 sentence explanation that teaches the concept when the learner sees it after answering — the explanation is the most important part, it is the actual learning moment. Tag each question with its subtopic within the domain and difficulty (easy/medium/hard). Output structured JSON matching the Question schema."
+}
+
+// Build-time AI: reads regulatory requirements, job roles, and org structure
+// → generates training module content. Content is deterministic after generation.
+ACTION GenerateTrainingModule {
+  INPUT  domain_id: string, module_type: string, subtopic: string, target_minutes: number
+  OUTPUT module_id: string
+  AI     "Generate a [target_minutes]-minute compliance training module for the specified domain and subtopic. Module type is [module_type] (onboarding = foundational first-time content, refresher = targeted re-teaching of a specific concept, deep_dive = comprehensive expert-level treatment). Write content that: (1) opens with a real-world scenario that creates stakes — why this matters, what goes wrong when people get it wrong, (2) explains the core rule or requirement in plain language, (3) gives 2-3 concrete examples, including one example of a common mistake and why it's wrong, (4) closes with a one-sentence summary and the key thing to remember. Tone: direct, human, never condescending. Output as structured markdown."
+}
+
+// Spaced repetition core. Runs daily for each learner.
+// Selects today's N questions weighted toward:
+// (1) domains where score is lowest
+// (2) subtopics marked as weak_subtopic on ComplianceScore
+// (3) questions previously answered incorrectly
+// (4) questions not recently served
+ACTION SelectDailyQuestions {
+  INPUT  learner_id: string, question_count: number
+  OUTPUT question_ids: string
+  IMPL {
+    // 1. Load ComplianceScore records for learner, sorted by current_score ASC
+    // 2. Select top 2 weakest domains (or all applicable domains if < 2)
+    // 3. For each selected domain:
+    //    a. Check ComplianceScore.weak_subtopic — prefer questions in that subtopic
+    //    b. Filter Question WHERE domain_id = domain AND active = true
+    //    c. Exclude questions answered correctly in last 3 days
+    //    d. Sort by (times_served - times_correct) DESC — most missed questions first
+    //    e. Weight toward difficulty matching learner level:
+    //       consecutive_correct < 3 → prefer easy
+    //       consecutive_correct 3-7 → prefer medium
+    //       consecutive_correct > 7 → prefer hard
+    // 4. Return question_count question IDs
+    // 5. Update AssessmentContext.questions_remaining
+    // 6. Increment Question.times_served for selected questions
+  }
+}
+
+ACTION ScoreAssessment {
+  INPUT  assessment_id: string
+  OUTPUT score: float, points_earned: number
+  IMPL {
+    // 1. Load all AssessmentResponse records for assessment_id
+    // 2. Calculate score: (correct / total) * 100
+    // 3. Calculate points:
+    //    base: 10 per correct answer
+    //    streak_bonus: current_streak_days * 2 (up to 50 bonus points)
+    //    perfect_bonus: +50 if all questions correct
+    //    speed_bonus: +5 if avg response_time < 15 seconds (they know it cold)
+    // 4. Update DailyAssessment: status = "completed", points_earned, questions_correct
+    // 5. Increment LearnerProfile.total_points, assessments_completed
+    // 6. Call UpdateKnowledgeProfile for each domain covered today
+    // 7. Check gamification milestones → update GamificationContext flags
+    // 8. Increment or reset streak based on completion
+  }
+}
+
+ACTION UpdateKnowledgeProfile {
+  INPUT  learner_id: string, domain_id: string, correct: bool, subtopic: string
+  OUTPUT new_score: float
+  IMPL {
+    // Load ComplianceScore for learner + domain
+    // Update rolling score using exponential moving average:
+    //   new_score = (current_score * 0.85) + (result * 100 * 0.15)
+    //   result = 1.0 if correct, 0.0 if incorrect
+    // This means a wrong answer doesn't crater the score immediately —
+    // it takes consistent failure to drive the score below threshold.
+    // But consistent failure reliably drives it below threshold.
+    // Update consecutive_correct: +1 if correct, reset to 0 if incorrect
+    // Update weak_subtopic = subtopic if incorrect
+    // Update status based on new score:
+    //   >= passing_score → "current"
+    //   >= critical_score → "at_risk"
+    //   < critical_score → "critical"
+    // Set RefresherContext.learner_has_score_below_threshold if score < passing_score
+    // Set RefresherContext.learner_has_critical_score if score < critical_score
+    // Set ComplianceContext.critical_domain_failures_today if critical score in critical domain
+    // Recalculate LearnerProfile.overall_compliance as avg of all domain scores
+  }
+}
+
+ACTION AssignRefresher {
+  INPUT  learner_id: string, domain_id: string, subtopic: string
+  OUTPUT assignment_id: string
+  IMPL {
+    // Check if refresher already assigned and not completed for this domain — skip if so
+    // Find TrainingModule WHERE domain_id = domain AND subtopic matches weak_subtopic
+    //   fallback: find any refresher module for the domain
+    // Create RefresherAssignment:
+    //   due_date = today + refresher_completion_deadline_days preference
+    //   trigger_score = current ComplianceScore.current_score
+    //   trigger_subtopic = subtopic
+    // Set ComplianceScore.refresher_assigned = true
+    // Surface in learner's dashboard as next action
+  }
+}
+
+ACTION NotifyManager {
+  INPUT  learner_id: string, domain_id: string, score: float
+  OUTPUT notified: bool
+  IMPL {
+    // Load LearnerProfile.manager_id
+    // Load ComplianceDomain.domain_name and regulatory_basis
+    // Send notification to manager:
+    //   "[Employee] has a compliance score of [score] in [domain_name],
+    //    below the critical threshold of [critical_score].
+    //    A refresher has been automatically assigned.
+    //    If not completed within [deadline] days, further escalation is required."
+    // Set RefresherContext.manager_notified = true
+    // Log notification in audit trail
+  }
+}
+
+ACTION AwardBadge {
+  INPUT  learner_id: string, badge_type: string
+  OUTPUT badge_id: string
+  IMPL {
+    // Check if badge already awarded — do not duplicate
+    // Create ComplianceBadge record
+    // Map badge_type to badge_name and description (see badge catalog)
+    // Add badge notification to learner's feed
+    // Update leaderboard display
+  }
+}
+
+ACTION UpdateStreak {
+  INPUT  learner_id: string, completed_today: bool
+  OUTPUT new_streak: number
+  IMPL {
+    // If completed_today:
+    //   current_streak_days += 1
+    //   if current_streak_days > longest_streak_days: update longest_streak_days
+    //   Check streak milestones: 7, 30, 90, 365 → set GamificationContext.streak_milestone_reached
+    //   Check perfect_week: 7 days, all questions correct → flag badge
+    // If NOT completed_today:
+    //   Check if learner has streak_freeze_credit available
+    //   If yes: consume credit, streak unchanged
+    //   If no: current_streak_days = 0
+    //          Set comeback_eligible = true (awards badge on next completion)
+    // Update AssessmentContext.today_assessment_pending = false
+  }
+}
+
+ACTION CalculateDepartmentCompliance {
+  INPUT  tenant_id: string
+  OUTPUT departments_updated: number
+  IMPL {
+    // For each department × domain combination:
+    //   Count employees where ComplianceScore.status = "current" → compliant_count
+    //   Count employees where status = "at_risk" → at_risk_count
+    //   Count employees where status IN ["critical", "non_compliant"] → non_compliant_count
+    //   Calculate avg_score and compliance_rate
+    //   Upsert DepartmentCompliance record
+    //   Update ComplianceContext.departments_at_risk count
+    //   Update ComplianceContext.org_compliance_rate (weighted average)
+  }
+}
+
+ACTION ExportComplianceAuditRecord {
+  INPUT  tenant_id: string, domain_id: string, as_of_date: date
+  OUTPUT export_url: string
+  IMPL {
+    // Generate point-in-time compliance snapshot:
+    //   Per employee: score per domain, status, last assessed, refresher history
+    //   Per department: compliance rate per domain
+    //   Org-wide: overall compliance rate
+    // Include assessment response log for the period
+    // Include all manager notifications sent
+    // Format: CSV + PDF summary (machine-readable + human-readable)
+    // Chain of custody: timestamp, generated_by, audit_hash
+    // This is what you hand to the regulator. It proves knowledge, not attendance.
+  }
+}
+
+ACTION SendDailyAssessmentReminder {
+  INPUT  learner_id: string, streak_days: number
+  OUTPUT sent: bool
+  IMPL {
+    // Calculate streak message:
+    //   streak_days == 0: "Start your streak today"
+    //   streak_days < 7: "[N]-day streak! Keep it going"
+    //   streak_days >= 7: "[N]-day streak! You're on fire"
+    // Send notification (email / in-app / push based on preference)
+    // Include estimated time: "3 questions · ~60 seconds"
+    // Deep link directly to today's assessment — minimize friction
+  }
+}
+
+ACTION GenerateWeeklySummary {
+  INPUT  tenant_id: string
+  OUTPUT report_id: string
+  AI     "Generate a weekly compliance training summary for leadership. Include: (1) org-wide compliance rate vs last week (trending direction matters more than absolute number), (2) top 3 departments by compliance rate and bottom 3 — call out dramatic changes in either direction, (3) domains where org-wide scores dropped this week — if multiple people failed the same topic, the topic may need better content, not just more reminders, (4) streak leaders — the social proof that the habit is spreading, (5) refreshers assigned vs completed this week — completion rate is the health metric for the refresher system itself. Tone: brief, data-forward, one page maximum. This goes to the Chief Compliance Officer on Monday morning."
+}
+
+ACTION GenerateRegulatoryComplianceReport {
+  INPUT  tenant_id: string, regulatory_framework: string, period_start: date, period_end: date
+  OUTPUT report_id: string
+  AI     "Generate a regulatory compliance training report for [regulatory_framework] for the period [period_start] to [period_end]. Structure: (1) Executive Summary — one paragraph, overall compliance posture, (2) Methodology — explain that this system uses daily micro-assessment and continuous knowledge scoring rather than annual completion records, and why this provides stronger evidence of actual compliance, (3) Domain Coverage — which domains map to which regulatory requirements, (4) Compliance Statistics — employee count, compliant/at-risk/non-compliant counts per domain, average knowledge scores, (5) Remediation Actions — refreshers assigned and completed, manager notifications issued, (6) Audit Trail Statement — all records available for regulatory inspection with timestamps and hash verification. Format for regulatory submission."
+}
+
+ACTION LogTrainingEvent {
+  INPUT  event_type: string, learner_id: string, detail: string
+  OUTPUT logged: bool
+  IMPL {
+    // Append-only training event log
+    // Records: assessment completions, refresher assignments, badge awards,
+    //   manager notifications, score threshold crossings, streak events
+    // Immutable: this is the audit trail
+    // Each entry: timestamp, learner_id, event_type, detail, hash of prior entry
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// WORKFLOWS
+// ─────────────────────────────────────────────────────────────────────────────
+
+WORKFLOW daily_assessment_cycle {
+  IDEMPOTENT true
+  STEP select_questions    { ACTION SelectDailyQuestions            ON_FAIL abort }
+  STEP serve_questions     { ACTION LogTrainingEvent                ON_FAIL skip  }
+  STEP score               { ACTION ScoreAssessment                 ON_FAIL abort }
+  STEP update_knowledge    { ACTION UpdateKnowledgeProfile          ON_FAIL abort }
+  STEP update_streak       { ACTION UpdateStreak                    ON_FAIL skip  }
+  STEP check_refresher     { ACTION AssignRefresher                 ON_FAIL skip  }
+  STEP gamification        { ACTION AwardBadge                      ON_FAIL skip  }
+  STEP log                 { ACTION LogTrainingEvent                ON_FAIL skip  }
+}
+
+WORKFLOW onboard_new_employee {
+  IDEMPOTENT false
+  STEP create_profile      { ACTION LogTrainingEvent                ON_FAIL abort }
+  STEP assign_domains      { ACTION LogTrainingEvent                ON_FAIL abort }
+  STEP initial_assessment  { ACTION SelectDailyQuestions            ON_FAIL skip  }
+  STEP notify_employee     { ACTION SendDailyAssessmentReminder     ON_FAIL skip  }
+  STEP log                 { ACTION LogTrainingEvent                ON_FAIL skip  }
+}
+
+WORKFLOW refresher_completion {
+  IDEMPOTENT false
+  STEP mark_complete       { ACTION LogTrainingEvent                ON_FAIL abort }
+  STEP update_knowledge    { ACTION UpdateKnowledgeProfile          ON_FAIL abort }
+  STEP recalculate_dept    { ACTION CalculateDepartmentCompliance   ON_FAIL skip  }
+  STEP log                 { ACTION LogTrainingEvent                ON_FAIL skip  }
+}
+
+WORKFLOW daily_reminders {
+  IDEMPOTENT true
+  STEP identify_pending    { ACTION LogTrainingEvent                ON_FAIL skip  }
+  STEP send_reminders      { ACTION SendDailyAssessmentReminder     ON_FAIL skip  }
+  STEP mark_expired        { ACTION LogTrainingEvent                ON_FAIL skip  }
+  STEP update_streaks      { ACTION UpdateStreak                    ON_FAIL skip  }
+}
+
+WORKFLOW weekly_compliance_rollup {
+  IDEMPOTENT true
+  STEP calculate_dept      { ACTION CalculateDepartmentCompliance   ON_FAIL abort }
+  STEP check_refreshers    { ACTION LogTrainingEvent                ON_FAIL skip  }
+  STEP generate_summary    { ACTION GenerateWeeklySummary           ON_FAIL skip  }
+  STEP ai_intelligence     { ACTION LogTrainingEvent                ON_FAIL skip  }
+  STEP log                 { ACTION LogTrainingEvent                ON_FAIL skip  }
+}
+
+WORKFLOW generate_curriculum {
+  IDEMPOTENT false
+  STEP generate_questions  { ACTION GenerateQuestions               ON_FAIL abort }
+  STEP generate_modules    { ACTION GenerateTrainingModule          ON_FAIL skip  }
+  STEP validate_bank       { ACTION LogTrainingEvent                ON_FAIL skip  }
+  STEP publish             { ACTION LogTrainingEvent                ON_FAIL skip  }
+}
+
+WORKFLOW export_for_audit {
+  IDEMPOTENT true
+  STEP export_records      { ACTION ExportComplianceAuditRecord     ON_FAIL abort }
+  STEP generate_report     { ACTION GenerateRegulatoryComplianceReport ON_FAIL skip }
+  STEP log                 { ACTION LogTrainingEvent                ON_FAIL skip  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// VIEWS
+// ─────────────────────────────────────────────────────────────────────────────
+
+VIEW ComplianceDashboard {
+  ENTITY   DepartmentCompliance
+  LAYOUT   table
+  ACTIONS  read
+}
+
+VIEW LearnerView {
+  ENTITY   LearnerProfile
+  LAYOUT   form
+  ACTIONS  read, edit
+}
+
+VIEW DailyAssessmentView {
+  ENTITY   DailyAssessment
+  LAYOUT   form
+  ACTIONS  create, read
+}
+
+VIEW ComplianceScoreView {
+  ENTITY   ComplianceScore
+  LAYOUT   table
+  ACTIONS  read
+}
+
+VIEW RefresherQueue {
+  ENTITY   RefresherAssignment
+  LAYOUT   table
+  ACTIONS  read, edit
+}
+
+VIEW QuestionBank {
+  ENTITY   Question
+  LAYOUT   table
+  ACTIONS  create, read, edit
+}
+
+VIEW BadgeGallery {
+  ENTITY   ComplianceBadge
+  LAYOUT   table
+  ACTIONS  read
+}
+
+VIEW DomainManagement {
+  ENTITY   ComplianceDomain
+  LAYOUT   table
+  ACTIONS  create, read, edit
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// PREFERENCES
+// ─────────────────────────────────────────────────────────────────────────────
+
+PREFERENCE daily_questions_per_learner          { DEFAULT 3    TYPE number }
+PREFERENCE domain_passing_score                 { DEFAULT 75   TYPE number }
+PREFERENCE domain_critical_score               { DEFAULT 60   TYPE number }
+PREFERENCE refresher_deadline_days             { DEFAULT 7    TYPE number }
+PREFERENCE streak_freeze_credits_max           { DEFAULT 2    TYPE number }
+PREFERENCE assessment_window_start_hour        { DEFAULT 8    TYPE number }
+PREFERENCE assessment_window_end_hour          { DEFAULT 18   TYPE number }
+PREFERENCE reminder_advance_hours              { DEFAULT 2    TYPE number }
+PREFERENCE knowledge_decay_alpha               { DEFAULT 0.15 TYPE number }
+PREFERENCE min_questions_per_domain            { DEFAULT 30   TYPE number }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// SEED DATA — Compliance Domains
+// ─────────────────────────────────────────────────────────────────────────────
+
+SEED ComplianceDomain [
+  { domain_code: "HIPAA_PRIVACY",    domain_name: "HIPAA Privacy Rule",           regulatory_basis: "45 CFR Part 164 Subpart E",  passing_score: 80, critical_score: 65 },
+  { domain_code: "HIPAA_SECURITY",   domain_name: "HIPAA Security Rule",          regulatory_basis: "45 CFR Part 164 Subpart C",  passing_score: 80, critical_score: 65 },
+  { domain_code: "OSHA_GENERAL",     domain_name: "OSHA General Industry Safety", regulatory_basis: "29 CFR Part 1910",           passing_score: 75, critical_score: 60 },
+  { domain_code: "HARASSMENT",       domain_name: "Sexual Harassment Prevention", regulatory_basis: "Title VII / state law",      passing_score: 80, critical_score: 65 },
+  { domain_code: "CYBERSECURITY",    domain_name: "Cybersecurity Awareness",      regulatory_basis: "NIST SP 800-50",             passing_score: 75, critical_score: 60 },
+  { domain_code: "DATA_PRIVACY",     domain_name: "Data Privacy (GDPR / CCPA)",   regulatory_basis: "GDPR Art 5 / CCPA 1798.100", passing_score: 75, critical_score: 60 },
+  { domain_code: "ANTI_BRIBERY",     domain_name: "Anti-Bribery and FCPA",        regulatory_basis: "15 U.S.C. § 78dd",          passing_score: 80, critical_score: 65 },
+  { domain_code: "SOX_BASICS",       domain_name: "SOX Financial Controls",       regulatory_basis: "Sarbanes-Oxley Act §302/404", passing_score: 75, critical_score: 60, applies_to_all: false, applies_to_roles: "[\"finance\",\"executive\",\"accounting\"]" },
+  { domain_code: "INSIDER_TRADING",  domain_name: "Insider Trading Prevention",   regulatory_basis: "SEC Rule 10b-5",             passing_score: 85, critical_score: 70, applies_to_all: false, applies_to_roles: "[\"executive\",\"finance\",\"legal\"]" },
+  { domain_code: "CODE_OF_CONDUCT",  domain_name: "Code of Business Conduct",     regulatory_basis: "Internal policy",           passing_score: 75, critical_score: 60 }
+]

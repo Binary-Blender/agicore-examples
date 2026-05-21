@@ -1,0 +1,1184 @@
+APP accelerando_legal {
+  TITLE "Accelerando Legal"
+  DB    accelerando_legal
+  PORT  3004
+}
+
+TARGET web { RUNTIME axum  FRONTEND react  DEPLOY docker }
+AUTH   { STRATEGY jwt  EXPIRY "8h"  REFRESH true }
+TENANT { MODEL row_level  ISOLATE strict }
+
+// Legal services — two distinct problems:
+//
+// 1. REACTIVE: eDiscovery. When litigation happens, manage holds, collection,
+//    privilege review, and production across every data source the organization has.
+//    Every other Accelerando module produces discoverable data. This module governs it.
+//
+// 2. PROACTIVE: Legal Hygiene. Stop creating the documents that lose cases.
+//    AI runs once at build time to generate PATTERN declarations from your industry's
+//    liability landscape. At runtime, deterministic pattern matching flags communications
+//    before they proliferate. Two rules capture 80% of preventable litigation loss:
+//
+//    "Stop putting this stuff in email."
+//    "Stop documenting non-compliance."
+//
+//    These are not opinions. They are Plaintiff's Exhibit 1, over and over, forever,
+//    in every industry, until someone encodes the pattern as a RULE.
+//
+// The legal advisor doesn't practice law. It reads patterns. The patterns are deterministic.
+
+// ─────────────────────────────────────────────────────────────────────────────
+// ENTITIES
+// ─────────────────────────────────────────────────────────────────────────────
+
+ENTITY LegalMatter {
+  tenant_id:            string   REQUIRED
+  matter_number:        string   REQUIRED
+  matter_name:          string   REQUIRED
+  matter_type:          string   REQUIRED  // litigation, regulatory, investigation, contract, employment, ip
+  opposing_counsel:     string
+  court_or_agency:      string
+  case_number:          string
+  status:               string   = "intake"
+  date_opened:          date     REQUIRED
+  date_closed:          date
+  litigation_hold:      bool     = false
+  hold_triggered_at:    datetime
+  lead_counsel:         string
+  business_unit:        string
+  risk_level:           string   = "medium"   // low, medium, high, critical
+  notes:                string
+  TIMESTAMPS
+  CRUD create, read, list, edit
+}
+
+ENTITY LegalHold {
+  tenant_id:            string   REQUIRED
+  matter_id:            string   REQUIRED
+  hold_name:            string   REQUIRED
+  status:               string   = "active"   // active, released
+  issued_at:            datetime REQUIRED
+  released_at:          datetime
+  issued_by:            string   REQUIRED
+  scope_description:    string   REQUIRED
+  data_sources:         string   REQUIRED     // JSON: list of connector types in scope
+  custodian_count:      number   = 0
+  notifications_sent:   number   = 0
+  notifications_acked:  number   = 0
+  TIMESTAMPS
+  CRUD create, read, list, edit
+}
+
+ENTITY HoldCustodian {
+  tenant_id:            string   REQUIRED
+  hold_id:              string   REQUIRED
+  matter_id:            string   REQUIRED
+  name:                 string   REQUIRED
+  email:                string   REQUIRED
+  department:           string
+  notification_sent_at: datetime
+  acknowledged_at:      datetime
+  acknowledged:         bool     = false
+  data_preserved:       bool     = false
+  connector_types:      string   = "exchange"  // JSON: which connectors to collect from
+  TIMESTAMPS
+  CRUD create, read, list, edit
+}
+
+ENTITY ExternalConnector {
+  tenant_id:            string   REQUIRED
+  connector_type:       string   REQUIRED   // exchange, gmail, slack, onedrive, gdrive, erp
+  display_name:         string   REQUIRED
+  connection_config:    string   REQUIRED   // JSON: encrypted auth details
+  status:               string   = "disconnected"  // connected, disconnected, error
+  last_sync_at:         datetime
+  sync_interval_hours:  number   = 24
+  custodian_id:         string               // if scoped to a custodian
+  active:               bool     = true
+  error_message:        string
+  TIMESTAMPS
+  CRUD create, read, list, edit
+}
+
+ENTITY DocumentCollection {
+  tenant_id:            string   REQUIRED
+  matter_id:            string   REQUIRED
+  hold_id:              string
+  custodian_id:         string
+  connector_type:       string   REQUIRED
+  status:               string   = "pending"  // pending, running, complete, error
+  date_range_start:     date
+  date_range_end:       date
+  search_terms:         string
+  documents_found:      number   = 0
+  documents_processed:  number   = 0
+  deduped_count:        number   = 0
+  started_at:           datetime
+  completed_at:         datetime
+  TIMESTAMPS
+  CRUD create, read, list, edit
+}
+
+ENTITY ReviewDocument {
+  tenant_id:            string   REQUIRED
+  matter_id:            string   REQUIRED
+  collection_id:        string   REQUIRED
+  bates_number:         string
+  source_connector:     string   REQUIRED
+  source_id:            string   REQUIRED   // original message/file ID
+  custodian_id:         string   REQUIRED
+  document_type:        string   = "email"  // email, attachment, chat, file, erp_record
+  subject_or_title:     string
+  sender:               string
+  recipients:           string
+  document_date:        datetime
+  status:               string   = "collected"
+  responsiveness:       string   = "uncoded"  // responsive, non_responsive, uncoded
+  privilege:            string   = "uncoded"  // privileged, non_privileged, work_product, uncoded
+  privilege_basis:      string
+  redacted:             bool     = false
+  reviewer_id:          string
+  reviewed_at:          datetime
+  produced:             bool     = false
+  produced_set_id:      string
+  hygiene_flagged:      bool     = false
+  hygiene_flag_type:    string
+  TIMESTAMPS
+  CRUD create, read, list, edit
+}
+
+ENTITY PrivilegeLogEntry {
+  tenant_id:            string   REQUIRED
+  matter_id:            string   REQUIRED
+  production_set_id:    string   REQUIRED
+  document_id:          string   REQUIRED
+  bates_number:         string   REQUIRED
+  document_date:        date     REQUIRED
+  author:               string   REQUIRED
+  recipients:           string   REQUIRED
+  privilege_basis:      string   REQUIRED   // attorney_client, work_product, both
+  description:          string   REQUIRED
+  attorney_involved:    string
+  TIMESTAMPS
+  CRUD create, read, list
+}
+
+ENTITY ProductionSet {
+  tenant_id:            string   REQUIRED
+  matter_id:            string   REQUIRED
+  set_name:             string   REQUIRED
+  status:               string   = "building"
+  bates_prefix:         string   REQUIRED
+  bates_start:          number   = 1
+  bates_end:            number   = 0
+  document_count:       number   = 0
+  produced_at:          datetime
+  produced_to:          string
+  production_format:    string   = "pdf_native"  // pdf_native, tiff, native
+  privilege_log_complete: bool   = false
+  TIMESTAMPS
+  CRUD create, read, list, edit
+}
+
+ENTITY LegalHygieneFlag {
+  tenant_id:            string   REQUIRED
+  matter_id:            string
+  source_connector:     string   REQUIRED
+  source_id:            string   REQUIRED
+  document_id:          string
+  flag_type:            string   REQUIRED   // noncompliance, litigation_anticipation, cover_up, privilege_waiver, hr_liability, warranty_contradiction
+  severity:             string   = "high"   // high, critical
+  detected_at:          datetime REQUIRED
+  detected_pattern:     string   REQUIRED   // which PATTERN matched
+  excerpt:              string              // sanitized excerpt for review
+  status:               string   = "open"  // open, reviewed, escalated, dismissed
+  reviewed_by:          string
+  reviewed_at:          datetime
+  ai_analysis:          string
+  TIMESTAMPS
+  CRUD create, read, list, edit
+}
+
+ENTITY RetentionPolicy {
+  tenant_id:            string   REQUIRED
+  policy_name:          string   REQUIRED
+  document_category:    string   REQUIRED   // email, contracts, financial, hr, compliance, general
+  retention_years:      number   REQUIRED
+  legal_basis:          string              // SOX, HIPAA, EEOC, state_statute, internal
+  deletion_method:      string   = "secure_delete"
+  hold_suspends:        bool     = true     // whether legal hold suspends this policy
+  active:               bool     = true
+  TIMESTAMPS
+  CRUD create, read, list, edit
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// STAGES
+// ─────────────────────────────────────────────────────────────────────────────
+
+STAGES LegalMatter.status {
+  intake -> active -> hold_triggered -> in_review -> production -> closed
+}
+
+STAGES ReviewDocument.status {
+  collected -> processed -> assigned -> reviewed / privileged -> produced
+}
+
+STAGES ProductionSet.status {
+  building -> bates_applied -> privilege_logged -> produced -> confirmed
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// PACKETS — typed schemas for connector data ingestion
+// ─────────────────────────────────────────────────────────────────────────────
+
+PACKET ExchangeMailPacket {
+  message_id:   string   REQUIRED
+  sender:       string   REQUIRED
+  recipients:   string   REQUIRED
+  subject:      string   REQUIRED
+  body:         string   REQUIRED
+  sent_at:      datetime REQUIRED
+  attachments:  string
+  thread_id:    string
+  folder:       string
+  custodian_id: string   REQUIRED
+  SIGNATURES required
+  TTL 2555d
+}
+
+PACKET GmailPacket {
+  message_id:   string   REQUIRED
+  sender:       string   REQUIRED
+  recipients:   string   REQUIRED
+  subject:      string   REQUIRED
+  body:         string   REQUIRED
+  sent_at:      datetime REQUIRED
+  attachments:  string
+  thread_id:    string
+  labels:       string
+  custodian_id: string   REQUIRED
+  SIGNATURES required
+  TTL 2555d
+}
+
+PACKET SlackMessagePacket {
+  message_id:   string   REQUIRED
+  channel_id:   string   REQUIRED
+  channel_name: string   REQUIRED
+  sender_id:    string   REQUIRED
+  sender_name:  string   REQUIRED
+  text:         string   REQUIRED
+  sent_at:      datetime REQUIRED
+  thread_ts:    string
+  reactions:    string
+  custodian_id: string   REQUIRED
+  SIGNATURES required
+  TTL 2555d
+}
+
+PACKET CloudFilePacket {
+  file_id:      string   REQUIRED
+  file_name:    string   REQUIRED
+  file_type:    string   REQUIRED
+  owner:        string   REQUIRED
+  modified_at:  datetime REQUIRED
+  content_text: string
+  folder_path:  string
+  shared_with:  string
+  custodian_id: string   REQUIRED
+  SIGNATURES required
+  TTL 2555d
+}
+
+PACKET LegalHoldNoticePacket {
+  hold_id:      string   REQUIRED
+  matter_id:    string   REQUIRED
+  custodian_id: string   REQUIRED
+  custodian_email: string REQUIRED
+  issued_at:    datetime REQUIRED
+  scope:        string   REQUIRED
+  instructions: string   REQUIRED
+  SIGNATURES required
+  TTL 365d
+}
+
+PACKET HygieneAlertPacket {
+  flag_id:      string   REQUIRED
+  flag_type:    string   REQUIRED
+  severity:     string   REQUIRED
+  source:       string   REQUIRED
+  detected_at:  datetime REQUIRED
+  excerpt:      string   REQUIRED
+  SIGNATURES required
+  ADMISSIBILITY legal_only
+  TTL 2555d
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// CHANNELS
+// ─────────────────────────────────────────────────────────────────────────────
+
+CHANNEL exchange_inbound {
+  SOURCE      "microsoft_exchange"
+  DEST        "document_review_queue"
+  TYPE        ExchangeMailPacket
+  CAPACITY    50000
+  PERSISTENT
+}
+
+CHANNEL gmail_inbound {
+  SOURCE      "google_workspace"
+  DEST        "document_review_queue"
+  TYPE        GmailPacket
+  CAPACITY    50000
+  PERSISTENT
+}
+
+CHANNEL slack_inbound {
+  SOURCE      "slack_api"
+  DEST        "document_review_queue"
+  TYPE        SlackMessagePacket
+  CAPACITY    100000
+  PERSISTENT
+}
+
+CHANNEL onedrive_inbound {
+  SOURCE      "microsoft_onedrive"
+  DEST        "document_review_queue"
+  TYPE        CloudFilePacket
+  CAPACITY    10000
+  PERSISTENT
+}
+
+CHANNEL gdrive_inbound {
+  SOURCE      "google_drive"
+  DEST        "document_review_queue"
+  TYPE        CloudFilePacket
+  CAPACITY    10000
+  PERSISTENT
+}
+
+CHANNEL erp_inbound {
+  SOURCE      "accelerando_erp"
+  DEST        "document_review_queue"
+  TYPE        CloudFilePacket
+  CAPACITY    100000
+  PERSISTENT
+}
+
+CHANNEL hold_notice_outbound {
+  SOURCE      "accelerando_legal"
+  DEST        "custodian_email"
+  TYPE        LegalHoldNoticePacket
+  CAPACITY    1000
+  PERSISTENT
+}
+
+CHANNEL hygiene_alert_outbound {
+  SOURCE      "accelerando_legal"
+  DEST        "legal_team"
+  TYPE        HygieneAlertPacket
+  CAPACITY    5000
+  PERSISTENT
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// MODULES
+// ─────────────────────────────────────────────────────────────────────────────
+
+MODULE LegalHoldEngine {
+
+  FACT LegalHoldContext {
+    active_hold_count:                number = 0
+    matter_type_requires_hold:        bool   = false   // litigation or regulatory
+    custodian_notifications_pending:  bool   = false   // notifications issued but not acked
+    deletion_attempt_during_hold:     bool   = false   // pre-computed: deletion of in-scope data
+    hold_acknowledgment_overdue:      bool   = false   // custodian > 48h without ack
+    hold_release_overdue:             bool   = false   // matter closed, hold not released
+    preservation_failed:              bool   = false   // connector failed during preservation
+    PERSISTENT
+  }
+
+  RULE auto_trigger_hold_on_litigation {
+    WHEN LegalHoldContext.matter_type_requires_hold == true
+    AND  LegalHoldContext.active_hold_count == 0
+    THEN TriggerLegalHold
+    SEVERITY critical
+    PRIORITY 95
+  }
+
+  RULE require_custodian_notification {
+    WHEN LegalHoldContext.custodian_notifications_pending == true
+    THEN NotifyCustodians
+    SEVERITY critical
+    PRIORITY 100
+  }
+
+  RULE block_deletion_during_hold {
+    WHEN LegalHoldContext.deletion_attempt_during_hold == true
+    THEN FLAG "deletion_blocked_active_legal_hold"
+    SEVERITY critical
+    PRIORITY 100
+  }
+
+  RULE acknowledge_overdue {
+    WHEN LegalHoldContext.hold_acknowledgment_overdue == true
+    THEN FLAG "custodian_acknowledgment_overdue_escalate"
+    SEVERITY warning
+    PRIORITY 80
+  }
+
+  RULE preservation_failure {
+    WHEN LegalHoldContext.preservation_failed == true
+    THEN FLAG "preservation_failure_manual_intervention_required"
+    SEVERITY critical
+    PRIORITY 100
+  }
+
+  RULE release_overdue_hold {
+    WHEN LegalHoldContext.hold_release_overdue == true
+    THEN FLAG "legal_hold_release_overdue"
+    SEVERITY warning
+    PRIORITY 70
+  }
+
+  STATE LegalHoldFlow {
+    INITIAL idle
+
+    idle {
+      ON_ENTER   LogLegalEvent
+      TRANSITION WHEN LegalHoldContext.matter_type_requires_hold == true -> active
+    }
+
+    active {
+      ON_ENTER   TriggerLegalHold
+      TRANSITION WHEN LegalHoldContext.active_hold_count == 0 -> idle
+    }
+  }
+}
+
+MODULE LegalHygieneAdvisor {
+
+  FACT HygieneContext {
+    documents_known_noncompliance:   bool   = false   // "despite our policy / we are aware that"
+    litigation_anticipation_in_email: bool  = false   // "if this goes to court / legal exposure"
+    cover_up_language_detected:      bool   = false   // "don't put this in writing / delete this"
+    privilege_waiver_risk:           bool   = false   // attorney-client forwarded to non-privilege
+    hr_liability_language_detected:  bool   = false   // "between us / don't tell HR"
+    sales_warranty_contradiction:    bool   = false   // sales promises contradicting contract terms
+    flags_pending_ai_review:         bool   = false
+    scan_complete:                   bool   = false
+    PERSISTENT
+  }
+
+  SCORE legal_risk_score {
+    INITIAL  100
+    MIN        0
+    MAX      100
+    DECAY      0 PER day
+    THRESHOLD elevated AT 75 THEN FLAG "legal_risk_elevated"
+    THRESHOLD high     AT 50 THEN FLAG "legal_risk_high_notify_counsel"
+    THRESHOLD critical AT 25 THEN FLAG "legal_risk_critical_immediate_action"
+  }
+
+  // ── PET PEEVE #1: Stop documenting non-compliance ────────────────────────
+  // "We are aware that..." / "Despite our policy..." / "We have known since..."
+  // These phrases become Plaintiff's Exhibit 1. Every. Single. Time.
+
+  PATTERN known_noncompliance_language {
+    MATCH    "we are aware that|despite our policy|we have known since|although not standard practice|not in compliance with our own|we acknowledged the|we knew about|known deficiency|known gap|we have been aware|contrary to our policy|in violation of our own"
+    RESPOND  "LEGAL HYGIENE ALERT: This communication contains language documenting known non-compliance. Before this document is forwarded or filed, legal review is required. Phrase flagged: documented awareness of policy deviation."
+    SCORE    legal_risk_score -= 20
+    ASSERT   HygieneContext.documents_known_noncompliance = true
+  }
+
+  // ── PET PEEVE #2: Stop putting this stuff in email ────────────────────────
+  // When people anticipate litigation in unprotected channels, they hand the
+  // opposing counsel a roadmap. Attorney-client privilege requires an attorney.
+  // A Slack message to your VP of Ops doesn't have one.
+
+  PATTERN litigation_anticipation_language {
+    MATCH    "if this goes to court|when we get sued|legal exposure|litigation risk|our lawyers will|potential liability|plaintiff will|discovery will show|this will look bad|if deposed|settlement exposure|bet this ends up in court|lawsuit risk|claims against us"
+    RESPOND  "LEGAL HYGIENE ALERT: Litigation anticipation language detected in an unprotected channel. If litigation is reasonably anticipated, attorney-client privilege protections should be invoked. This communication may not be protected."
+    SCORE    legal_risk_score -= 15
+    ASSERT   HygieneContext.litigation_anticipation_in_email = true
+  }
+
+  // ── Cover-up language ────────────────────────────────────────────────────
+  // Attempting to suppress evidence is worse than the underlying issue.
+  // Courts take a very dim view. So does the jury.
+
+  PATTERN cover_up_language {
+    MATCH    "don't put this in writing|don't document this|off the record|delete this email|destroy these|do not save|don't save this|this conversation never happened|speak only|call me don't email|let's talk in person about this|no paper trail|keep this between us"
+    RESPOND  "LEGAL HYGIENE ALERT: Language suggesting suppression of documentation detected. This communication itself is now potentially discoverable evidence. Immediate legal counsel notification recommended."
+    SCORE    legal_risk_score -= 25
+    ASSERT   HygieneContext.cover_up_language_detected = true
+  }
+
+  // ── Privilege waiver risk ────────────────────────────────────────────────
+  // Forwarding legal advice to non-privileged parties waives privilege.
+  // The moment it leaves the attorney-client channel, it's discoverable.
+
+  PATTERN privilege_waiver_language {
+    MATCH    "forwarding from our attorney|our lawyer said|legal told us to|per our counsel|attorney advised|our legal team says|passing along from legal|sharing legal's view|fyi from our lawyer"
+    RESPOND  "LEGAL HYGIENE ALERT: Attorney-client communication may be forwarded to non-privileged parties. Forwarding legal advice outside the privilege relationship waives privilege on that communication."
+    SCORE    legal_risk_score -= 20
+    ASSERT   HygieneContext.privilege_waiver_risk = true
+  }
+
+  // ── HR liability language ────────────────────────────────────────────────
+  // Informal channels discussing personnel matters outside HR process
+  // create exactly the paper trail employment plaintiffs need.
+
+  PATTERN hr_liability_language {
+    MATCH    "just between us|between you and me|don't tell HR|HR doesn't need to know|off the books|informally|keep this informal|manager to manager|not officially|don't put in their file|not in the system"
+    RESPOND  "LEGAL HYGIENE ALERT: Personnel matter discussed outside formal HR channels. Employment litigation discovery routinely surfaces informal communications. Formal HR documentation is the protected channel."
+    SCORE    legal_risk_score -= 15
+    ASSERT   HygieneContext.hr_liability_language_detected = true
+  }
+
+  // ── Sales warranty contradiction ─────────────────────────────────────────
+  // Sales teams promising things the contract explicitly disclaims.
+  // This is how breach of warranty cases are born.
+
+  PATTERN sales_warranty_contradiction {
+    MATCH    "I told the client we would|I promised them|we committed to|I gave them my word|I said we'd guarantee|verbally agreed|I assured them|told the customer we'd make it right|committed outside the contract"
+    RESPOND  "LEGAL HYGIENE ALERT: Sales communication may document commitments outside contract terms. Verbal commitments documented in email can create warranty obligations that contradict your standard contract. Legal review recommended."
+    SCORE    legal_risk_score -= 10
+    ASSERT   HygieneContext.sales_warranty_contradiction = true
+  }
+
+  // ── Rules acting on FACT flags ───────────────────────────────────────────
+
+  RULE self_incrimination_critical {
+    WHEN HygieneContext.documents_known_noncompliance == true
+    THEN FLAG "documented_noncompliance_legal_review_required"
+    SEVERITY critical
+    PRIORITY 100
+  }
+
+  RULE cover_up_immediate_escalation {
+    WHEN HygieneContext.cover_up_language_detected == true
+    THEN FLAG "evidence_suppression_language_escalate_to_counsel"
+    SEVERITY critical
+    PRIORITY 100
+  }
+
+  RULE privilege_waiver_alert {
+    WHEN HygieneContext.privilege_waiver_risk == true
+    THEN FLAG "privilege_waiver_risk_legal_review"
+    SEVERITY critical
+    PRIORITY 100
+  }
+
+  RULE litigation_in_unprotected_channel {
+    WHEN HygieneContext.litigation_anticipation_in_email == true
+    THEN FLAG "litigation_discussion_unprotected_channel"
+    SEVERITY critical
+    PRIORITY 95
+  }
+
+  RULE analyze_accumulated_flags {
+    WHEN HygieneContext.flags_pending_ai_review == true
+    THEN AnalyzeCommunicationRisk
+    SEVERITY warning
+    PRIORITY 85
+  }
+}
+
+MODULE DocumentReviewEngine {
+
+  FACT ReviewContext {
+    documents_awaiting_review:      number = 0
+    responsive_uncoded_count:       number = 0
+    privileged_documents_count:     number = 0
+    production_deadline_days:       number = 999
+    production_deadline_approaching: bool  = false   // < 14 days
+    production_deadline_critical:   bool  = false    // < 5 days
+    review_complete:                bool  = false
+    privilege_log_required:         bool  = false
+    PERSISTENT
+  }
+
+  RULE production_deadline_warning {
+    WHEN ReviewContext.production_deadline_approaching == true
+    AND  ReviewContext.review_complete == false
+    THEN FLAG "production_deadline_approaching_review_incomplete"
+    SEVERITY warning
+    PRIORITY 85
+  }
+
+  RULE production_deadline_critical {
+    WHEN ReviewContext.production_deadline_critical == true
+    AND  ReviewContext.review_complete == false
+    THEN FLAG "production_deadline_critical_all_hands"
+    SEVERITY critical
+    PRIORITY 100
+  }
+
+  RULE privilege_log_required {
+    WHEN ReviewContext.privilege_log_required == true
+    AND  ReviewContext.privileged_documents_count > 0
+    THEN GeneratePrivilegeLog
+    SEVERITY warning
+    PRIORITY 80
+  }
+
+  SCORE review_velocity {
+    INITIAL 100
+    MIN       0
+    MAX     100
+    DECAY     2 PER day
+    THRESHOLD slow      AT 60 THEN FLAG "review_velocity_slow_add_reviewers"
+    THRESHOLD stalled   AT 30 THEN FLAG "review_velocity_stalled_escalate"
+  }
+}
+
+MODULE ProductionEngine {
+
+  FACT ProductionContext {
+    bates_prefix_set:       bool = false
+    production_set_ready:   bool = false
+    privilege_log_complete: bool = false
+    production_format_set:  bool = false
+    PERSISTENT
+  }
+
+  RULE cannot_produce_without_bates {
+    WHEN ProductionContext.production_set_ready == true
+    AND  ProductionContext.bates_prefix_set == false
+    THEN FLAG "bates_prefix_required_before_production"
+    SEVERITY critical
+    PRIORITY 100
+  }
+
+  RULE privilege_log_before_production {
+    WHEN ProductionContext.production_set_ready == true
+    AND  ProductionContext.privilege_log_complete == false
+    THEN FLAG "privilege_log_must_be_complete_before_production"
+    SEVERITY critical
+    PRIORITY 100
+  }
+
+  STATE ProductionFlow {
+    INITIAL building
+
+    building {
+      ON_ENTER   LogLegalEvent
+      TRANSITION WHEN ProductionContext.production_set_ready == true -> bates_pending
+    }
+
+    bates_pending {
+      ON_ENTER   ApplyBatesNumbers
+      TRANSITION WHEN ProductionContext.bates_prefix_set == true -> privilege_review
+    }
+
+    privilege_review {
+      ON_ENTER   GeneratePrivilegeLog
+      TRANSITION WHEN ProductionContext.privilege_log_complete == true -> ready_to_produce
+    }
+
+    ready_to_produce {
+      ON_ENTER   LogLegalEvent
+      TRANSITION WHEN ProductionContext.production_set_ready == false -> building
+    }
+  }
+}
+
+MODULE ConnectorEngine {
+
+  FACT ConnectorContext {
+    exchange_connected:    bool = false
+    gmail_connected:       bool = false
+    slack_connected:       bool = false
+    onedrive_connected:    bool = false
+    gdrive_connected:      bool = false
+    erp_connected:         bool = true
+    exchange_sync_stale:   bool = false
+    gmail_sync_stale:      bool = false
+    slack_sync_stale:      bool = false
+    onedrive_sync_stale:   bool = false
+    gdrive_sync_stale:     bool = false
+    any_sync_error:        bool = false
+    PERSISTENT
+  }
+
+  RULE exchange_sync_overdue {
+    WHEN ConnectorContext.exchange_connected == true
+    AND  ConnectorContext.exchange_sync_stale == true
+    THEN FLAG "exchange_connector_sync_overdue"
+    SEVERITY warning
+    PRIORITY 70
+  }
+
+  RULE gmail_sync_overdue {
+    WHEN ConnectorContext.gmail_connected == true
+    AND  ConnectorContext.gmail_sync_stale == true
+    THEN FLAG "gmail_connector_sync_overdue"
+    SEVERITY warning
+    PRIORITY 70
+  }
+
+  RULE slack_sync_overdue {
+    WHEN ConnectorContext.slack_connected == true
+    AND  ConnectorContext.slack_sync_stale == true
+    THEN FLAG "slack_connector_sync_overdue"
+    SEVERITY warning
+    PRIORITY 70
+  }
+
+  RULE connector_error_alert {
+    WHEN ConnectorContext.any_sync_error == true
+    THEN FLAG "connector_error_documents_may_be_missing"
+    SEVERITY critical
+    PRIORITY 95
+  }
+}
+
+MODULE RetentionEngine {
+
+  FACT RetentionContext {
+    active_hold_count:         number = 0
+    deletion_suspended:        bool   = false   // true when any hold is active
+    policy_gap_detected:       bool   = false   // category with no policy defined
+    policy_expiration_pending: bool   = false   // a policy expiring in 30 days
+    PERSISTENT
+  }
+
+  RULE suspend_deletion_during_hold {
+    WHEN RetentionContext.active_hold_count > 0
+    AND  RetentionContext.deletion_suspended == false
+    THEN FLAG "deletion_suspension_required_legal_hold_active"
+    SEVERITY critical
+    PRIORITY 100
+  }
+
+  RULE retention_policy_gap {
+    WHEN RetentionContext.policy_gap_detected == true
+    THEN FLAG "document_category_missing_retention_policy"
+    SEVERITY warning
+    PRIORITY 75
+  }
+}
+
+MODULE RiskIntelligence {
+
+  FACT RiskContext {
+    hygiene_flags_30d:       number = 0
+    critical_flags_unresolved: bool = false
+    risk_score_declining:    bool   = false   // trend down over 7 days
+    last_report_days_ago:    number = 0
+    report_overdue:          bool   = false
+    PERSISTENT
+  }
+
+  RULE critical_flags_require_report {
+    WHEN RiskContext.critical_flags_unresolved == true
+    THEN GenerateLegalRiskReport
+    SEVERITY critical
+    PRIORITY 90
+  }
+
+  RULE weekly_report_overdue {
+    WHEN RiskContext.report_overdue == true
+    THEN GenerateLegalRiskReport
+    SEVERITY info
+    PRIORITY 60
+  }
+
+  RULE risk_trend_declining {
+    WHEN RiskContext.risk_score_declining == true
+    AND  RiskContext.hygiene_flags_30d > 5
+    THEN FLAG "legal_risk_trend_worsening_counsel_review"
+    SEVERITY warning
+    PRIORITY 80
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// REASONER — The Legal Advisor Voice
+// ─────────────────────────────────────────────────────────────────────────────
+
+REASONER legal_risk_reasoner {
+  SCHEDULE "weekly"
+  INPUT    LegalHygieneFlag, LegalMatter, HygieneContext
+  PROMPT   "You are a legal risk advisor reviewing flagged communications and documents from the past 7 days. For each flag type, identify: (1) the specific risk it creates, (2) which litigation or regulatory scenario it feeds, (3) a plain-English recommendation the business can act on today. Tone: direct, non-alarmist, but clear that these patterns have consequences. Do not give legal advice. Give legal awareness. Identify patterns across flags — a single flag is noise, a pattern is exposure. If you see documented non-compliance language, say so plainly. If you see litigation anticipation in unprotected channels, explain privilege. If you see cover-up language, say that attempting to suppress evidence is worse than the underlying issue. Keep it under 500 words."
+  OUTPUT   LegalHygieneFlag
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// ACTIONS
+// ─────────────────────────────────────────────────────────────────────────────
+
+// Build-time AI action: reads your industry's liability landscape, past incident patterns,
+// and regulatory environment → generates PATTERN declarations for LegalHygieneAdvisor.
+// Run once when deploying to a new industry vertical; re-run when regulatory environment changes.
+ACTION GenerateLegalHygienePatterns {
+  INPUT  industry: string, regulatory_frameworks: string, past_incident_summary: string
+  OUTPUT hygiene_patterns: string
+  AI     "Generate Agicore PATTERN declarations for the LegalHygieneAdvisor MODULE based on the provided industry, regulatory frameworks, and incident history. Focus on: (1) industry-specific phrases that signal documented non-compliance, (2) litigation anticipation language common in this vertical, (3) privilege waiver scenarios specific to this regulatory environment, (4) any industry-specific cover-up or suppression patterns. Output valid Agicore PATTERN DSL only."
+}
+
+ACTION AssessLegalHoldRequirements {
+  INPUT  matter_id: string
+  OUTPUT hold_required: bool, custodians: string, data_sources: string
+  IMPL {
+    // Look up matter type; set LegalHoldContext.matter_type_requires_hold
+    // Identify custodians from org chart based on matter business unit
+    // Determine which connector types are in scope
+    // Compute: should hold be triggered automatically?
+  }
+}
+
+ACTION TriggerLegalHold {
+  INPUT  matter_id: string, custodian_ids: string, data_sources: string
+  OUTPUT hold_id: string
+  IMPL {
+    // Create LegalHold record
+    // Create HoldCustodian records for each custodian
+    // Set LegalHoldContext.custodian_notifications_pending = true
+    // Set LegalHoldContext.active_hold_count += 1
+    // Set RetentionContext.deletion_suspended = true
+  }
+}
+
+ACTION NotifyCustodians {
+  INPUT  hold_id: string
+  OUTPUT notifications_sent: number
+  IMPL {
+    // For each HoldCustodian where notification_sent_at is null:
+    // Emit LegalHoldNoticePacket to hold_notice_outbound CHANNEL
+    // Record notification_sent_at timestamp
+    // Schedule acknowledgment deadline (48h)
+    // Update LegalHoldContext.custodian_notifications_pending
+  }
+}
+
+ACTION PreserveCustodianData {
+  INPUT  custodian_id: string, hold_id: string
+  OUTPUT preserved: bool
+  IMPL {
+    // For each connector type in custodian.connector_types:
+    // Trigger snapshot/preservation via SyncExchangeMailbox / SyncGmailMailbox / etc.
+    // Mark HoldCustodian.data_preserved = true on success
+    // Set LegalHoldContext.preservation_failed on any connector error
+  }
+}
+
+ACTION SyncExchangeMailbox {
+  INPUT  custodian_id: string, date_range_start: date, date_range_end: date
+  OUTPUT documents_synced: number
+  IMPL {
+    // Connect to Exchange/O365 via Graph API using ExternalConnector config
+    // Pull mail items in date range for custodian
+    // Emit ExchangeMailPacket per message to exchange_inbound CHANNEL
+    // Update ExternalConnector.last_sync_at
+    // Run hygiene PATTERN matching on each message text
+    // Flag any PATTERN matches as LegalHygieneFlag records
+  }
+}
+
+ACTION SyncGmailMailbox {
+  INPUT  custodian_id: string, date_range_start: date, date_range_end: date
+  OUTPUT documents_synced: number
+  IMPL {
+    // Connect to Google Workspace via Gmail API using ExternalConnector config
+    // Pull mail items in date range for custodian
+    // Emit GmailPacket per message to gmail_inbound CHANNEL
+    // Update ExternalConnector.last_sync_at
+    // Run hygiene PATTERN matching
+  }
+}
+
+ACTION SyncSlackChannel {
+  INPUT  channel_ids: string, date_range_start: date, date_range_end: date
+  OUTPUT documents_synced: number
+  IMPL {
+    // Connect to Slack via API using ExternalConnector config
+    // Pull messages from specified channels in date range
+    // Emit SlackMessagePacket per message to slack_inbound CHANNEL
+    // Update ExternalConnector.last_sync_at
+    // Run hygiene PATTERN matching — Slack is where the really good stuff lives
+  }
+}
+
+ACTION SyncOneDrive {
+  INPUT  custodian_id: string, folder_path: string
+  OUTPUT documents_synced: number
+  IMPL {
+    // Connect to OneDrive/SharePoint via Graph API
+    // Pull files modified since last sync
+    // Extract text content for searchable file types
+    // Emit CloudFilePacket per file to onedrive_inbound CHANNEL
+    // Run hygiene PATTERN matching on text content
+  }
+}
+
+ACTION SyncGoogleDrive {
+  INPUT  custodian_id: string, folder_path: string
+  OUTPUT documents_synced: number
+  IMPL {
+    // Connect to Google Drive via Drive API
+    // Pull files modified since last sync
+    // Extract text content for searchable file types
+    // Emit CloudFilePacket per file to gdrive_inbound CHANNEL
+    // Run hygiene PATTERN matching on text content
+  }
+}
+
+ACTION SyncAllConnectors {
+  INPUT  matter_id: string, date_range_start: date, date_range_end: date
+  OUTPUT total_synced: number
+  IMPL {
+    // For each active ExternalConnector:
+    // Dispatch to appropriate Sync* action based on connector_type
+    // Aggregate document counts
+    // Update ConnectorContext flags
+  }
+}
+
+ACTION CollectDocuments {
+  INPUT  matter_id: string, hold_id: string, custodian_id: string, search_terms: string
+  OUTPUT collection_id: string, documents_found: number
+  IMPL {
+    // Create DocumentCollection record
+    // Query all inbound CHANNELs filtered by custodian_id and search_terms
+    // Deduplicate by source_id (same message may appear in multiple syncs)
+    // Create ReviewDocument record per unique document
+    // Update collection.documents_processed and deduped_count
+  }
+}
+
+ACTION AssignDocumentsForReview {
+  INPUT  collection_id: string, reviewer_ids: string
+  OUTPUT assigned_count: number
+  IMPL {
+    // Round-robin assignment of unreviewed documents to reviewer_ids
+    // Update ReviewDocument.reviewer_id and status = "assigned"
+    // Update ReviewContext.documents_awaiting_review
+  }
+}
+
+ACTION ApplyBatesNumbers {
+  INPUT  production_set_id: string, bates_prefix: string, start_number: number
+  OUTPUT bates_end: number
+  IMPL {
+    // For each ReviewDocument in production set where produced == false:
+    // Assign sequential bates_number: prefix + zero-padded sequence
+    // Update ProductionSet.bates_start and bates_end
+    // Set ProductionContext.bates_prefix_set = true
+  }
+}
+
+ACTION GeneratePrivilegeLog {
+  INPUT  production_set_id: string
+  OUTPUT privilege_log_id: string, entry_count: number
+  IMPL {
+    // For each ReviewDocument in production set where privilege != "non_privileged":
+    // Create PrivilegeLogEntry with: bates_number, date, author, recipients,
+    //   privilege_basis, description, attorney_involved
+    // Mark ProductionContext.privilege_log_complete = true
+    // Output formatted privilege log (CSV/Excel)
+  }
+}
+
+ACTION ProduceDocuments {
+  INPUT  production_set_id: string, produced_to: string
+  OUTPUT production_complete: bool
+  IMPL {
+    // Verify privilege_log_complete == true — abort if not
+    // Verify bates numbers assigned — abort if not
+    // Convert documents to production format (PDF native, TIFF, or native)
+    // Package with privilege log
+    // Record production in ProductionSet.produced_at and produced_to
+    // Mark all ReviewDocument records as produced = true
+  }
+}
+
+ACTION ReleaseHold {
+  INPUT  hold_id: string, released_by: string
+  OUTPUT hold_released: bool
+  IMPL {
+    // Verify matter is closed or hold specifically released
+    // Update LegalHold.status = "released", released_at = now()
+    // Notify all custodians that hold is released
+    // Update LegalHoldContext.active_hold_count -= 1
+    // If active_hold_count == 0: RetentionContext.deletion_suspended = false
+    // Resume normal retention policy enforcement
+  }
+}
+
+ACTION ScanCommunicationChannel {
+  INPUT  connector_type: string, custodian_id: string, hours_back: number
+  OUTPUT flags_generated: number
+  IMPL {
+    // Pull recent documents from specified connector
+    // Run all LegalHygieneAdvisor PATTERNs against each document text
+    // For each PATTERN match: create LegalHygieneFlag record
+    // Emit HygieneAlertPacket per critical flag to hygiene_alert_outbound CHANNEL
+    // Update HygieneContext flags
+    // Set HygieneContext.flags_pending_ai_review = true if any flags generated
+  }
+}
+
+ACTION AnalyzeCommunicationRisk {
+  INPUT  flag_ids: string, time_period_days: number
+  OUTPUT risk_summary: string, risk_score_delta: float
+  AI     "Review the provided legal hygiene flags from the past [time_period_days] days. For each flag type, assess: (1) what specific legal risk the flagged language creates, (2) how this pattern compounds with other flags detected, (3) whether this represents isolated incidents or systemic behavior. Provide: a risk score delta recommendation, a one-paragraph plain-English risk summary, and three specific behavioral recommendations the organization can act on immediately. Be direct. These are real documents that could appear in discovery."
+}
+
+ACTION GenerateLegalRiskReport {
+  INPUT  matter_ids: string, time_period_days: number
+  OUTPUT report: string
+  AI     "Generate a weekly legal risk advisory memo. Review active legal matters, open hygiene flags, and pattern trends. Structure: (1) Executive Summary — 3 bullet points, most important things to know this week, (2) Active Matter Status — brief status per open matter, flag any deadline or production risks, (3) Hygiene Alert Summary — grouped by flag type, pattern across the organization, (4) Recommended Actions — numbered list, most urgent first. Tone: direct, non-alarmist, like a trusted outside counsel giving a weekly briefing. Not a lawyer. A very well-organized advisor who has seen how these patterns end."
+}
+
+ACTION GenerateHoldNotice {
+  INPUT  hold_id: string, custodian_id: string
+  OUTPUT notice_text: string
+  AI     "Generate a legal hold notice for the specified custodian. Include: the matter description (without disclosing attorney work product), the scope of preserved data (email, files, Slack, etc.), the date range covered, specific instructions for preserving data and ceasing deletion, the process for acknowledging receipt, and who to contact with questions. Tone: formal, clear, not threatening. The recipient is an employee who may be nervous — make the notice professional and procedurally clear."
+}
+
+ACTION LogLegalEvent {
+  INPUT  event_type: string, matter_id: string, detail: string
+  OUTPUT logged: bool
+  IMPL {
+    // Append to legal event log with timestamp, user, event_type, matter_id, detail
+    // Legal event log is immutable — append only, no updates
+    // This is the chain of custody record
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// WORKFLOWS
+// ─────────────────────────────────────────────────────────────────────────────
+
+WORKFLOW trigger_legal_hold {
+  IDEMPOTENT false
+  STEP assess             { ACTION AssessLegalHoldRequirements  ON_FAIL abort }
+  STEP trigger            { ACTION TriggerLegalHold             ON_FAIL abort }
+  STEP notify             { ACTION NotifyCustodians             ON_FAIL abort }
+  STEP sync_connectors    { ACTION SyncAllConnectors            ON_FAIL skip  }
+  STEP preserve           { ACTION PreserveCustodianData        ON_FAIL skip  }
+  STEP log                { ACTION LogLegalEvent                ON_FAIL skip  }
+}
+
+WORKFLOW collect_and_process {
+  IDEMPOTENT true
+  STEP sync               { ACTION SyncAllConnectors            ON_FAIL abort }
+  STEP collect            { ACTION CollectDocuments             ON_FAIL abort }
+  STEP assign             { ACTION AssignDocumentsForReview     ON_FAIL skip  }
+  STEP log                { ACTION LogLegalEvent                ON_FAIL skip  }
+}
+
+WORKFLOW privilege_review_and_production {
+  IDEMPOTENT false
+  STEP privilege_log      { ACTION GeneratePrivilegeLog         ON_FAIL abort }
+  STEP apply_bates        { ACTION ApplyBatesNumbers            ON_FAIL abort }
+  STEP produce            { ACTION ProduceDocuments             ON_FAIL abort }
+  STEP log                { ACTION LogLegalEvent                ON_FAIL skip  }
+}
+
+WORKFLOW release_hold {
+  IDEMPOTENT false
+  STEP release            { ACTION ReleaseHold                  ON_FAIL abort }
+  STEP log                { ACTION LogLegalEvent                ON_FAIL skip  }
+}
+
+WORKFLOW legal_hygiene_scan {
+  IDEMPOTENT true
+  STEP scan_exchange      { ACTION SyncExchangeMailbox          ON_FAIL skip  }
+  STEP scan_gmail         { ACTION SyncGmailMailbox             ON_FAIL skip  }
+  STEP scan_slack         { ACTION SyncSlackChannel             ON_FAIL skip  }
+  STEP scan_onedrive      { ACTION SyncOneDrive                 ON_FAIL skip  }
+  STEP scan_gdrive        { ACTION SyncGoogleDrive              ON_FAIL skip  }
+  STEP analyze_flags      { ACTION AnalyzeCommunicationRisk     ON_FAIL skip  }
+  STEP log                { ACTION LogLegalEvent                ON_FAIL skip  }
+}
+
+WORKFLOW weekly_legal_risk_assessment {
+  IDEMPOTENT true
+  STEP scan_hygiene       { ACTION ScanCommunicationChannel     ON_FAIL skip  }
+  STEP analyze            { ACTION AnalyzeCommunicationRisk     ON_FAIL skip  }
+  STEP generate_report    { ACTION GenerateLegalRiskReport      ON_FAIL skip  }
+  STEP log                { ACTION LogLegalEvent                ON_FAIL skip  }
+}
+
+WORKFLOW onboard_connector {
+  IDEMPOTENT false
+  STEP configure          { ACTION LogLegalEvent                ON_FAIL abort }
+  STEP test_connection    { ACTION SyncAllConnectors            ON_FAIL abort }
+  STEP initial_sync       { ACTION SyncAllConnectors            ON_FAIL skip  }
+  STEP log                { ACTION LogLegalEvent                ON_FAIL skip  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// VIEWS
+// ─────────────────────────────────────────────────────────────────────────────
+
+VIEW LegalMatterDashboard {
+  ENTITY   LegalMatter
+  LAYOUT   table
+  ACTIONS  create, edit
+}
+
+VIEW HoldManagement {
+  ENTITY   LegalHold
+  LAYOUT   table
+  ACTIONS  create, edit
+}
+
+VIEW DocumentReview {
+  ENTITY   ReviewDocument
+  LAYOUT   table
+  ACTIONS  edit
+}
+
+VIEW LegalHygieneMonitor {
+  ENTITY   LegalHygieneFlag
+  LAYOUT   table
+  ACTIONS  edit
+}
+
+VIEW ConnectorStatus {
+  ENTITY   ExternalConnector
+  LAYOUT   table
+  ACTIONS  create, edit
+}
+
+VIEW ProductionManager {
+  ENTITY   ProductionSet
+  LAYOUT   table
+  ACTIONS  create, edit
+}
+
+VIEW RetentionPolicies {
+  ENTITY   RetentionPolicy
+  LAYOUT   table
+  ACTIONS  create, edit
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// PREFERENCES
+// ─────────────────────────────────────────────────────────────────────────────
+
+PREFERENCE hygiene_scan_interval_hours       { DEFAULT 24    TYPE number }
+PREFERENCE production_deadline_warning_days  { DEFAULT 14    TYPE number }
+PREFERENCE connector_sync_stale_hours        { DEFAULT 24    TYPE number }
+PREFERENCE legal_risk_notify_threshold       { DEFAULT 50    TYPE number }
+PREFERENCE hold_ack_deadline_hours           { DEFAULT 48    TYPE number }
+PREFERENCE retention_expiry_warning_days     { DEFAULT 30    TYPE number }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// SEED DATA — Default Retention Policies
+// ─────────────────────────────────────────────────────────────────────────────
+
+SEED RetentionPolicy [
+  { policy_name: "Email Correspondence",       document_category: "email",      retention_years: 7,  legal_basis: "general_business",    deletion_method: "secure_delete" },
+  { policy_name: "Contracts and Agreements",   document_category: "contracts",  retention_years: 10, legal_basis: "statute_of_limitations", deletion_method: "secure_delete" },
+  { policy_name: "Financial Records",          document_category: "financial",  retention_years: 7,  legal_basis: "IRS",                 deletion_method: "secure_delete" },
+  { policy_name: "HR and Personnel",           document_category: "hr",         retention_years: 7,  legal_basis: "EEOC",                deletion_method: "secure_delete" },
+  { policy_name: "Compliance Documentation",   document_category: "compliance", retention_years: 10, legal_basis: "regulatory",          deletion_method: "secure_delete" },
+  { policy_name: "General Business Records",   document_category: "general",    retention_years: 5,  legal_basis: "internal",            deletion_method: "secure_delete" }
+]

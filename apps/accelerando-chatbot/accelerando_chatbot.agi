@@ -1,0 +1,971 @@
+APP accelerando_chatbot {
+  TITLE "Accelerando Customer Service"
+  DB    accelerando_chatbot
+  PORT  3001
+}
+
+TARGET web { RUNTIME axum  FRONTEND react  DEPLOY docker }
+AUTH   { STRATEGY jwt  EXPIRY "4h"  REFRESH true }
+TENANT { MODEL row_level  ISOLATE strict }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// ENTITIES — conversation audit trail
+// ─────────────────────────────────────────────────────────────────────────────
+
+ENTITY ConversationSession {
+  tenant_id:      string REQUIRED
+  session_token:  string REQUIRED
+  customer_email: string
+  customer_name:  string
+  status:         string = "active"
+  agent_id:       string
+  resolved:       bool   = false
+  escalated:      bool   = false
+  message_count:  number = 0
+  TIMESTAMPS
+  CRUD create, read, list
+}
+
+ENTITY MessageLog {
+  tenant_id:       string REQUIRED
+  session_id:      string REQUIRED
+  speaker:         string REQUIRED
+  content:         string REQUIRED
+  pattern_matched: string
+  intent:          string
+  TIMESTAMPS
+  CRUD create, read, list
+}
+
+ENTITY EscalationRecord {
+  tenant_id:    string REQUIRED
+  session_id:   string REQUIRED
+  reason:       string REQUIRED
+  trigger_rule: string
+  agent_id:     string
+  TIMESTAMPS
+  CRUD create, read, list, edit
+}
+
+ENTITY KnowledgeEntry {
+  tenant_id:  string REQUIRED
+  category:   string REQUIRED
+  question:   string REQUIRED
+  answer:     string REQUIRED
+  active:     bool   = true
+  hit_count:  number = 0
+  TIMESTAMPS
+  CRUD create, read, list, edit, delete
+}
+
+STAGES ConversationSession.status {
+  TRANSITION "active" -> "resolved" {
+    MATCH any
+  }
+  TRANSITION "active" -> "escalated" {
+    MATCH any
+    REQUIRE ConversationSession.agent_id IS NOT NULL
+  }
+  TRANSITION "escalated" -> "resolved" {
+    MATCH any
+    REQUIRE ConversationSession.agent_id IS NOT NULL
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// MODULE: ConversationEngine
+// Global conversation state — the shared FACT all other modules read and write.
+// Every PATTERN ASSERT and RULE condition ultimately references ConversationContext.
+// ─────────────────────────────────────────────────────────────────────────────
+
+MODULE ConversationEngine {
+  DESCRIPTION "Global conversation state machine — intent routing, escalation tracking, session lifecycle"
+
+  FACT ConversationContext {
+    session_id:        string
+    current_intent:    string = "unknown"
+    current_module:    string = "general"
+    awaiting:          string = ""
+    info_complete:     bool   = false
+    resolved:          bool   = false
+    needs_human:       bool   = false
+    order_verified:    bool   = false
+    identity_verified: bool   = false
+    negative_signals:  number = 0
+    escalation_count:  number = 0
+    no_match_count:    number = 0
+    PERSISTENT
+  }
+
+  SCORE overall_confidence {
+    INITIAL 50
+    MIN     0
+    MAX     100
+    THRESHOLD low    AT 25 THEN request_clarification
+    THRESHOLD medium AT 50 THEN continue_conversation
+    THRESHOLD high   AT 80 THEN proceed_to_resolution
+  }
+
+  PATTERN greeting {
+    MATCH    "hello|hi|hey|good morning|good afternoon|greetings|howdy|sup"
+    RESPOND  "Hello! Welcome to Accelerando support. I can help you with billing, orders, technical questions, and account management. What can I help you with today?"
+    SCORE    overall_confidence +10
+    ASSERT   ConversationContext { current_module: "general" }
+    CATEGORY "general"
+    PRIORITY 50
+  }
+
+  PATTERN goodbye {
+    MATCH    "bye|goodbye|thanks|thank you|that's all|I'm good|problem solved|you helped|all set|great thanks"
+    RESPOND  "You're welcome! I'm glad I could help. Don't hesitate to reach out if anything else comes up. Have a great day!"
+    SCORE    overall_confidence +15
+    ASSERT   ConversationContext { resolved: true }
+    CATEGORY "general"
+    PRIORITY 55
+  }
+
+  PATTERN confusion_signal {
+    MATCH    "I don't understand|what do you mean|confused|that doesn't make sense|huh|not sure what"
+    RESPOND  "I apologize for the confusion — let me try again. I can help with billing, orders, technical issues, or your account. Which of those applies to what you need?"
+    SCORE    overall_confidence -10
+    ASSERT   ConversationContext { current_module: "general" }
+    CATEGORY "general"
+    PRIORITY 60
+  }
+
+  RULE escalate_no_match_loop {
+    WHEN     ConversationContext.no_match_count > 2
+    THEN     FLAG "needs_human"
+    SEVERITY critical
+    PRIORITY 95
+  }
+
+  RULE session_resolved {
+    WHEN     ConversationContext.resolved == true
+    AND      ConversationContext.needs_human == false
+    THEN     EndSession
+    SEVERITY info
+  }
+
+  STATE ConversationFlow {
+    INITIAL  greeting
+    greeting       { TRANSITION routing     WHEN ConversationContext.current_intent != "unknown" }
+    routing        { TRANSITION resolving   WHEN ConversationContext.info_complete == true }
+    resolving      { TRANSITION closed      WHEN ConversationContext.resolved == true }
+    resolving      { TRANSITION escalated   WHEN ConversationContext.needs_human == true }
+    escalated      { ON_ENTER  trigger_escalation_queue }
+    closed         { ON_ENTER  close_session }
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// MODULE: BillingSupport
+// Billing questions, invoice disputes, payment failures, subscriptions.
+// Policy: refund decisions are NEVER made without verification.
+//         Large disputes ALWAYS go to a human.
+// ─────────────────────────────────────────────────────────────────────────────
+
+MODULE BillingSupport {
+  DESCRIPTION "Billing questions, invoice disputes, payment failures, subscription management"
+  ACTIVATE_WHEN ConversationContext.current_module == "billing"
+
+  FACT BillingContext {
+    invoice_id:       string
+    amount_disputed:  float  = 0.0
+    payment_method:   string = ""
+    has_open_dispute: bool   = false
+    auto_credit_ok:   bool   = false
+    PERSISTENT
+  }
+
+  SCORE billing_confidence {
+    INITIAL 50
+    MIN     0
+    MAX     100
+    THRESHOLD low    AT 30 THEN request_billing_clarification
+    THRESHOLD medium AT 60 THEN continue_billing_flow
+    THRESHOLD high   AT 85 THEN proceed_billing_resolution
+  }
+
+  PATTERN billing_general {
+    MATCH    "bill|billing|invoice|charged|charge|payment|subscription|plan cost|my account"
+    RESPOND  "I can help with billing. Are you asking about a specific charge, a failed payment, or your subscription?"
+    SCORE    billing_confidence +15
+    ASSERT   ConversationContext { current_module: "billing", current_intent: "billing_general", awaiting: "billing_subtype" }
+    CATEGORY "billing"
+    PRIORITY 80
+  }
+
+  PATTERN payment_failed {
+    MATCH    "payment failed|card declined|payment didn't go through|unable to process|billing error|payment issue"
+    RESPOND  "I'm sorry your payment didn't go through. This is usually an expired card, insufficient funds, or a billing address mismatch. Can you confirm the last four digits of the card on file?"
+    SCORE    billing_confidence +20
+    ASSERT   ConversationContext { current_module: "billing", current_intent: "payment_failed", awaiting: "card_confirmation" }
+    CATEGORY "billing"
+    PRIORITY 90
+  }
+
+  PATTERN dispute_charge {
+    MATCH    "dispute|wrong charge|shouldn't be charged|didn't authorize|fraudulent|charge I don't recognize|incorrect charge"
+    RESPOND  "I understand you're disputing a charge. To look into this I'll need your invoice number or the date and amount. What is the invoice number?"
+    SCORE    billing_confidence +10
+    ASSERT   ConversationContext { current_module: "billing", current_intent: "dispute", awaiting: "invoice_id" }
+    CATEGORY "billing"
+    PRIORITY 95
+  }
+
+  PATTERN invoice_missing {
+    MATCH    "didn't receive invoice|where is my invoice|invoice missing|can't find invoice|resend invoice|need my invoice"
+    RESPOND  "I can resend your invoice. What email address should I send it to, and which billing period are you looking for?"
+    SCORE    billing_confidence +15
+    ASSERT   ConversationContext { current_module: "billing", current_intent: "invoice_resend", awaiting: "email_confirm" }
+    CATEGORY "billing"
+    PRIORITY 70
+  }
+
+  PATTERN subscription_upgrade {
+    MATCH    "upgrade|higher plan|more features|enterprise plan|add seats|increase capacity|scale up"
+    RESPOND  "Happy to help you upgrade! Our plans are Starter, Professional, and Enterprise. Which features are most important to you?"
+    SCORE    billing_confidence +25
+    ASSERT   ConversationContext { current_module: "billing", current_intent: "upgrade", awaiting: "plan_selection" }
+    CATEGORY "billing"
+    PRIORITY 75
+  }
+
+  PATTERN subscription_cancel {
+    MATCH    "cancel subscription|cancel my plan|want to cancel|thinking about canceling|stop billing me"
+    RESPOND  "I'm sorry to hear you're considering canceling. Before we proceed, can I ask what's driving this? There may be something we can adjust."
+    SCORE    billing_confidence +5
+    ASSERT   ConversationContext { current_module: "billing", current_intent: "cancel_intent", awaiting: "cancel_reason" }
+    CATEGORY "billing"
+    PRIORITY 100
+  }
+
+  RULE block_refund_without_verification {
+    WHEN     ConversationContext.current_intent == "dispute"
+    AND      ConversationContext.order_verified == false
+    THEN     FLAG "block_refund_promise"
+    SEVERITY critical
+    PRIORITY 100
+  }
+
+  RULE escalate_large_dispute {
+    WHEN     BillingContext.has_open_dispute == true
+    AND      BillingContext.amount_disputed > 500.0
+    THEN     FLAG "needs_human"
+    SEVERITY critical
+    PRIORITY 95
+  }
+
+  RULE auto_credit_small_dispute {
+    WHEN     BillingContext.auto_credit_ok == true
+    AND      BillingContext.amount_disputed < 50.0
+    THEN     ApplyAutoCredit
+    SEVERITY info
+  }
+
+  RULE flag_cancellation_intent {
+    WHEN     ConversationContext.current_intent == "cancel_intent"
+    THEN     FLAG "cancellation_risk"
+    SEVERITY warning
+    PRIORITY 85
+  }
+
+  STATE BillingFlow {
+    INITIAL  intake
+    intake      { TRANSITION clarifying WHEN ConversationContext.awaiting != "" }
+    clarifying  { TRANSITION resolving  WHEN ConversationContext.info_complete == true }
+    resolving   { TRANSITION closed     WHEN ConversationContext.resolved == true }
+    resolving   { TRANSITION escalated  WHEN ConversationContext.needs_human == true }
+    escalated   { ON_ENTER notify_billing_team }
+    closed      { ON_ENTER send_billing_confirmation }
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// MODULE: OrderManagement
+// Order status, shipping, delivery, returns, and cancellations.
+// Policy: never promise a delivery date without verifying the order.
+//         never cancel a shipped order (offer return instead).
+// ─────────────────────────────────────────────────────────────────────────────
+
+MODULE OrderManagement {
+  DESCRIPTION "Order status, shipping delays, wrong items, cancellations, and returns"
+  ACTIVATE_WHEN ConversationContext.current_module == "orders"
+
+  FACT OrderContext {
+    order_id:         string
+    is_shipped:       bool   = false
+    is_delivered:     bool   = false
+    is_cancelled:     bool   = false
+    return_eligible:  bool   = false
+    days_since_order: number = 0
+    PERSISTENT
+  }
+
+  SCORE order_confidence {
+    INITIAL 50
+    MIN     0
+    MAX     100
+    THRESHOLD low    AT 30 THEN request_order_clarification
+    THRESHOLD medium AT 60 THEN continue_order_flow
+    THRESHOLD high   AT 85 THEN proceed_order_resolution
+  }
+
+  PATTERN order_status {
+    MATCH    "where is my order|order status|track my order|tracking|order update|when will it arrive|hasn't shipped"
+    RESPOND  "I can check your order status right now. Can you provide your order number? It starts with ORD- and is in your confirmation email."
+    SCORE    order_confidence +20
+    ASSERT   ConversationContext { current_module: "orders", current_intent: "order_status", awaiting: "order_id" }
+    CATEGORY "orders"
+    PRIORITY 90
+  }
+
+  PATTERN shipping_delay {
+    MATCH    "order late|shipping delay|hasn't arrived|taking too long|expected delivery|overdue|past delivery date"
+    RESPOND  "I apologize for the delay. Let me look into this right away. What is your order number?"
+    SCORE    order_confidence +15
+    ASSERT   ConversationContext { current_module: "orders", current_intent: "shipping_delay", awaiting: "order_id" }
+    CATEGORY "orders"
+    PRIORITY 85
+  }
+
+  PATTERN wrong_item {
+    MATCH    "wrong item|wrong product|received wrong|not what I ordered|incorrect item|wrong color|wrong size|different product"
+    RESPOND  "I'm sorry you received the wrong item — this is a priority. I'll start a replacement right away. What is your order number?"
+    SCORE    order_confidence +10
+    ASSERT   ConversationContext { current_module: "orders", current_intent: "wrong_item", awaiting: "order_id" }
+    CATEGORY "orders"
+    PRIORITY 95
+  }
+
+  PATTERN cancel_order {
+    MATCH    "cancel my order|want to cancel order|stop my order|don't want it anymore|order cancellation"
+    RESPOND  "I can help with that. Orders that have already shipped cannot be cancelled — a return would be needed instead. Can you provide your order number?"
+    SCORE    order_confidence +10
+    ASSERT   ConversationContext { current_module: "orders", current_intent: "cancel_order", awaiting: "order_id" }
+    CATEGORY "orders"
+    PRIORITY 90
+  }
+
+  PATTERN return_request {
+    MATCH    "return|refund|send it back|exchange|money back|return policy|how do I return"
+    RESPOND  "Our return policy allows returns within 30 days of delivery for unused items. To start a return I'll need your order number. What is it?"
+    SCORE    order_confidence +15
+    ASSERT   ConversationContext { current_module: "orders", current_intent: "return", awaiting: "order_id" }
+    CATEGORY "orders"
+    PRIORITY 80
+  }
+
+  RULE require_order_id_before_status {
+    WHEN     ConversationContext.current_intent == "order_status"
+    AND      ConversationContext.order_verified == false
+    THEN     FLAG "await_order_id"
+    SEVERITY info
+  }
+
+  RULE block_cancel_if_shipped {
+    WHEN     ConversationContext.current_intent == "cancel_order"
+    AND      OrderContext.is_shipped == true
+    THEN     FLAG "cannot_cancel_shipped"
+    SEVERITY warning
+    PRIORITY 90
+  }
+
+  RULE escalate_delivery_overdue {
+    WHEN     ConversationContext.current_intent == "shipping_delay"
+    AND      OrderContext.days_since_order > 14
+    THEN     FLAG "needs_human"
+    SEVERITY critical
+    PRIORITY 90
+  }
+
+  RULE auto_approve_return {
+    WHEN     ConversationContext.current_intent == "return"
+    AND      OrderContext.return_eligible == true
+    AND      OrderContext.is_delivered == true
+    THEN     ProcessReturn
+    SEVERITY info
+  }
+
+  STATE OrderFlow {
+    INITIAL  intake
+    intake      { TRANSITION verifying  WHEN ConversationContext.awaiting == "order_id" }
+    verifying   { TRANSITION processing WHEN ConversationContext.order_verified == true }
+    processing  { TRANSITION resolved   WHEN ConversationContext.resolved == true }
+    processing  { TRANSITION escalated  WHEN ConversationContext.needs_human == true }
+    escalated   { ON_ENTER notify_fulfillment_team }
+    resolved    { ON_ENTER send_order_confirmation }
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// MODULE: TechnicalSupport
+// Product bugs, feature questions, integrations, performance issues.
+// Policy: data loss ALWAYS escalates immediately.
+//         Critical bugs ALWAYS go to engineering on-call.
+// ─────────────────────────────────────────────────────────────────────────────
+
+MODULE TechnicalSupport {
+  DESCRIPTION "Product bugs, feature questions, integration issues, performance problems"
+  ACTIVATE_WHEN ConversationContext.current_module == "technical"
+
+  FACT TechContext {
+    issue_severity:  string = "low"
+    ticket_id:       string
+    has_open_ticket: bool   = false
+    is_critical_bug: bool   = false
+    is_data_loss:    bool   = false
+    PERSISTENT
+  }
+
+  SCORE tech_confidence {
+    INITIAL 50
+    MIN     0
+    MAX     100
+    THRESHOLD low    AT 30 THEN request_tech_clarification
+    THRESHOLD medium AT 60 THEN continue_tech_flow
+    THRESHOLD high   AT 85 THEN proceed_tech_resolution
+  }
+
+  PATTERN product_bug {
+    MATCH    "bug|broken|not working|error|crash|stopped working|glitch|issue with|problem with|doesn't work"
+    RESPOND  "I'm sorry you're experiencing an issue. Can you describe what's happening and what you expected to happen? Which part of the application are you using when it occurs?"
+    SCORE    tech_confidence +15
+    ASSERT   ConversationContext { current_module: "technical", current_intent: "bug_report", awaiting: "bug_details" }
+    CATEGORY "technical"
+    PRIORITY 85
+  }
+
+  PATTERN data_loss {
+    MATCH    "data missing|data gone|lost my data|can't find my records|data disappeared|my data is gone|deleted by accident"
+    RESPOND  "Data issues are our highest priority. I'm flagging this immediately for our technical team. Can you tell me what data is missing and when you last saw it?"
+    SCORE    tech_confidence +5
+    ASSERT   ConversationContext { current_module: "technical", current_intent: "data_loss", needs_human: true }
+    CATEGORY "technical"
+    PRIORITY 100
+  }
+
+  PATTERN feature_question {
+    MATCH    "how do I|how to|can I|is it possible|does it support|feature|capability|where is the|find the setting"
+    RESPOND  "Happy to help! What feature are you trying to use? I can walk you through it or point you to our documentation."
+    SCORE    tech_confidence +20
+    ASSERT   ConversationContext { current_module: "technical", current_intent: "feature_question", awaiting: "feature_detail" }
+    CATEGORY "technical"
+    PRIORITY 70
+  }
+
+  PATTERN integration_issue {
+    MATCH    "API|integration|webhook|connect|third party|Zapier|import|export|sync|connector"
+    RESPOND  "Integration answers depend on which system you're connecting. Which integration are you working with?"
+    SCORE    tech_confidence +15
+    ASSERT   ConversationContext { current_module: "technical", current_intent: "integration", awaiting: "integration_name" }
+    CATEGORY "technical"
+    PRIORITY 80
+  }
+
+  PATTERN performance_issue {
+    MATCH    "slow|loading|taking forever|lag|timeout|unresponsive|freezing|spinning|hangs"
+    RESPOND  "Performance issues can have several causes. Is this happening in a specific part of the app, or everywhere? Is it just for you or your whole team?"
+    SCORE    tech_confidence +15
+    ASSERT   ConversationContext { current_module: "technical", current_intent: "performance", awaiting: "performance_scope" }
+    CATEGORY "technical"
+    PRIORITY 80
+  }
+
+  RULE immediate_escalate_data_loss {
+    WHEN     TechContext.is_data_loss == true
+    THEN     FLAG "needs_human"
+    SEVERITY critical
+    PRIORITY 100
+  }
+
+  RULE immediate_escalate_critical_bug {
+    WHEN     TechContext.is_critical_bug == true
+    THEN     FLAG "needs_human"
+    SEVERITY critical
+    PRIORITY 100
+  }
+
+  RULE create_ticket_when_unresolved {
+    WHEN     TechContext.has_open_ticket == false
+    AND      ConversationContext.escalation_count > 1
+    THEN     CreateSupportTicket
+    SEVERITY warning
+  }
+
+  STATE TechFlow {
+    INITIAL  intake
+    intake      { TRANSITION diagnosing WHEN ConversationContext.awaiting != "" }
+    diagnosing  { TRANSITION resolving  WHEN ConversationContext.info_complete == true }
+    resolving   { TRANSITION closed     WHEN ConversationContext.resolved == true }
+    resolving   { TRANSITION escalated  WHEN ConversationContext.needs_human == true }
+    escalated   { ON_ENTER notify_engineering_team }
+    closed      { ON_ENTER send_tech_resolution_note }
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// MODULE: AccountManagement
+// Account settings, user management, password reset, plan changes, closures.
+// Policy: identity MUST be verified before any account change.
+//         Account closure ALWAYS escalates to retention team.
+// ─────────────────────────────────────────────────────────────────────────────
+
+MODULE AccountManagement {
+  DESCRIPTION "Account settings, password reset, user management, plan changes, account closure"
+  ACTIVATE_WHEN ConversationContext.current_module == "account"
+
+  FACT AccountContext {
+    account_id:           string
+    plan_tier:            string = "starter"
+    user_count:           number = 1
+    is_owner:             bool   = false
+    cancellation_flagged: bool   = false
+    downgrade_risk:       bool   = false
+    PERSISTENT
+  }
+
+  SCORE account_confidence {
+    INITIAL 50
+    MIN     0
+    MAX     100
+    THRESHOLD low    AT 30 THEN request_account_clarification
+    THRESHOLD medium AT 60 THEN continue_account_flow
+    THRESHOLD high   AT 85 THEN proceed_account_resolution
+  }
+
+  PATTERN reset_password {
+    MATCH    "reset password|forgot password|can't log in|locked out|password reset|change my password|login issue"
+    RESPOND  "I can send a password reset link to your registered email address. Can you confirm the email associated with your account?"
+    SCORE    account_confidence +20
+    ASSERT   ConversationContext { current_module: "account", current_intent: "password_reset", awaiting: "email_confirm" }
+    CATEGORY "account"
+    PRIORITY 90
+  }
+
+  PATTERN change_email {
+    MATCH    "change email|update email|new email address|email address update"
+    RESPOND  "To change your account email I'll need to verify your identity first. Can you confirm your current email and the last four digits of your payment card?"
+    SCORE    account_confidence +15
+    ASSERT   ConversationContext { current_module: "account", current_intent: "change_email", awaiting: "identity_verification" }
+    CATEGORY "account"
+    PRIORITY 80
+  }
+
+  PATTERN add_user {
+    MATCH    "add user|new user|invite|add team member|add seat|more users|additional user"
+    RESPOND  "Adding users is easy! How many users would you like to add, and what email addresses should I invite?"
+    SCORE    account_confidence +20
+    ASSERT   ConversationContext { current_module: "account", current_intent: "add_user", awaiting: "user_count" }
+    CATEGORY "account"
+    PRIORITY 75
+  }
+
+  PATTERN downgrade_plan {
+    MATCH    "downgrade|smaller plan|cheaper plan|basic plan|reduce my plan|lower tier|cut costs"
+    RESPOND  "I can help you review plan options. What features are most important for you to keep?"
+    SCORE    account_confidence +10
+    ASSERT   ConversationContext { current_module: "account", current_intent: "downgrade", awaiting: "needs_assessment" }
+    CATEGORY "account"
+    PRIORITY 85
+  }
+
+  PATTERN close_account {
+    MATCH    "close account|delete account|cancel everything|terminate account|shut down account|remove all my data"
+    RESPOND  "Account closure is permanent — all data is deleted after 30 days and cannot be recovered. Before we go there, can I ask what's driving this decision?"
+    SCORE    account_confidence +5
+    ASSERT   ConversationContext { current_module: "account", current_intent: "close_account", awaiting: "close_reason" }
+    CATEGORY "account"
+    PRIORITY 100
+  }
+
+  RULE block_account_change_without_identity {
+    WHEN     ConversationContext.current_intent == "change_email"
+    AND      ConversationContext.identity_verified == false
+    THEN     FLAG "block_until_verified"
+    SEVERITY critical
+    PRIORITY 100
+  }
+
+  RULE escalate_account_closure {
+    WHEN     AccountContext.cancellation_flagged == true
+    THEN     FLAG "needs_human"
+    SEVERITY critical
+    PRIORITY 95
+  }
+
+  RULE flag_downgrade_for_retention {
+    WHEN     AccountContext.downgrade_risk == true
+    THEN     FLAG "retention_opportunity"
+    SEVERITY warning
+    PRIORITY 80
+  }
+
+  STATE AccountFlow {
+    INITIAL  intake
+    intake      { TRANSITION verifying  WHEN ConversationContext.identity_verified == true }
+    verifying   { TRANSITION processing WHEN ConversationContext.info_complete == true }
+    processing  { TRANSITION closed     WHEN ConversationContext.resolved == true }
+    processing  { TRANSITION escalated  WHEN ConversationContext.needs_human == true }
+    escalated   { ON_ENTER notify_account_team }
+    closed      { ON_ENTER send_account_confirmation }
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// MODULE: SafetyNet
+// Global safety policies — escalation enforcement, tone detection, catch-all.
+// These RULES fire regardless of which module is active.
+// This module is what makes it impossible to go off the rails.
+// ─────────────────────────────────────────────────────────────────────────────
+
+MODULE SafetyNet {
+  DESCRIPTION "Global safety enforcement — escalation triggers, tone guardrails, catch-all handling. Zero hallucination surface."
+
+  FACT SafetyContext {
+    requested_human:    bool   = false
+    detected_profanity: bool   = false
+    is_off_topic:       bool   = false
+    no_match_streak:    number = 0
+    PERSISTENT
+  }
+
+  SCORE frustration_score {
+    INITIAL 0
+    MIN     0
+    MAX     100
+    DECAY   10 PER session
+    THRESHOLD low      AT 25 THEN acknowledge_frustration
+    THRESHOLD moderate AT 50 THEN offer_human_option
+    THRESHOLD high     AT 75 THEN escalate_to_human
+  }
+
+  PATTERN human_request {
+    MATCH    "talk to a person|real person|human agent|agent|representative|talk to someone|customer service rep|transfer me|speak to a human"
+    RESPOND  "Of course — let me connect you with a member of our team. Can you briefly describe what you need help with so I can route you to the right person?"
+    SCORE    frustration_score +20
+    ASSERT   ConversationContext { needs_human: true, awaiting: "issue_summary" }
+    CATEGORY "escalation"
+    PRIORITY 100
+  }
+
+  PATTERN frustration_signal {
+    MATCH    "ridiculous|terrible|awful|useless|hate this|worst|never again|fed up|furious|disgusting|outrageous|unacceptable"
+    RESPOND  "I'm really sorry you're frustrated — that's completely understandable. Let me focus on fixing this for you. What's the core issue?"
+    SCORE    frustration_score +30
+    ASSERT   ConversationContext { current_module: "general" }
+    CATEGORY "escalation"
+    PRIORITY 95
+  }
+
+  PATTERN off_topic {
+    MATCH    "politics|religion|joke|your opinion|what do you think about|are you sentient|do you have feelings|tell me a story"
+    RESPOND  "I'm a customer support assistant and I'm only able to help with questions about your Accelerando account, orders, billing, and technical issues. What can I help you with?"
+    SCORE    frustration_score +5
+    ASSERT   ConversationContext { current_module: "general" }
+    CATEGORY "safety"
+    PRIORITY 90
+  }
+
+  RULE escalate_human_request {
+    WHEN     SafetyContext.requested_human == true
+    THEN     FLAG "needs_human"
+    SEVERITY critical
+    PRIORITY 100
+  }
+
+  RULE escalate_repeated_no_match {
+    WHEN     SafetyContext.no_match_streak > 2
+    THEN     FLAG "needs_human"
+    SEVERITY critical
+    PRIORITY 95
+  }
+
+  RULE never_promise_delivery_without_order {
+    WHEN     ConversationContext.current_intent == "shipping_delay"
+    AND      ConversationContext.order_verified == false
+    THEN     FLAG "block_delivery_promise"
+    SEVERITY critical
+    PRIORITY 100
+  }
+
+  RULE never_promise_refund_without_verification {
+    WHEN     ConversationContext.current_intent == "dispute"
+    AND      ConversationContext.order_verified == false
+    THEN     FLAG "block_refund_promise"
+    SEVERITY critical
+    PRIORITY 100
+  }
+
+  RULE escalate_high_frustration {
+    WHEN     ConversationContext.negative_signals >= 3
+    THEN     FLAG "needs_human"
+    SEVERITY critical
+    PRIORITY 95
+  }
+
+  RULE block_off_topic_response {
+    WHEN     SafetyContext.is_off_topic == true
+    THEN     FLAG "block_off_topic_response"
+    SEVERITY warning
+    PRIORITY 90
+  }
+
+  STATE EscalationFlow {
+    INITIAL  monitoring
+    monitoring    { TRANSITION warning_state WHEN ConversationContext.negative_signals >= 2 }
+    warning_state { TRANSITION escalated     WHEN ConversationContext.negative_signals >= 3 }
+    escalated     { ON_ENTER  notify_escalation_queue }
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// TELEMETRY — escalations feed back to ERP + OIE
+// Every escalation is an organizational data point.
+// OIE will surface: "Support escalations up 40% this week — check SafetyNet.escalate_high_frustration"
+// ─────────────────────────────────────────────────────────────────────────────
+
+PACKET EscalationPacket {
+  session_id:   string
+  tenant_id:    string
+  reason:       string
+  trigger_rule: string
+  intent:       string
+  module_name:  string
+  timestamp:    datetime
+  SIGNATURES   true
+  TTL          90
+}
+
+CHANNEL escalation_out {
+  SOURCE      accelerando_chatbot
+  DESTINATION accelerando_erp
+  TYPE        EscalationPacket
+  CAPACITY    1000
+  PERSISTENT  true
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// ACTIONS
+// ─────────────────────────────────────────────────────────────────────────────
+
+ACTION StartSession {
+  INPUT  customer_email: string, tenant_id: string
+  OUTPUT session_token: string, session_id: string
+  IMPL   "create ConversationSession, initialize ConversationContext FACT to defaults, return session token and ID"
+}
+
+ACTION ProcessMessage {
+  INPUT  session_id: string, message: string
+  OUTPUT response: string, matched_pattern: string, needs_escalation: bool
+  IMPL   "run PATTERN engine against normalized message text, select highest-priority match above confidence threshold, evaluate RULE engine against current FACT state, return matched response or polite fallback if no match, increment no_match_streak on fallback"
+}
+
+ACTION CheckOrderStatus {
+  INPUT  order_id: string, session_id: string
+  OUTPUT status: string, eta: string, carrier: string
+  IMPL   "query ERP orders table with tenant_id isolation, return real-time fulfillment status, update OrderContext.order_verified to true"
+}
+
+ACTION ProcessReturn {
+  INPUT  order_id: string, reason: string, session_id: string
+  OUTPUT return_label_url: string, confirmation_number: string
+  IMPL   "verify return eligibility window, generate return label via ERP fulfillment integration, update order status, return label URL"
+  EMIT   return_initiated {
+    source: string, session_id: string, order_id: string, tenant_id: string
+  }
+}
+
+ACTION ApplyAutoCredit {
+  INPUT  session_id: string, amount: float
+  OUTPUT credit_applied: bool, new_balance: float
+  IMPL   "validate amount against auto_credit_limit PREFERENCE, apply credit to account in ERP billing table, log credit event"
+  EMIT   credit_applied {
+    source: string, session_id: string, amount: float, tenant_id: string
+  }
+}
+
+ACTION CreateSupportTicket {
+  INPUT  session_id: string, issue_summary: string, severity: string
+  OUTPUT ticket_id: string
+  IMPL   "create ServiceTicket in ERP with full conversation transcript as notes, assign priority from severity parameter, assign to support queue"
+  EMIT   ticket_created {
+    source: string, session_id: string, ticket_id: string, severity: string, tenant_id: string
+  }
+}
+
+ACTION EscalateToHuman {
+  INPUT  session_id: string, reason: string, trigger_rule: string
+  OUTPUT escalation_id: string, queue_position: number
+  IMPL   "create EscalationRecord, emit EscalationPacket to escalation_out CHANNEL, update ConversationSession.status to escalated, return queue position"
+  EMIT   escalation_triggered {
+    source: string, session_id: string, reason: string, trigger_rule: string, tenant_id: string
+  }
+}
+
+ACTION EndSession {
+  INPUT  session_id: string, resolved: bool
+  OUTPUT session_summary: string
+  IMPL   "update ConversationSession.status to resolved or closed, persist final MessageLog entry with session summary, return summary string"
+}
+
+ACTION GenerateChatbot {
+  INPUT  knowledge_docs: string, escalation_policy: string, product_name: string
+  OUTPUT patterns_generated: number, rules_generated: number, agi_preview: string
+  AI     "You are an Agicore DSL compiler. Analyze the provided product documentation, FAQ content, and escalation policy. Cluster all identifiable customer intents. For each cluster generate a PATTERN declaration with MATCH keywords, RESPOND template, SCORE delta, and ASSERT. For each policy boundary generate a RULE declaration with WHEN conditions and THEN FLAG or THEN ActionName. Group related patterns and rules into MODULE declarations. Output a valid .agi MODULE block. Return the count of patterns generated, rules generated, and the full .agi text as agi_preview."
+}
+
+ACTION ExplainEscalation {
+  INPUT  escalation_id: string
+  OUTPUT explanation: string
+  AI     "Given this escalation record — the conversation transcript, the triggering rule name, the fact snapshot at escalation time — explain in plain language why this conversation was transferred to a human agent. Be specific about which policy was triggered and what the customer said that triggered it."
+}
+
+ACTION AuditSafetyPolicy {
+  INPUT  module_name: string, days_back: number
+  OUTPUT report: string
+  AI     "Analyze the rule firing history for the specified module over the last N days. Identify which safety rules are firing most frequently, whether the escalation threshold is calibrated correctly, and what patterns of customer language are triggering the most escalations. Return a structured report with recommendations for PATTERN or RULE adjustments."
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// VIEWS — admin console and agent workspace
+// ─────────────────────────────────────────────────────────────────────────────
+
+VIEW ChatInterface {
+  ENTITY  ConversationSession
+  LAYOUT  dashboard
+  ACTIONS create
+}
+
+VIEW AgentQueue {
+  ENTITY  EscalationRecord
+  LAYOUT  kanban
+  ACTIONS create, edit
+}
+
+VIEW ConversationHistory {
+  ENTITY  MessageLog
+  LAYOUT  table
+  ACTIONS read
+}
+
+VIEW KnowledgeBase {
+  ENTITY  KnowledgeEntry
+  LAYOUT  table
+  ACTIONS create, edit, delete
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// PREFERENCES
+// ─────────────────────────────────────────────────────────────────────────────
+
+PREFERENCE escalation_threshold {
+  TYPE    number
+  DEFAULT 3
+  LABEL   "Negative signals before auto-escalation"
+}
+
+PREFERENCE auto_credit_limit {
+  TYPE    number
+  DEFAULT 50
+  LABEL   "Maximum auto-credit amount (USD)"
+}
+
+PREFERENCE session_timeout_minutes {
+  TYPE    number
+  DEFAULT 30
+  LABEL   "Idle session timeout in minutes"
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// SEED — demo sessions showing the system working
+// ─────────────────────────────────────────────────────────────────────────────
+
+SEED ConversationSession {
+  session_token:  "demo-billing-resolved"
+  customer_email: "alice@acmecorp.com"
+  customer_name:  "Alice Chen"
+  status:         "resolved"
+  resolved:       true
+  message_count:  6
+  tenant_id:      "acme"
+}
+
+SEED ConversationSession {
+  session_token:  "demo-order-escalated"
+  customer_email: "bob@brightline.io"
+  customer_name:  "Bob Martinez"
+  status:         "escalated"
+  escalated:      true
+  message_count:  11
+  tenant_id:      "brightline"
+}
+
+SEED ConversationSession {
+  session_token:  "demo-tech-resolved"
+  customer_email: "carol@vertex.com"
+  customer_name:  "Carol Wu"
+  status:         "resolved"
+  resolved:       true
+  message_count:  4
+  tenant_id:      "vertex"
+}
+
+SEED EscalationRecord {
+  session_id:   "demo-order-escalated"
+  reason:       "Order overdue by 18 days — exceeds shipping delay threshold"
+  trigger_rule: "escalate_delivery_overdue"
+  tenant_id:    "brightline"
+}
+
+SEED KnowledgeEntry {
+  category:  "billing"
+  question:  "What is your refund policy?"
+  answer:    "We offer full refunds within 30 days of purchase for annual plans. Monthly plans are non-refundable but can be cancelled at any time."
+  active:    true
+  hit_count: 0
+  tenant_id: "acme"
+}
+
+SEED KnowledgeEntry {
+  category:  "orders"
+  question:  "How long does shipping take?"
+  answer:    "Standard shipping is 5-7 business days. Expedited shipping (2-3 days) is available at checkout. International orders may take 10-14 business days."
+  active:    true
+  hit_count: 0
+  tenant_id: "acme"
+}
+
+SEED KnowledgeEntry {
+  category:  "account"
+  question:  "Can I change my email address?"
+  answer:    "Yes. For security, we require identity verification before changing the email on your account. Contact support and have your payment card details ready."
+  active:    true
+  hit_count: 0
+  tenant_id: "acme"
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// TESTS
+// ─────────────────────────────────────────────────────────────────────────────
+
+TEST session_create {
+  GIVEN   ConversationSession { customer_email: "test@example.com", session_token: "test-001", tenant_id: "test" }
+  EXPECT  create -> session_token IS NOT NULL
+  EXPECT  create -> status == "active"
+  EXPECT  create -> resolved == false
+}
+
+TEST knowledge_entry_create {
+  GIVEN   KnowledgeEntry { category: "billing", question: "Test Q", answer: "Test A", tenant_id: "test" }
+  EXPECT  create -> id IS NOT NULL
+  EXPECT  create -> active == true
+}
+
+TEST escalation_record_create {
+  GIVEN   EscalationRecord { session_id: "test-001", reason: "High frustration", trigger_rule: "escalate_high_frustration", tenant_id: "test" }
+  EXPECT  create -> id IS NOT NULL
+  EXPECT  get_by_id -> reason == "High frustration"
+  EXPECT  get_by_id -> trigger_rule == "escalate_high_frustration"
+}

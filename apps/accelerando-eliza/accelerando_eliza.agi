@@ -1,0 +1,1092 @@
+APP accelerando_eliza {
+  TITLE  "Eliza — Accelerando Operator Interface"
+  DB     accelerando_eliza
+  WINDOW 1400x900 frameless
+}
+
+// Internal operator tool — Tauri desktop, not web.
+// Operators speak; Eliza executes deterministic ERP workflows.
+// AI ran once at build time to compile SOPs into PATTERN declarations.
+// Zero LLM at runtime.
+//
+// "Are you AI?"   No.
+// "Are you human?" No.
+// "What are you?" A very articulate button.
+
+// ─────────────────────────────────────────────────────────────────────────────
+// ENTITIES — audit trail for every macro execution
+// ─────────────────────────────────────────────────────────────────────────────
+
+ENTITY OperatorSession {
+  operator_id:   string REQUIRED
+  operator_name: string REQUIRED
+  operator_role: string REQUIRED
+  tenant_id:     string REQUIRED
+  status:        string = "active"
+  macro_count:   number = 0
+  TIMESTAMPS
+  CRUD create, read, list
+}
+
+ENTITY MacroExecution {
+  tenant_id:      string REQUIRED
+  session_id:     string REQUIRED
+  macro_name:     string REQUIRED
+  operator_id:    string REQUIRED
+  trigger_phrase: string REQUIRED
+  status:         string = "pending"
+  step_count:     number = 0
+  completed_at:   datetime
+  TIMESTAMPS
+  CRUD create, read, list, edit
+}
+
+ENTITY MacroStepLog {
+  tenant_id:    string REQUIRED
+  execution_id: string REQUIRED
+  step_name:    string REQUIRED
+  action_name:  string REQUIRED
+  status:       string = "pending"
+  result:       string
+  error:        string
+  TIMESTAMPS
+  CRUD create, read, list
+}
+
+STAGES MacroExecution.status {
+  TRANSITION "pending" -> "running" {
+    MATCH any
+  }
+  TRANSITION "running" -> "completed" {
+    MATCH any
+    REQUIRE MacroExecution.completed_at IS NOT NULL
+  }
+  TRANSITION "running" -> "failed" {
+    MATCH any
+  }
+  TRANSITION "running" -> "aborted" {
+    MATCH any
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// MODULE: MacroEngine
+// Global execution state — tracks what workflow is pending, what we're
+// waiting for, confirmation gates, and undo state.
+// ─────────────────────────────────────────────────────────────────────────────
+
+MODULE MacroEngine {
+  DESCRIPTION "Global macro execution state — intent routing, confirmation gates, undo registry"
+
+  FACT MacroContext {
+    session_id:       string
+    operator_id:      string
+    operator_role:    string = "staff"
+    pending_macro:    string = ""
+    current_module:   string = "meta"
+    awaiting:         string = ""
+    confirmed:        bool   = false
+    last_macro:       string = ""
+    last_entity_id:   string = ""
+    entity_name:      string = ""
+    entity_id:        string = ""
+    step_count:       number = 0
+    needs_confirm:    bool   = false
+    PERSISTENT
+  }
+
+  SCORE eliza_confidence {
+    INITIAL 60
+    MIN     0
+    MAX     100
+    THRESHOLD low    AT 30 THEN request_clarification
+    THRESHOLD medium AT 60 THEN proceed_with_caution
+    THRESHOLD high   AT 85 THEN execute_immediately
+  }
+
+  PATTERN what_are_you {
+    MATCH    "are you AI|are you a chatbot|are you human|what are you|are you a robot|are you sentient|are you GPT|are you ChatGPT|who are you"
+    RESPOND  "I'm neither. I'm Eliza — a deterministic macro executor with a conversational interface. I don't reason, generate, or hallucinate. I match your intent to a compiled workflow and execute it. Think of me as a very articulate button. What workflow can I run for you?"
+    SCORE    eliza_confidence +5
+    ASSERT   MacroContext { current_module: "meta" }
+    CATEGORY "meta"
+    PRIORITY 60
+  }
+
+  PATTERN help {
+    MATCH    "help|what can you do|what can I say|show me commands|list workflows|what workflows"
+    RESPOND  "I can execute any Accelerando workflow by voice. Try: 'Close the Acme deal', 'Onboard Brightline Corp', 'Approve all invoices under $1k', 'Run month-end close', 'Escalate critical tickets', 'Generate the AR aging report'. What do you need?"
+    SCORE    eliza_confidence +10
+    ASSERT   MacroContext { current_module: "meta" }
+    CATEGORY "meta"
+    PRIORITY 55
+  }
+
+  PATTERN undo {
+    MATCH    "undo|undo that|reverse|that was a mistake|go back|cancel last"
+    RESPOND  "Attempting to reverse the last macro: {{last_macro}}. Note: some steps (sent emails, posted journals) cannot be undone. Proceed?"
+    SCORE    eliza_confidence +5
+    ASSERT   MacroContext { pending_macro: "undo_last", needs_confirm: true, awaiting: "confirmation" }
+    CATEGORY "meta"
+    PRIORITY 80
+  }
+
+  PATTERN confirm_yes {
+    MATCH    "yes|confirm|go ahead|do it|proceed|execute|yes please|confirmed|affirmative"
+    RESPOND  "Confirmed. Executing now."
+    SCORE    eliza_confidence +10
+    ASSERT   MacroContext { confirmed: true, awaiting: "" }
+    CATEGORY "meta"
+    PRIORITY 70
+  }
+
+  PATTERN confirm_no {
+    MATCH    "no|cancel|stop|abort|never mind|forget it|don't|hold on"
+    RESPOND  "Cancelled. The workflow was not executed. What else can I help with?"
+    SCORE    eliza_confidence +5
+    ASSERT   MacroContext { pending_macro: "", needs_confirm: false, awaiting: "" }
+    CATEGORY "meta"
+    PRIORITY 70
+  }
+
+  RULE execute_confirmed_macro {
+    WHEN     MacroContext.confirmed == true
+    AND      MacroContext.pending_macro != ""
+    THEN     ExecuteWorkflow
+    SEVERITY info
+  }
+
+  RULE block_execution_pending_confirmation {
+    WHEN     MacroContext.needs_confirm == true
+    AND      MacroContext.confirmed == false
+    THEN     FLAG "await_confirmation"
+    SEVERITY warning
+    PRIORITY 100
+  }
+
+  STATE MacroFlow {
+    INITIAL  idle
+    idle        { TRANSITION awaiting_input  WHEN MacroContext.awaiting != "" }
+    idle        { TRANSITION confirming      WHEN MacroContext.needs_confirm == true }
+    awaiting_input { TRANSITION confirming   WHEN MacroContext.entity_id != "" }
+    confirming  { TRANSITION executing       WHEN MacroContext.confirmed == true }
+    executing   { TRANSITION idle            WHEN MacroContext.pending_macro == "" }
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// MODULE: AccessControl
+// Role-based permission enforcement. Every destructive or high-value macro
+// is guarded here. The operator cannot be talked past these rules.
+// ─────────────────────────────────────────────────────────────────────────────
+
+MODULE AccessControl {
+  DESCRIPTION "Role-based permission gates — no macro runs without authorization"
+
+  FACT UserContext {
+    operator_id:    string
+    role:           string = "staff"
+    department:     string = ""
+    is_manager:     bool   = false
+    is_controller:  bool   = false
+    is_admin:       bool   = false
+    is_cfo:         bool   = false
+    PERSISTENT
+  }
+
+  PATTERN who_am_i {
+    MATCH    "who am I|what is my role|my permissions|what can I approve|my access level"
+    RESPOND  "You are logged in as {{operator_name}} with role {{operator_role}}. Your authorization level determines which workflows I can execute for you."
+    SCORE    eliza_confidence +5
+    ASSERT   MacroContext { current_module: "access" }
+    CATEGORY "access"
+    PRIORITY 60
+  }
+
+  RULE require_manager_for_bulk_operations {
+    WHEN     MacroContext.pending_macro == "bulk_approve_invoices"
+    AND      UserContext.is_manager == false
+    THEN     FLAG "insufficient_permissions"
+    SEVERITY critical
+    PRIORITY 100
+  }
+
+  RULE require_controller_for_month_end {
+    WHEN     MacroContext.pending_macro == "month_end_close"
+    AND      UserContext.is_controller == false
+    THEN     FLAG "insufficient_permissions"
+    SEVERITY critical
+    PRIORITY 100
+  }
+
+  RULE require_cfo_for_journal_post {
+    WHEN     MacroContext.pending_macro == "post_journal_entry"
+    AND      UserContext.is_cfo == false
+    THEN     FLAG "insufficient_permissions"
+    SEVERITY critical
+    PRIORITY 100
+  }
+
+  RULE require_admin_for_tenant_ops {
+    WHEN     MacroContext.pending_macro == "onboard_new_tenant"
+    AND      UserContext.is_admin == false
+    THEN     FLAG "insufficient_permissions"
+    SEVERITY critical
+    PRIORITY 100
+  }
+
+  RULE confirm_before_month_end {
+    WHEN     MacroContext.pending_macro == "month_end_close"
+    AND      MacroContext.confirmed == false
+    THEN     FLAG "needs_confirm"
+    SEVERITY warning
+    PRIORITY 95
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// MODULE: CRMEliza
+// CRM workflows — deal management, customer onboarding, lead qualification.
+// "Close the Acme deal" executes a 4-step deterministic workflow.
+// ─────────────────────────────────────────────────────────────────────────────
+
+MODULE CRMEliza {
+  DESCRIPTION "CRM macro surface — deals, onboarding, leads, pipeline"
+  ACTIVATE_WHEN MacroContext.current_module == "crm"
+
+  FACT CRMContext {
+    opportunity_id: string
+    customer_id:    string
+    lead_id:        string
+    deal_value:     float  = 0.0
+    is_high_value:  bool   = false
+    PERSISTENT
+  }
+
+  SCORE crm_confidence {
+    INITIAL 60
+    MIN     0
+    MAX     100
+    THRESHOLD low  AT 30 THEN request_crm_clarification
+    THRESHOLD high AT 80 THEN execute_crm_workflow
+  }
+
+  PATTERN close_deal {
+    MATCH    "close the deal|mark won|deal is done|opportunity won|close the opportunity|we got the deal|convert to customer"
+    RESPOND  "Closing the deal. Which opportunity? Give me the company name or opportunity ID."
+    SCORE    crm_confidence +20
+    ASSERT   MacroContext { current_module: "crm", pending_macro: "close_won", awaiting: "opportunity_id" }
+    CATEGORY "crm"
+    PRIORITY 90
+  }
+
+  PATTERN onboard_customer {
+    MATCH    "onboard|new customer|add new customer|set up account|create account for|new client"
+    RESPOND  "Starting customer onboarding. What's the company name and primary contact email?"
+    SCORE    crm_confidence +20
+    ASSERT   MacroContext { current_module: "crm", pending_macro: "onboard_customer", awaiting: "company_name" }
+    CATEGORY "crm"
+    PRIORITY 90
+  }
+
+  PATTERN qualify_lead {
+    MATCH    "qualify the lead|mark lead qualified|lead is qualified|move lead to qualified|lead passed qualification"
+    RESPOND  "Qualifying the lead. Which lead? Give me the company name or lead ID."
+    SCORE    crm_confidence +15
+    ASSERT   MacroContext { current_module: "crm", pending_macro: "qualify_lead", awaiting: "lead_id" }
+    CATEGORY "crm"
+    PRIORITY 80
+  }
+
+  PATTERN disqualify_lead {
+    MATCH    "disqualify|not a fit|dead lead|close lead|mark lead dead|lead is cold"
+    RESPOND  "Disqualifying the lead. Which one, and what's the reason? (This updates the pipeline and notifies the team.)"
+    SCORE    crm_confidence +10
+    ASSERT   MacroContext { current_module: "crm", pending_macro: "disqualify_lead", awaiting: "lead_id" }
+    CATEGORY "crm"
+    PRIORITY 80
+  }
+
+  PATTERN schedule_followup {
+    MATCH    "schedule followup|follow up|set a reminder|remind me|create activity|log a call|book a meeting"
+    RESPOND  "Creating a followup activity. Which account, and when?"
+    SCORE    crm_confidence +15
+    ASSERT   MacroContext { current_module: "crm", pending_macro: "create_activity", awaiting: "account_id" }
+    CATEGORY "crm"
+    PRIORITY 75
+  }
+
+  RULE confirm_high_value_close {
+    WHEN     CRMContext.is_high_value == true
+    AND      MacroContext.confirmed == false
+    THEN     FLAG "needs_confirm"
+    SEVERITY warning
+    PRIORITY 90
+  }
+
+  RULE require_opportunity_id_for_close {
+    WHEN     MacroContext.pending_macro == "close_won"
+    AND      MacroContext.entity_id == ""
+    THEN     FLAG "await_entity_id"
+    SEVERITY info
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// MODULE: SalesEliza
+// Sales workflows — quotes, invoices, orders, approvals.
+// "Approve all invoices under $1k from approved vendors" = one sentence,
+// one PATTERN match, one bulk WORKFLOW execution.
+// ─────────────────────────────────────────────────────────────────────────────
+
+MODULE SalesEliza {
+  DESCRIPTION "Sales macro surface — quotes, invoices, orders, bulk approvals"
+  ACTIVATE_WHEN MacroContext.current_module == "sales"
+
+  FACT SalesContext {
+    quote_id:         string
+    invoice_id:       string
+    order_id:         string
+    approval_limit:   float  = 1000.0
+    pending_count:    number = 0
+    has_line_items:   bool   = false
+    PERSISTENT
+  }
+
+  SCORE sales_confidence {
+    INITIAL 60
+    MIN     0
+    MAX     100
+    THRESHOLD low  AT 30 THEN request_sales_clarification
+    THRESHOLD high AT 80 THEN execute_sales_workflow
+  }
+
+  PATTERN create_quote {
+    MATCH    "create a quote|new quote|draft a quote|quote for|generate a quote|start a quote"
+    RESPOND  "Creating a quote. Who is this for, and what products or services?"
+    SCORE    sales_confidence +20
+    ASSERT   MacroContext { current_module: "sales", pending_macro: "create_quote", awaiting: "customer_id" }
+    CATEGORY "sales"
+    PRIORITY 85
+  }
+
+  PATTERN convert_quote {
+    MATCH    "convert quote|quote to invoice|turn quote into invoice|quote accepted|customer approved quote"
+    RESPOND  "Converting quote to invoice. Which quote ID?"
+    SCORE    sales_confidence +20
+    ASSERT   MacroContext { current_module: "sales", pending_macro: "convert_quote_to_invoice", awaiting: "quote_id" }
+    CATEGORY "sales"
+    PRIORITY 85
+  }
+
+  PATTERN approve_invoice {
+    MATCH    "approve invoice|approve the invoice|sign off on invoice|invoice approved|mark invoice approved"
+    RESPOND  "Approving the invoice. Which one?"
+    SCORE    sales_confidence +20
+    ASSERT   MacroContext { current_module: "sales", pending_macro: "approve_invoice", awaiting: "invoice_id" }
+    CATEGORY "sales"
+    PRIORITY 90
+  }
+
+  PATTERN bulk_approve_invoices {
+    MATCH    "approve all invoices|bulk approve|approve everything|approve all pending|approve the queue"
+    RESPOND  "Running bulk invoice approval. This will approve all invoices within your authorization limit (${{approval_limit}}). Confirm?"
+    SCORE    sales_confidence +15
+    ASSERT   MacroContext { current_module: "sales", pending_macro: "bulk_approve_invoices", needs_confirm: true, awaiting: "confirmation" }
+    CATEGORY "sales"
+    PRIORITY 90
+  }
+
+  PATTERN send_invoice {
+    MATCH    "send invoice|email invoice|deliver invoice|send to customer|invoice the customer"
+    RESPOND  "Sending the invoice. Which invoice, and should I use the customer's email on file?"
+    SCORE    sales_confidence +15
+    ASSERT   MacroContext { current_module: "sales", pending_macro: "send_invoice", awaiting: "invoice_id" }
+    CATEGORY "sales"
+    PRIORITY 80
+  }
+
+  RULE require_manager_for_bulk_approve {
+    WHEN     MacroContext.pending_macro == "bulk_approve_invoices"
+    AND      UserContext.is_manager == false
+    THEN     FLAG "insufficient_permissions"
+    SEVERITY critical
+    PRIORITY 100
+  }
+
+  RULE confirm_large_invoice_approval {
+    WHEN     SalesContext.approval_limit > 10000.0
+    AND      MacroContext.confirmed == false
+    THEN     FLAG "needs_confirm"
+    SEVERITY warning
+    PRIORITY 85
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// MODULE: ServiceEliza
+// Service workflows — ticket triage, escalation, resolution, bulk operations.
+// "Escalate all critical tickets unassigned for 2+ hours" = one sentence.
+// ─────────────────────────────────────────────────────────────────────────────
+
+MODULE ServiceEliza {
+  DESCRIPTION "Service macro surface — ticket triage, escalation, resolution, SLA management"
+  ACTIVATE_WHEN MacroContext.current_module == "service"
+
+  FACT ServiceContext {
+    ticket_id:         string
+    customer_id:       string
+    sla_critical:      bool   = false
+    unassigned_count:  number = 0
+    PERSISTENT
+  }
+
+  SCORE service_confidence {
+    INITIAL 60
+    MIN     0
+    MAX     100
+    THRESHOLD low  AT 30 THEN request_service_clarification
+    THRESHOLD high AT 80 THEN execute_service_workflow
+  }
+
+  PATTERN create_ticket {
+    MATCH    "create ticket|new ticket|log a ticket|open a support request|create service request|log an issue"
+    RESPOND  "Creating a support ticket. Which customer, and what's the issue?"
+    SCORE    service_confidence +20
+    ASSERT   MacroContext { current_module: "service", pending_macro: "create_service_ticket", awaiting: "customer_id" }
+    CATEGORY "service"
+    PRIORITY 85
+  }
+
+  PATTERN escalate_ticket {
+    MATCH    "escalate ticket|escalate to tier 2|bump to tier 2|escalate the ticket|needs escalation|tier 2 issue"
+    RESPOND  "Escalating to Tier 2. Which ticket ID?"
+    SCORE    service_confidence +20
+    ASSERT   MacroContext { current_module: "service", pending_macro: "escalate_to_tier2", awaiting: "ticket_id" }
+    CATEGORY "service"
+    PRIORITY 90
+  }
+
+  PATTERN resolve_ticket {
+    MATCH    "resolve ticket|close ticket|mark resolved|issue fixed|ticket done|resolution sent"
+    RESPOND  "Resolving the ticket. Which ticket ID, and a brief resolution note?"
+    SCORE    service_confidence +20
+    ASSERT   MacroContext { current_module: "service", pending_macro: "resolve_ticket", awaiting: "ticket_id" }
+    CATEGORY "service"
+    PRIORITY 85
+  }
+
+  PATTERN escalate_critical_unassigned {
+    MATCH    "escalate critical|escalate unassigned|run SLA check|any critical tickets waiting|critical tickets overdue|SLA at risk"
+    RESPOND  "Scanning for critical unassigned tickets. I'll escalate all that have been waiting more than 2 hours. Proceed?"
+    SCORE    service_confidence +15
+    ASSERT   MacroContext { current_module: "service", pending_macro: "escalate_critical_unassigned", needs_confirm: true, awaiting: "confirmation" }
+    CATEGORY "service"
+    PRIORITY 95
+  }
+
+  PATTERN assign_ticket {
+    MATCH    "assign ticket|assign to|give ticket to|reassign|route the ticket|ticket should go to"
+    RESPOND  "Assigning the ticket. Which ticket, and which agent?"
+    SCORE    service_confidence +15
+    ASSERT   MacroContext { current_module: "service", pending_macro: "assign_ticket", awaiting: "ticket_id" }
+    CATEGORY "service"
+    PRIORITY 80
+  }
+
+  RULE immediate_escalate_sla_critical {
+    WHEN     ServiceContext.sla_critical == true
+    AND      MacroContext.confirmed == false
+    THEN     FLAG "needs_confirm"
+    SEVERITY critical
+    PRIORITY 100
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// MODULE: FinanceEliza
+// Finance workflows — month-end close, journal posting, AR reporting, PO approval.
+// These are the most consequential operations. Permission gates are strict.
+// Month-end close requires confirmation AND controller role.
+// ─────────────────────────────────────────────────────────────────────────────
+
+MODULE FinanceEliza {
+  DESCRIPTION "Finance macro surface — month-end close, journal entries, AR aging, PO approvals"
+  ACTIVATE_WHEN MacroContext.current_module == "finance"
+
+  FACT FinanceContext {
+    period:           string = ""
+    gl_account_id:    string
+    po_id:            string
+    report_type:      string = ""
+    is_period_locked: bool   = false
+    PERSISTENT
+  }
+
+  SCORE finance_confidence {
+    INITIAL 60
+    MIN     0
+    MAX     100
+    THRESHOLD low  AT 30 THEN request_finance_clarification
+    THRESHOLD high AT 80 THEN execute_finance_workflow
+  }
+
+  PATTERN month_end_close {
+    MATCH    "month end|monthly close|run the close|close the books|period close|end of month|lock the period"
+    RESPOND  "Running month-end close for {{period}}. This will lock the accounting period, post depreciation, reconcile GL accounts, and generate the trial balance. This cannot be undone. Controller authorization required. Confirm?"
+    SCORE    finance_confidence +10
+    ASSERT   MacroContext { current_module: "finance", pending_macro: "month_end_close", needs_confirm: true, awaiting: "confirmation" }
+    CATEGORY "finance"
+    PRIORITY 95
+  }
+
+  PATTERN approve_po {
+    MATCH    "approve PO|approve purchase order|sign off on PO|PO approved|authorize the PO"
+    RESPOND  "Approving the purchase order. Which PO number?"
+    SCORE    finance_confidence +20
+    ASSERT   MacroContext { current_module: "finance", pending_macro: "approve_purchase_order", awaiting: "po_id" }
+    CATEGORY "finance"
+    PRIORITY 90
+  }
+
+  PATTERN generate_ar_report {
+    MATCH    "AR aging|accounts receivable report|AR report|overdue receivables|aging report|who owes us money"
+    RESPOND  "Generating AR aging report. Which period — current month, last 30 days, or custom?"
+    SCORE    finance_confidence +20
+    ASSERT   MacroContext { current_module: "finance", pending_macro: "generate_ar_report", awaiting: "period" }
+    CATEGORY "finance"
+    PRIORITY 80
+  }
+
+  PATTERN post_journal_entry {
+    MATCH    "post journal|journal entry|post a journal|manual journal|GL entry|book an entry"
+    RESPOND  "Posting a journal entry requires CFO authorization. Can you provide the GL account, debit/credit amounts, and description?"
+    SCORE    finance_confidence +10
+    ASSERT   MacroContext { current_module: "finance", pending_macro: "post_journal_entry", needs_confirm: true, awaiting: "journal_details" }
+    CATEGORY "finance"
+    PRIORITY 90
+  }
+
+  PATTERN generate_cash_flow {
+    MATCH    "cash flow|cash position|runway|how much cash|cash forecast|cash report"
+    RESPOND  "Generating cash flow position report. Do you want current snapshot or 90-day forecast?"
+    SCORE    finance_confidence +20
+    ASSERT   MacroContext { current_module: "finance", pending_macro: "generate_cash_flow_report", awaiting: "report_scope" }
+    CATEGORY "finance"
+    PRIORITY 75
+  }
+
+  RULE require_controller_for_close {
+    WHEN     MacroContext.pending_macro == "month_end_close"
+    AND      UserContext.is_controller == false
+    THEN     FLAG "insufficient_permissions"
+    SEVERITY critical
+    PRIORITY 100
+  }
+
+  RULE require_cfo_for_journal {
+    WHEN     MacroContext.pending_macro == "post_journal_entry"
+    AND      UserContext.is_cfo == false
+    THEN     FLAG "insufficient_permissions"
+    SEVERITY critical
+    PRIORITY 100
+  }
+
+  RULE block_close_if_period_locked {
+    WHEN     MacroContext.pending_macro == "month_end_close"
+    AND      FinanceContext.is_period_locked == true
+    THEN     FLAG "period_already_locked"
+    SEVERITY warning
+    PRIORITY 95
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// WORKFLOWS — the deterministic multi-step sequences Eliza executes.
+// Each is a named recipe. PATTERN matching identifies which one to run.
+// RULE guards check permission and confirmation before the first step fires.
+// ─────────────────────────────────────────────────────────────────────────────
+
+WORKFLOW onboard_customer {
+  IDEMPOTENT false
+  STEP create_customer   { ACTION ERPCreateCustomer    ON_FAIL abort }
+  STEP create_contact    { ACTION ERPCreateContact     ON_FAIL skip  }
+  STEP create_opportunity { ACTION ERPCreateOpportunity ON_FAIL skip }
+  STEP create_project    { ACTION ERPCreateProject     ON_FAIL skip  }
+  STEP send_welcome      { ACTION SendWelcomeEmail     ON_FAIL skip  }
+}
+
+WORKFLOW close_won {
+  IDEMPOTENT false
+  STEP transition_stage  { ACTION ERPTransitionOpportunityStage  ON_FAIL abort }
+  STEP create_invoice    { ACTION ERPCreateInvoice               ON_FAIL abort }
+  STEP create_project    { ACTION ERPCreateProject               ON_FAIL skip  }
+  STEP notify_team       { ACTION NotifyTeamSlack                ON_FAIL skip  }
+}
+
+WORKFLOW qualify_lead {
+  IDEMPOTENT true
+  STEP update_lead_stage { ACTION ERPTransitionLeadStage         ON_FAIL abort }
+  STEP create_opportunity { ACTION ERPCreateOpportunity          ON_FAIL skip  }
+  STEP assign_sales_rep  { ACTION ERPAssignSalesRep              ON_FAIL skip  }
+}
+
+WORKFLOW disqualify_lead {
+  IDEMPOTENT true
+  STEP close_lead        { ACTION ERPCloseLead                   ON_FAIL abort }
+  STEP log_reason        { ACTION ERPLogDisqualificationReason   ON_FAIL skip  }
+  STEP notify_team       { ACTION NotifyTeamSlack                ON_FAIL skip  }
+}
+
+WORKFLOW create_activity {
+  IDEMPOTENT false
+  STEP create_activity   { ACTION ERPCreateActivity              ON_FAIL abort }
+  STEP set_reminder      { ACTION SetOperatorReminder            ON_FAIL skip  }
+}
+
+WORKFLOW create_quote {
+  IDEMPOTENT false
+  STEP create_quote      { ACTION ERPCreateQuote                 ON_FAIL abort }
+  STEP add_line_items    { ACTION ERPAddQuoteLineItems           ON_FAIL skip  }
+  STEP send_for_review   { ACTION ERPTransitionQuoteStage        ON_FAIL skip  }
+}
+
+WORKFLOW convert_quote_to_invoice {
+  IDEMPOTENT false
+  STEP convert_quote     { ACTION ERPConvertQuoteToInvoice       ON_FAIL abort }
+  STEP notify_customer   { ACTION SendInvoiceEmail               ON_FAIL skip  }
+}
+
+WORKFLOW approve_invoice {
+  IDEMPOTENT true
+  STEP approve           { ACTION ERPApproveInvoice              ON_FAIL abort }
+  STEP notify_requester  { ACTION NotifyInvoiceApproved          ON_FAIL skip  }
+}
+
+WORKFLOW bulk_approve_invoices {
+  IDEMPOTENT true
+  STEP fetch_pending     { ACTION ERPFetchPendingInvoices        ON_FAIL abort }
+  STEP bulk_approve      { ACTION ERPBulkApproveInvoices         ON_FAIL abort }
+  STEP notify_finance    { ACTION NotifyFinanceTeam              ON_FAIL skip  }
+}
+
+WORKFLOW send_invoice {
+  IDEMPOTENT true
+  STEP send_email        { ACTION SendInvoiceEmail               ON_FAIL abort }
+  STEP log_activity      { ACTION ERPLogActivity                 ON_FAIL skip  }
+}
+
+WORKFLOW create_service_ticket {
+  IDEMPOTENT false
+  STEP create_ticket     { ACTION ERPCreateServiceRequest        ON_FAIL abort }
+  STEP auto_assign       { ACTION ERPAutoAssignTicket            ON_FAIL skip  }
+  STEP notify_team       { ACTION NotifySupportTeam              ON_FAIL skip  }
+}
+
+WORKFLOW escalate_to_tier2 {
+  IDEMPOTENT true
+  STEP escalate          { ACTION ERPEscalateToTier2             ON_FAIL abort }
+  STEP notify_tier2      { ACTION NotifyTier2Agent               ON_FAIL skip  }
+  STEP update_sla_clock  { ACTION ERPResetSLAClock               ON_FAIL skip  }
+}
+
+WORKFLOW resolve_ticket {
+  IDEMPOTENT true
+  STEP resolve           { ACTION ERPResolveServiceTicket        ON_FAIL abort }
+  STEP send_resolution   { ACTION SendResolutionEmail            ON_FAIL skip  }
+  STEP log_closure       { ACTION ERPLogTicketClosure            ON_FAIL skip  }
+}
+
+WORKFLOW escalate_critical_unassigned {
+  IDEMPOTENT true
+  STEP fetch_critical    { ACTION ERPFetchCriticalUnassigned     ON_FAIL abort }
+  STEP bulk_escalate     { ACTION ERPBulkEscalate                ON_FAIL abort }
+  STEP alert_manager     { ACTION NotifyServiceManager           ON_FAIL skip  }
+}
+
+WORKFLOW assign_ticket {
+  IDEMPOTENT true
+  STEP assign            { ACTION ERPAssignTicket                ON_FAIL abort }
+  STEP notify_agent      { ACTION NotifyAssignedAgent            ON_FAIL skip  }
+}
+
+WORKFLOW month_end_close {
+  IDEMPOTENT false
+  STEP lock_period       { ACTION ERPLockAccountingPeriod        ON_FAIL abort }
+  STEP post_depreciation { ACTION ERPPostDepreciation            ON_FAIL abort }
+  STEP reconcile_gl      { ACTION ERPReconcileGLAccounts         ON_FAIL abort }
+  STEP generate_tb       { ACTION ERPGenerateTrialBalance        ON_FAIL skip  }
+  STEP notify_controller { ACTION NotifyController               ON_FAIL skip  }
+}
+
+WORKFLOW approve_purchase_order {
+  IDEMPOTENT true
+  STEP approve_po        { ACTION ERPApprovePurchaseOrder        ON_FAIL abort }
+  STEP notify_vendor     { ACTION NotifyVendorApproval           ON_FAIL skip  }
+  STEP notify_requester  { ACTION NotifyPOApproved               ON_FAIL skip  }
+}
+
+WORKFLOW generate_ar_report {
+  IDEMPOTENT true
+  STEP generate_report   { ACTION ERPGenerateARAgingReport       ON_FAIL abort }
+  STEP deliver_report    { ACTION DeliverReportToOperator        ON_FAIL skip  }
+}
+
+WORKFLOW post_journal_entry {
+  IDEMPOTENT false
+  STEP validate_entry    { ACTION ERPValidateJournalEntry        ON_FAIL abort }
+  STEP post_entry        { ACTION ERPPostJournalEntry            ON_FAIL abort }
+  STEP notify_cfo        { ACTION NotifyCFO                      ON_FAIL skip  }
+}
+
+WORKFLOW generate_cash_flow_report {
+  IDEMPOTENT true
+  STEP generate_report   { ACTION ERPGenerateCashFlowReport      ON_FAIL abort }
+  STEP deliver_report    { ACTION DeliverReportToOperator        ON_FAIL skip  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// TELEMETRY — macro executions feed OIE
+// The OIE reasons over which workflows are running, who is running them,
+// and whether the patterns match expected organizational behavior.
+// ─────────────────────────────────────────────────────────────────────────────
+
+PACKET MacroPacket {
+  execution_id:   string
+  tenant_id:      string
+  operator_id:    string
+  operator_role:  string
+  macro_name:     string
+  trigger_phrase: string
+  status:         string
+  step_count:     number
+  timestamp:      datetime
+  SIGNATURES     true
+  TTL            365
+}
+
+CHANNEL eliza_telemetry_out {
+  SOURCE      accelerando_eliza
+  DESTINATION accelerando_oie
+  TYPE        MacroPacket
+  CAPACITY    10000
+  PERSISTENT  true
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// ACTIONS
+// ─────────────────────────────────────────────────────────────────────────────
+
+ACTION StartOperatorSession {
+  INPUT  operator_id: string, operator_role: string, tenant_id: string
+  OUTPUT session_id: string
+  IMPL   "create OperatorSession, initialize MacroContext and UserContext FACTs with role data, return session ID"
+}
+
+ACTION ProcessOperatorMessage {
+  INPUT  session_id: string, message: string
+  OUTPUT response: string, matched_pattern: string, pending_macro: string
+  IMPL   "run PATTERN engine against normalized operator input, evaluate RULE engine for permission gates and confirmation requirements, return response — either workflow confirmation prompt or clarifying question or immediate dispatch"
+}
+
+ACTION ExecuteWorkflow {
+  INPUT  session_id: string, macro_name: string, entity_id: string
+  OUTPUT execution_id: string, steps_completed: number, result: string
+  IMPL   "look up WORKFLOW by macro_name, create MacroExecution record, execute each STEP sequentially logging to MacroStepLog, emit MacroPacket on completion, update MacroContext.last_macro"
+  EMIT   macro_executed {
+    source: string, session_id: string, macro_name: string, operator_id: string, steps: number, tenant_id: string
+  }
+}
+
+ACTION ERPCreateCustomer {
+  INPUT  name: string, email: string, tier: string, tenant_id: string
+  OUTPUT customer_id: string
+  IMPL   "POST to accelerando_erp /api/customers with operator JWT, return created customer ID"
+}
+
+ACTION ERPCreateContact {
+  INPUT  customer_id: string, name: string, email: string, tenant_id: string
+  OUTPUT contact_id: string
+  IMPL   "POST to accelerando_erp /api/contacts with operator JWT"
+}
+
+ACTION ERPCreateOpportunity {
+  INPUT  customer_id: string, name: string, stage: string, tenant_id: string
+  OUTPUT opportunity_id: string
+  IMPL   "POST to accelerando_erp /api/opportunities with operator JWT"
+}
+
+ACTION ERPCreateProject {
+  INPUT  customer_id: string, opportunity_id: string, name: string, tenant_id: string
+  OUTPUT project_id: string
+  IMPL   "POST to accelerando_erp /api/projects with operator JWT"
+}
+
+ACTION ERPTransitionOpportunityStage {
+  INPUT  opportunity_id: string, target_stage: string, tenant_id: string
+  OUTPUT success: bool
+  IMPL   "PATCH to accelerando_erp /api/opportunities/{id}/stage, validates STAGES transition"
+}
+
+ACTION ERPTransitionLeadStage {
+  INPUT  lead_id: string, target_stage: string, tenant_id: string
+  OUTPUT success: bool
+  IMPL   "PATCH to accelerando_erp /api/leads/{id}/stage, validates STAGES transition"
+}
+
+ACTION ERPCreateInvoice {
+  INPUT  customer_id: string, opportunity_id: string, tenant_id: string
+  OUTPUT invoice_id: string
+  IMPL   "POST to accelerando_erp /api/invoices, auto-populates line items from opportunity"
+}
+
+ACTION ERPApproveInvoice {
+  INPUT  invoice_id: string, approver_id: string, tenant_id: string
+  OUTPUT success: bool
+  IMPL   "POST to accelerando_erp /api/invoices/{id}/approve with operator JWT and approver record"
+}
+
+ACTION ERPBulkApproveInvoices {
+  INPUT  approval_limit: float, approver_id: string, tenant_id: string
+  OUTPUT approved_count: number, total_value: float
+  IMPL   "POST to accelerando_erp /api/invoices/bulk-approve, filters by status=pending and amount <= approval_limit"
+}
+
+ACTION ERPCreateQuote {
+  INPUT  customer_id: string, name: string, tenant_id: string
+  OUTPUT quote_id: string
+  IMPL   "POST to accelerando_erp /api/quotes with operator JWT"
+}
+
+ACTION ERPConvertQuoteToInvoice {
+  INPUT  quote_id: string, tenant_id: string
+  OUTPUT invoice_id: string
+  IMPL   "POST to accelerando_erp /api/quotes/{id}/convert, validates quote status"
+}
+
+ACTION ERPCreateServiceRequest {
+  INPUT  customer_id: string, description: string, priority: string, tenant_id: string
+  OUTPUT ticket_id: string
+  IMPL   "POST to accelerando_erp /api/service-tickets with operator JWT"
+}
+
+ACTION ERPEscalateToTier2 {
+  INPUT  ticket_id: string, operator_id: string, tenant_id: string
+  OUTPUT success: bool
+  IMPL   "POST to accelerando_erp /api/service-tickets/{id}/escalate"
+}
+
+ACTION ERPResolveServiceTicket {
+  INPUT  ticket_id: string, resolution: string, operator_id: string, tenant_id: string
+  OUTPUT success: bool
+  IMPL   "POST to accelerando_erp /api/service-tickets/{id}/resolve"
+}
+
+ACTION ERPFetchCriticalUnassigned {
+  INPUT  hours_unassigned: number, tenant_id: string
+  OUTPUT ticket_ids: string, count: number
+  IMPL   "GET from accelerando_erp /api/service-tickets?status=open&priority=critical&unassigned_hours_gt={hours}"
+}
+
+ACTION ERPBulkEscalate {
+  INPUT  ticket_ids: string, operator_id: string, tenant_id: string
+  OUTPUT escalated_count: number
+  IMPL   "POST to accelerando_erp /api/service-tickets/bulk-escalate with list of IDs"
+}
+
+ACTION ERPLockAccountingPeriod {
+  INPUT  period: string, operator_id: string, tenant_id: string
+  OUTPUT success: bool
+  IMPL   "POST to accelerando_erp /api/accounting/lock-period, requires controller role in JWT"
+}
+
+ACTION ERPPostJournalEntry {
+  INPUT  gl_account_id: string, debit: float, credit: float, description: string, tenant_id: string
+  OUTPUT entry_id: string
+  IMPL   "POST to accelerando_erp /api/journal-entries, requires CFO role in JWT"
+}
+
+ACTION ERPGenerateARAgingReport {
+  INPUT  period: string, tenant_id: string
+  OUTPUT report_url: string, overdue_total: float
+  IMPL   "POST to accelerando_erp /api/reports/ar-aging, returns signed download URL"
+}
+
+ACTION ERPGenerateCashFlowReport {
+  INPUT  scope: string, tenant_id: string
+  OUTPUT report_url: string, runway_days: number
+  IMPL   "POST to accelerando_erp /api/reports/cash-flow, returns position and forecast"
+}
+
+ACTION ERPApprovePurchaseOrder {
+  INPUT  po_id: string, approver_id: string, tenant_id: string
+  OUTPUT success: bool
+  IMPL   "POST to accelerando_erp /api/purchase-orders/{id}/approve"
+}
+
+ACTION SendWelcomeEmail {
+  INPUT  customer_id: string, contact_email: string, tenant_id: string
+  OUTPUT success: bool
+  IMPL   "send templated welcome email via configured SMTP, log to MessageLog"
+}
+
+ACTION NotifyTeamSlack {
+  INPUT  message: string, channel: string, tenant_id: string
+  OUTPUT success: bool
+  IMPL   "POST to configured Slack webhook with message"
+}
+
+ACTION NotifyController {
+  INPUT  period: string, summary: string, tenant_id: string
+  OUTPUT success: bool
+  IMPL   "send month-end completion notification to configured controller email"
+}
+
+ACTION UndoLastMacro {
+  INPUT  session_id: string, execution_id: string
+  OUTPUT steps_reversed: number, irreversible_steps: string
+  IMPL   "look up MacroExecution and MacroStepLog, attempt to reverse completed steps in reverse order, return list of steps that could not be undone (sent emails, posted journals)"
+}
+
+ACTION ExplainLastAction {
+  INPUT  session_id: string, execution_id: string
+  OUTPUT explanation: string
+  AI     "Given this macro execution record — which workflow ran, which steps completed, what each step did — explain in plain language what just happened in the system and why each step was necessary."
+}
+
+ACTION GenerateEliza {
+  INPUT  sop_documents: string, role_definitions: string, workflow_catalog: string
+  OUTPUT patterns_generated: number, workflows_generated: number, agi_preview: string
+  AI     "You are an Agicore DSL compiler. Analyze the provided standard operating procedures, role definitions, and workflow catalog. For each SOP identify the natural language trigger phrases an operator would use. Generate PATTERN declarations mapping those phrases to workflow names. Generate WORKFLOW declarations with sequential STEP blocks for each SOP workflow. Generate RULE declarations for each permission constraint and confirmation requirement. Output valid .agi MODULE and WORKFLOW blocks. Return counts and full agi_preview text."
+}
+
+ACTION AuditMacroUsage {
+  INPUT  days_back: number, tenant_id: string
+  OUTPUT report: string
+  AI     "Analyze macro execution history for the past N days. Identify which workflows are used most frequently, which operators are most active, whether any workflows are consistently failing at specific steps, and whether the permission gates are calibrated correctly. Return a structured report with recommendations."
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// VIEWS
+// ─────────────────────────────────────────────────────────────────────────────
+
+VIEW ElizaTerminal {
+  ENTITY  OperatorSession
+  LAYOUT  dashboard
+  ACTIONS create
+}
+
+VIEW MacroHistory {
+  ENTITY  MacroExecution
+  LAYOUT  table
+  ACTIONS read
+}
+
+VIEW StepAuditLog {
+  ENTITY  MacroStepLog
+  LAYOUT  table
+  ACTIONS read
+}
+
+VIEW PermissionMatrix {
+  ENTITY  OperatorSession
+  LAYOUT  table
+  ACTIONS read
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// PREFERENCES
+// ─────────────────────────────────────────────────────────────────────────────
+
+PREFERENCE high_value_deal_threshold {
+  TYPE    number
+  DEFAULT 50000
+  LABEL   "Deal value requiring confirmation before close workflow (USD)"
+}
+
+PREFERENCE bulk_approval_limit {
+  TYPE    number
+  DEFAULT 1000
+  LABEL   "Maximum invoice amount eligible for bulk approval (USD)"
+}
+
+PREFERENCE sla_escalation_hours {
+  TYPE    number
+  DEFAULT 2
+  LABEL   "Hours a critical ticket can be unassigned before auto-escalation"
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// SEED — demo macro executions showing the system working
+// ─────────────────────────────────────────────────────────────────────────────
+
+SEED OperatorSession {
+  operator_id:   "ops-001"
+  operator_name: "Sarah Kim"
+  operator_role: "sales_manager"
+  tenant_id:     "acme"
+  status:        "active"
+  macro_count:   14
+}
+
+SEED OperatorSession {
+  operator_id:   "ops-002"
+  operator_name: "David Park"
+  operator_role: "controller"
+  tenant_id:     "acme"
+  status:        "active"
+  macro_count:   3
+}
+
+SEED MacroExecution {
+  session_id:     "ops-001"
+  macro_name:     "close_won"
+  operator_id:    "ops-001"
+  trigger_phrase: "close the Brightline deal"
+  status:         "completed"
+  step_count:     4
+  tenant_id:      "acme"
+}
+
+SEED MacroExecution {
+  session_id:     "ops-002"
+  macro_name:     "month_end_close"
+  operator_id:    "ops-002"
+  trigger_phrase: "run the month-end close"
+  status:         "completed"
+  step_count:     5
+  tenant_id:      "acme"
+}
+
+SEED MacroExecution {
+  session_id:     "ops-001"
+  macro_name:     "bulk_approve_invoices"
+  operator_id:    "ops-001"
+  trigger_phrase: "approve all invoices under a thousand dollars"
+  status:         "completed"
+  step_count:     3
+  tenant_id:      "acme"
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// TESTS
+// ─────────────────────────────────────────────────────────────────────────────
+
+TEST operator_session_create {
+  GIVEN   OperatorSession { operator_id: "test-001", operator_name: "Test User", operator_role: "staff", tenant_id: "test" }
+  EXPECT  create -> operator_id IS NOT NULL
+  EXPECT  create -> status == "active"
+  EXPECT  create -> macro_count == 0
+}
+
+TEST macro_execution_create {
+  GIVEN   MacroExecution { session_id: "test-001", macro_name: "close_won", operator_id: "test-001", trigger_phrase: "close the deal", tenant_id: "test" }
+  EXPECT  create -> id IS NOT NULL
+  EXPECT  create -> status == "pending"
+}
+
+TEST step_log_create {
+  GIVEN   MacroStepLog { execution_id: "exec-001", step_name: "create_invoice", action_name: "ERPCreateInvoice", tenant_id: "test" }
+  EXPECT  create -> id IS NOT NULL
+  EXPECT  create -> status == "pending"
+}
