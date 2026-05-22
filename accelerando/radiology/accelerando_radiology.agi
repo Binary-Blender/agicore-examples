@@ -141,7 +141,7 @@ ENTITY PeerReview {
       discrepancy_type:     string   // "major" | "minor" | "clinically_significant"
       discrepancy_description: string
       // action
-      action_required:      boolean Default false
+      action_required:      boolean DEFAULT false
       action_description:   string
     }
     STAGES [assigned, in_progress, completed, discrepancy_escalated]
@@ -164,7 +164,7 @@ ENTITY DoseRecord {
       // reference levels (ACR / DRL)
       dlp_drl:         number              // Diagnostic Reference Level for this exam
       ctdi_drl:        number
-      exceeds_drl:     boolean Default false
+      exceeds_drl:     boolean DEFAULT false
       drl_multiple:    number              // how many times the DRL (e.g., 1.5 = 50% above)
       // cumulative patient dose
       cumulative_effective_dose_msv: number

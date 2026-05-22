@@ -197,7 +197,7 @@ ENTITY HealthGoal {
       target_date:     string
       // tracking
       readings:        string   // JSON: [{date, value}]
-      on_track:        boolean  Default false
+      on_track:        boolean  DEFAULT false
       // provider visibility
       shared_with_provider: boolean DEFAULT true
     }

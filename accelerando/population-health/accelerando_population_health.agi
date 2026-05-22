@@ -66,7 +66,7 @@ ENTITY DiseaseRegistry {
       last_egfr:       number             // for CKD
       last_egfr_date:  string
       // control status
-      controlled:      boolean  Default false
+      controlled:      boolean  DEFAULT false
       last_control_assessment: string
       // care management
       care_manager_id: string
@@ -112,7 +112,7 @@ ENTITY RiskScore {
       // contributing factors
       top_risk_factors: string            // JSON array: [{factor, weight}]
       // care management
-      care_management_enrolled: boolean Default false
+      care_management_enrolled: boolean DEFAULT false
       care_manager_id:  string
     }
     CRUD [create, read, list]
@@ -136,7 +136,7 @@ ENTITY OutreachCampaign {
       messages_sent:     number DEFAULT 0
       responses:         number DEFAULT 0
       appointments_scheduled: number DEFAULT 0
-      gaps_closed:       number Default 0
+      gaps_closed:       number DEFAULT 0
       // status
       active:            boolean DEFAULT true
     }
@@ -161,9 +161,9 @@ ENTITY CareManagementEnrollment {
       contact_frequency: string           // "weekly", "biweekly", "monthly"
       // outcomes
       ed_visits_ytd:   number DEFAULT 0
-      hospital_admits_ytd: number Default 0
-      goals_met:       number Default 0
-      total_goals:     number Default 0
+      hospital_admits_ytd: number DEFAULT 0
+      goals_met:       number DEFAULT 0
+      total_goals:     number DEFAULT 0
       // status
       active:          boolean DEFAULT true
       discharge_date:  string
@@ -186,7 +186,7 @@ ENTITY HCCCode {
       raf_weight:      number   REQUIRED
       // recapture status (HCC must be documented every plan year)
       last_capture_year: number REQUIRED
-      recapture_due:     boolean Default false
+      recapture_due:     boolean DEFAULT false
       recapture_encounter_id: string
     }
     CRUD [create, read, list, edit]

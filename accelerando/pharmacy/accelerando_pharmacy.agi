@@ -40,7 +40,7 @@ ENTITY Prescription {
       formulary_status: string             // "covered", "pa_required", "not_covered", "step_required"
       prior_auth_required: boolean DEFAULT false
       // PDMP
-      pdmp_checked:    boolean Default false
+      pdmp_checked:    boolean DEFAULT false
       pdmp_check_date: string
       pdmp_risk_level: string              // "low", "moderate", "high"
       // status
@@ -67,8 +67,8 @@ ENTITY DispensedMedication {
       pharmacist_verified: boolean DEFAULT false
       pharmacist_id:   string
       // counseling
-      counseling_offered: boolean Default false
-      counseling_accepted: boolean Default false
+      counseling_offered: boolean DEFAULT false
+      counseling_accepted: boolean DEFAULT false
     }
     CRUD [create, read, list]
   }
@@ -117,7 +117,7 @@ ENTITY PriorAuthorization {
       expiration_date: string
       denial_reason:   string
       // appeal
-      appealed:        boolean  Default false
+      appealed:        boolean  DEFAULT false
       appeal_date:     string
       appeal_outcome:  string
     }
@@ -137,10 +137,10 @@ ENTITY PDMPQuery {
       prescribers_count:          number   DEFAULT 0
       dispensers_count:           number   DEFAULT 0
       // risk flags
-      multiple_prescribers:      boolean  Default false  // doctor shopping
-      multiple_pharmacies:       boolean  Default false
-      high_mme_detected:         boolean  Default false  // morphine milligram equivalents
-      concurrent_benzodiazepine: boolean  Default false  // opioid + benzo = high risk
+      multiple_prescribers:      boolean  DEFAULT false  // doctor shopping
+      multiple_pharmacies:       boolean  DEFAULT false
+      high_mme_detected:         boolean  DEFAULT false  // morphine milligram equivalents
+      concurrent_benzodiazepine: boolean  DEFAULT false  // opioid + benzo = high risk
       // raw response
       response_summary: string  // JSON
       risk_level:       string  DEFAULT "low"
@@ -162,7 +162,7 @@ ENTITY DrugInteractionRecord {
       description:     string   REQUIRED
       clinical_effect: string
       // override
-      overridden:      boolean  Default false
+      overridden:      boolean  DEFAULT false
       override_reason: string
       overriding_provider: string
       overridden_at:   string
@@ -178,7 +178,7 @@ ENTITY RefillRequest {
       requested_at:    string   REQUIRED
       requested_via:   string   REQUIRED   // "portal", "phone", "app", "pharmacy"
       // clinical check
-      refill_too_soon:    boolean Default false
+      refill_too_soon:    boolean DEFAULT false
       days_remaining_est: number
       // approval
       approved_by:     string
@@ -207,7 +207,7 @@ ENTITY PharmacyBenefit {
       deductible_amount:    number
       deductible_met:       number  DEFAULT 0
       oop_max:              number
-      oop_met:              number  Default 0
+      oop_met:              number  DEFAULT 0
     }
     CRUD [create, read, list, edit]
   }
