@@ -1,0 +1,217 @@
+// content_pipeline.agi
+// AI Content Factory with Quality Gates
+// Demonstrates PIPELINE, QC (SPC), VAULT, and orchestration primitives
+// Inspired by the NovaSyn Orchestrator's BFS parallel execution engine
+
+APP content_pipeline {
+  TITLE   "Content Pipeline"
+  WINDOW  1200x800 frameless
+  DB      pipeline.db
+  PORT    5190
+  THEME   dark
+}
+
+AI_SERVICE {
+  PROVIDERS   anthropic, openai
+  KEYS_FILE   "%APPDATA%/NovaSyn/api-keys.json"
+  DEFAULT     anthropic
+  STREAMING   true
+}
+
+// --- Shared Asset Vault ---
+
+VAULT {
+  PATH         "%APPDATA%/NovaSyn/vault.db"
+  ASSET_TYPES  text, image, json, markdown, prompt_template
+  PROVENANCE   true
+  TAGS         true
+}
+
+// --- Quality Control (SPC Progressive Sampling) ---
+
+QC content_quality {
+  YOUNG_THRESHOLD     30
+  MATURING_THRESHOLD  75
+  YOUNG_PASS_RATE     0.85
+  MATURE_PASS_RATE    0.95
+  MATURING_SAMPLE     0.40
+  MATURE_SAMPLE       0.05
+}
+
+QC image_quality {
+  YOUNG_THRESHOLD     50
+  MATURING_THRESHOLD  100
+  YOUNG_PASS_RATE     0.80
+  MATURE_PASS_RATE    0.95
+  MATURING_SAMPLE     0.50
+  MATURE_SAMPLE       0.03
+}
+
+// --- Content Generation Pipeline ---
+
+PIPELINE ArticleFactory {
+  DESCRIPTION "Multi-model content generation with parallel research and quality gates"
+
+  ROW research {
+    topic_research: ai_action {
+      MODEL       "anthropic"
+      PROMPT      "Research the topic: {{input}}. Provide key facts, statistics, and expert perspectives."
+    }
+    competitor_analysis: ai_action {
+      MODEL       "openai"
+      PROMPT      "Analyze top 5 existing articles on: {{input}}. Identify content gaps and unique angles."
+    }
+    audience_profile: ai_action {
+      MODEL       "anthropic"
+      PROMPT      "Define the target audience for content about: {{input}}. Include demographics, pain points, and preferred content format."
+    }
+  }
+
+  ROW synthesis {
+    content_brief: ai_action {
+      MODEL       "anthropic"
+      PROMPT      "Create a detailed content brief from:\n\nResearch:\n{{research_output}}\n\nCompetitor Gaps:\n{{competitor_output}}\n\nAudience:\n{{audience_output}}\n\nOutput: title, outline, key points, tone, word count target."
+    }
+  }
+
+  ROW draft {
+    article_draft: ai_action {
+      MODEL       "anthropic"
+      PROMPT      "Write a complete article based on this brief:\n\n{{brief_output}}\n\nWrite in markdown format. Include introduction, body sections, and conclusion."
+    }
+  }
+
+  ROW quality {
+    content_review: qc_checkpoint {
+      DESCRIPTION "Review article draft for accuracy, tone, and completeness"
+      SPC         "content_quality"
+    }
+  }
+
+  ROW publish {
+    save_article: vault_save {
+      TAGS        "article", "published"
+      OUTPUT_TYPE "markdown"
+    }
+  }
+
+  CONNECTION topic_research.output -> content_brief.research_output
+  CONNECTION competitor_analysis.output -> content_brief.competitor_output
+  CONNECTION audience_profile.output -> content_brief.audience_output
+  CONNECTION content_brief.output -> article_draft.brief_output
+  CONNECTION article_draft.output -> content_review.input
+  CONNECTION content_review.output -> save_article.input
+}
+
+// --- Image Generation Pipeline ---
+
+PIPELINE ImageFactory {
+  DESCRIPTION "AI image generation with multi-provider parallel execution and QC"
+
+  ROW generate {
+    primary_image: ai_action {
+      MODEL       "openai"
+      PROMPT      "Generate a professional image for: {{input}}"
+    }
+    alternate_style: ai_action {
+      MODEL       "anthropic"
+      PROMPT      "Generate an alternate style image for: {{input}}"
+    }
+  }
+
+  ROW quality {
+    image_review: qc_checkpoint {
+      DESCRIPTION "Review generated images for quality, brand alignment, and appropriateness"
+      SPC         "image_quality"
+    }
+  }
+
+  ROW save {
+    save_images: vault_save {
+      TAGS        "image", "generated"
+      OUTPUT_TYPE "image"
+    }
+  }
+
+  CONNECTION primary_image.output -> image_review.input
+  CONNECTION alternate_style.output -> image_review.input
+  CONNECTION image_review.output -> save_images.input
+}
+
+// --- Data Models ---
+
+ENTITY PipelineRun {
+  pipeline_name: string REQUIRED
+  status: string = "pending"
+  input_text: string
+  output_text: string
+  current_level: number = 0
+  error: string
+  TIMESTAMPS
+}
+
+ENTITY StepResult {
+  module_name: string REQUIRED
+  level: number REQUIRED
+  status: string = "pending"
+  output: json
+  latency_ms: number
+  qc_decision: string
+  BELONGS_TO PipelineRun
+  TIMESTAMPS
+}
+
+ENTITY VaultItem {
+  title: string REQUIRED
+  content: string REQUIRED
+  item_type: string REQUIRED
+  source_pipeline: string
+  tags: json = []
+  TIMESTAMPS
+}
+
+// --- Views ---
+
+VIEW PipelineRunner {
+  LAYOUT   custom
+  SIDEBAR  icon: Play
+  TITLE    "Run Pipeline"
+}
+
+VIEW RunHistory {
+  ENTITY   PipelineRun
+  LAYOUT   split
+  ACTIONS  create, delete
+  SIDEBAR  icon: History
+  FIELDS   pipeline_name, status, current_level, created_at
+}
+
+VIEW QualityDashboard {
+  LAYOUT   custom
+  SIDEBAR  icon: Shield
+  TITLE    "Quality Control"
+}
+
+VIEW VaultBrowser {
+  ENTITY   VaultItem
+  LAYOUT   table
+  ACTIONS  create, delete
+  SIDEBAR  icon: Database
+  FIELDS   title, item_type, source_pipeline, created_at
+}
+
+// --- Tests ---
+
+TEST pipeline_run_crud {
+  GIVEN PipelineRun { pipeline_name: "ArticleFactory", status: "running", input_text: "AI in manufacturing" }
+  EXPECT create -> id IS NOT NULL
+  EXPECT create -> status == "running"
+  EXPECT create -> pipeline_name == "ArticleFactory"
+}
+
+TEST step_result_tracking {
+  GIVEN PipelineRun { pipeline_name: "ArticleFactory", status: "running" }
+  GIVEN StepResult { module_name: "topic_research", level: 0, status: "completed", latency_ms: 3500, BELONGS_TO PipelineRun }
+  EXPECT create -> module_name == "topic_research"
+  EXPECT create -> latency_ms == 3500
+}

@@ -1,0 +1,1559 @@
+APP accelerando_billing {
+  TITLE "Accelerando Medical Billing"
+  DB    accelerando_billing
+  PORT  3003
+}
+
+TARGET web { RUNTIME axum  FRONTEND react  DEPLOY docker }
+AUTH   { STRATEGY jwt  EXPIRY "8h"  REFRESH true }
+TENANT { MODEL row_level  ISOLATE strict }
+
+// Medical billing — the hardest rules-based domain in existence.
+// Not because the rules are non-deterministic. They aren't.
+// Because there are thousands of them and they change constantly.
+//
+// The insurance companies aren't smarter than you.
+// They're just faster at changing their rules than you can keep up manually.
+//
+// This system flips the model:
+//   AI reads denial patterns → writes RULE proposals → human confirms
+//   ES executes the rules at claim time → zero runtime hallucination
+//   835 arrives → patterns analyzed → rules updated → cycle repeats
+//
+// The AI doesn't adjudicate claims.
+// The AI reads the EOBs and writes the rules.
+// The rules adjudicate the claims.
+//
+// Take that, BCBS.
+
+// ─────────────────────────────────────────────────────────────────────────────
+// ENTITIES
+// ─────────────────────────────────────────────────────────────────────────────
+
+ENTITY PayerContract {
+  tenant_id:          string REQUIRED
+  payer_id:           string REQUIRED
+  payer_name:         string REQUIRED
+  contract_version:   string REQUIRED
+  effective_date:     date   REQUIRED
+  expiration_date:    date
+  fee_schedule_id:    string REQUIRED
+  has_carve_outs:     bool   = false
+  has_risk_contract:  bool   = false
+  timely_filing_days: number = 90
+  appeal_days:        number = 180
+  active:             bool   = true
+  TIMESTAMPS
+  CRUD create, read, list, edit
+}
+
+ENTITY FeeScheduleEntry {
+  tenant_id:       string REQUIRED
+  payer_id:        string REQUIRED
+  cpt_code:        string REQUIRED
+  modifier:        string
+  contracted_rate: float  REQUIRED
+  effective_date:  date   REQUIRED
+  expiration_date: date
+  rate_type:       string = "fee_for_service"
+  is_carve_out:    bool   = false
+  active:          bool   = true
+  TIMESTAMPS
+  CRUD create, read, list, edit
+}
+
+ENTITY ClaimRecord {
+  tenant_id:               string REQUIRED
+  patient_id:              string REQUIRED
+  payer_id:                string REQUIRED
+  secondary_payer_id:      string
+  claim_control:           string REQUIRED
+  status:                  string = "draft"
+  service_date:            date   REQUIRED
+  billed_amount:           float  = 0.0
+  allowed_amount:          float  = 0.0
+  paid_amount:             float  = 0.0
+  contractual_adjustment:  float  = 0.0
+  patient_responsibility:  float  = 0.0
+  denial_count:            number = 0
+  appeal_count:            number = 0
+  timely_filing_deadline:  date
+  submitted_at:            datetime
+  adjudicated_at:          datetime
+  TIMESTAMPS
+  CRUD create, read, list, edit
+}
+
+ENTITY ClaimLine {
+  tenant_id:       string REQUIRED
+  claim_id:        string REQUIRED
+  line_number:     number REQUIRED
+  cpt_code:        string REQUIRED
+  modifier_1:      string
+  modifier_2:      string
+  diagnosis_ptr:   string REQUIRED
+  units:           number = 1
+  billed_rate:     float  REQUIRED
+  allowed_rate:    float  = 0.0
+  paid_rate:       float  = 0.0
+  denial_code:     string
+  TIMESTAMPS
+  CRUD create, read, list
+}
+
+ENTITY DenialRecord {
+  tenant_id:              string REQUIRED
+  claim_id:               string REQUIRED
+  claim_line_id:          string
+  denial_group:           string REQUIRED
+  reason_code:            string REQUIRED
+  remark_code:            string
+  denial_description:     string REQUIRED
+  status:                 string = "new"
+  action_taken:           string
+  appeal_deadline:        date
+  appeal_submitted_at:    datetime
+  resolved_at:            datetime
+  TIMESTAMPS
+  CRUD create, read, list, edit
+}
+
+ENTITY AuthorizationRecord {
+  tenant_id:        string REQUIRED
+  patient_id:       string REQUIRED
+  payer_id:         string REQUIRED
+  auth_number:      string REQUIRED
+  cpt_codes:        string REQUIRED
+  status:           string = "requested"
+  effective_date:   date
+  expiration_date:  date
+  units_authorized: number = 0
+  units_used:       number = 0
+  TIMESTAMPS
+  CRUD create, read, list, edit
+}
+
+ENTITY BenefitsPlan {
+  tenant_id:          string REQUIRED
+  patient_id:         string REQUIRED
+  payer_id:           string REQUIRED
+  plan_name:          string REQUIRED
+  subscriber_id:      string REQUIRED
+  group_number:       string
+  deductible_total:   float  = 0.0
+  deductible_met:     float  = 0.0
+  oop_max:            float  = 0.0
+  oop_met:            float  = 0.0
+  copay_primary:      float  = 0.0
+  coinsurance_rate:   float  = 0.0
+  active:             bool   = true
+  verified_date:      date
+  TIMESTAMPS
+  CRUD create, read, list, edit
+}
+
+ENTITY PayerRule {
+  tenant_id:         string REQUIRED
+  payer_id:          string REQUIRED
+  rule_name:         string REQUIRED
+  rule_description:  string REQUIRED
+  dsl_text:          string REQUIRED
+  cpt_scope:         string
+  diagnosis_scope:   string
+  effective_date:    date
+  source:            string = "ai_generated"
+  status:            string = "pending_review"
+  confirmed_by:      string
+  denial_count:      number = 0
+  confidence:        float  = 0.0
+  active:            bool   = false
+  TIMESTAMPS
+  CRUD create, read, list, edit
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// STAGES
+// ─────────────────────────────────────────────────────────────────────────────
+
+STAGES ClaimRecord.status {
+  TRANSITION "draft" -> "validated" {
+    MATCH any
+  }
+  TRANSITION "validated" -> "submitted" {
+    MATCH any
+    REQUIRE ClaimRecord.submitted_at IS NOT NULL
+  }
+  TRANSITION "submitted" -> "pending" {
+    MATCH any
+  }
+  TRANSITION "pending" -> "paid" {
+    MATCH any
+    REQUIRE ClaimRecord.paid_amount IS NOT NULL
+  }
+  TRANSITION "pending" -> "denied" {
+    MATCH any
+    REQUIRE ClaimRecord.denial_count IS NOT NULL
+  }
+  TRANSITION "pending" -> "partially_paid" {
+    MATCH any
+    REQUIRE ClaimRecord.paid_amount IS NOT NULL
+  }
+  TRANSITION "denied" -> "appealed" {
+    MATCH any
+    REQUIRE ClaimRecord.appeal_count IS NOT NULL
+  }
+  TRANSITION "appealed" -> "paid" {
+    MATCH any
+    REQUIRE ClaimRecord.paid_amount IS NOT NULL
+  }
+  TRANSITION "appealed" -> "written_off" {
+    MATCH any
+  }
+  TRANSITION "denied" -> "written_off" {
+    MATCH any
+  }
+}
+
+STAGES DenialRecord.status {
+  TRANSITION "new" -> "classified" {
+    MATCH any
+    REQUIRE DenialRecord.action_taken IS NOT NULL
+  }
+  TRANSITION "classified" -> "appealing" {
+    MATCH any
+  }
+  TRANSITION "classified" -> "billing_patient" {
+    MATCH any
+  }
+  TRANSITION "classified" -> "writing_off" {
+    MATCH any
+  }
+  TRANSITION "appealing" -> "resolved" {
+    MATCH any
+    REQUIRE DenialRecord.resolved_at IS NOT NULL
+  }
+  TRANSITION "billing_patient" -> "resolved" {
+    MATCH any
+    REQUIRE DenialRecord.resolved_at IS NOT NULL
+  }
+  TRANSITION "writing_off" -> "resolved" {
+    MATCH any
+    REQUIRE DenialRecord.resolved_at IS NOT NULL
+  }
+}
+
+STAGES AuthorizationRecord.status {
+  TRANSITION "requested" -> "approved" {
+    MATCH any
+    REQUIRE AuthorizationRecord.auth_number IS NOT NULL
+  }
+  TRANSITION "requested" -> "denied" {
+    MATCH any
+  }
+  TRANSITION "approved" -> "expired" {
+    MATCH any
+    REQUIRE AuthorizationRecord.expiration_date IS NOT NULL
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// MODULE: EligibilityEngine
+// Verify patient coverage before service. Calculate patient responsibility
+// at time of service — deductible + coinsurance + copay, bounded by OOP max.
+// Do this BEFORE the patient leaves the building, not after the claim denies.
+// ─────────────────────────────────────────────────────────────────────────────
+
+MODULE EligibilityEngine {
+  DESCRIPTION "Pre-service eligibility verification and patient responsibility calculation — 270/271 driven, done at TOS"
+
+  FACT EligibilityContext {
+    patient_id:           string
+    payer_id:             string = ""
+    has_active_coverage:  bool   = false
+    deductible_remaining: float  = 0.0
+    oop_remaining:        float  = 0.0
+    copay_amount:         float  = 0.0
+    coinsurance_rate:     float  = 0.0
+    has_secondary_payer:  bool   = false
+    secondary_payer_id:   string = ""
+    oop_nearly_met:       bool   = false
+    eligibility_expired:  bool   = false
+    PERSISTENT
+  }
+
+  SCORE eligibility_confidence {
+    INITIAL 0
+    MIN     0
+    MAX     100
+    THRESHOLD low  AT 50 THEN reverify_eligibility
+    THRESHOLD high AT 90 THEN proceed_with_service
+  }
+
+  PATTERN check_eligibility {
+    MATCH    "verify eligibility|check coverage|insurance check|patient benefits|is the patient covered"
+    RESPOND  "Verifying eligibility via 270 inquiry. Checking active coverage, deductible status, OOP accumulation, and secondary payer."
+    SCORE    eligibility_confidence +30
+    ASSERT   EligibilityContext { payer_id: "" }
+    CATEGORY "eligibility"
+    PRIORITY 90
+  }
+
+  PATTERN calculate_patient_responsibility {
+    MATCH    "patient responsibility|patient portion|what does patient owe|collect at TOS|estimate patient cost"
+    RESPOND  "Calculating patient responsibility: deductible remaining × service rate + coinsurance + copay, bounded by OOP max. Running 270 if benefits not current."
+    SCORE    eligibility_confidence +20
+    ASSERT   EligibilityContext { has_active_coverage: false }
+    CATEGORY "eligibility"
+    PRIORITY 85
+  }
+
+  PATTERN secondary_coordination {
+    MATCH    "secondary insurance|coordination of benefits|COB|second payer|dual coverage"
+    RESPOND  "Coordinating benefits. Primary payer pays first, secondary covers remainder up to their liability. Running 270 on secondary payer."
+    SCORE    eligibility_confidence +20
+    ASSERT   EligibilityContext { has_secondary_payer: true }
+    CATEGORY "eligibility"
+    PRIORITY 80
+  }
+
+  RULE block_service_no_coverage {
+    WHEN     EligibilityContext.has_active_coverage == false
+    AND      EligibilityContext.eligibility_expired == true
+    THEN     FLAG "no_active_coverage"
+    SEVERITY critical
+    PRIORITY 100
+  }
+
+  RULE collect_full_deductible_at_tos {
+    WHEN     EligibilityContext.deductible_remaining > 0.0
+    AND      EligibilityContext.has_active_coverage == true
+    THEN     FLAG "collect_deductible_at_tos"
+    SEVERITY warning
+    PRIORITY 85
+  }
+
+  RULE waive_copay_near_oop {
+    WHEN     EligibilityContext.oop_nearly_met == true
+    THEN     FLAG "apply_oop_max_protection"
+    SEVERITY info
+    PRIORITY 70
+  }
+
+  RULE trigger_secondary_verification {
+    WHEN     EligibilityContext.has_secondary_payer == true
+    AND      EligibilityContext.secondary_payer_id == ""
+    THEN     FLAG "verify_secondary_payer"
+    SEVERITY warning
+    PRIORITY 80
+  }
+
+  STATE EligibilityFlow {
+    INITIAL  unverified
+    unverified   { TRANSITION verifying   WHEN EligibilityContext.payer_id != "" }
+    verifying    { TRANSITION verified    WHEN EligibilityContext.has_active_coverage == true }
+    verifying    { TRANSITION no_coverage WHEN EligibilityContext.eligibility_expired == true }
+    verified     { TRANSITION tos_collect WHEN EligibilityContext.deductible_remaining > 0.0 }
+    tos_collect  { ON_ENTER  present_tos_estimate }
+    no_coverage  { ON_ENTER  notify_financial_counselor }
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// MODULE: ClaimAdjudicationEngine
+// Pre-submission claim editing. Find every denial reason before the payer does.
+// CCI edits, medical necessity, modifier requirements, timely filing windows,
+// diagnosis-procedure linkage. If it fails here, fix it. Not after denial.
+// ─────────────────────────────────────────────────────────────────────────────
+
+MODULE ClaimAdjudicationEngine {
+  DESCRIPTION "Pre-submission claim editing — CCI edits, modifier logic, medical necessity, timely filing. Catch it before the payer does."
+  ACTIVATE_WHEN ClaimContext.claim_id != ""
+
+  FACT ClaimContext {
+    claim_id:                string
+    payer_id:                string = ""
+    cpt_primary:             string = ""
+    diagnosis_primary:       string = ""
+    modifier_1:              string = ""
+    provider_npi:            string = ""
+    has_prior_auth:          bool   = false
+    has_referral:            bool   = false
+    has_modifier_25:         bool   = false
+    has_modifier_59:         bool   = false
+    has_same_day_procedure:  bool   = false
+    cci_edit_applies:        bool   = false
+    cci_modifier_exception:  bool   = false
+    medical_necessity_met:   bool   = true
+    timely_filing_ok:        bool   = true
+    npi_on_file:             bool   = true
+    diagnosis_supports_cpt:  bool   = true
+    is_observation_not_inpatient: bool = false
+    PERSISTENT
+  }
+
+  SCORE claim_cleanliness {
+    INITIAL 100
+    MIN     0
+    MAX     100
+    THRESHOLD critical AT 50 THEN block_claim_submission
+    THRESHOLD warning  AT 75 THEN flag_claim_for_review
+    THRESHOLD clean    AT 95 THEN auto_submit_claim
+  }
+
+  PATTERN run_claim_edits {
+    MATCH    "run claim edits|scrub claim|check claim|validate claim|pre-submission check"
+    RESPOND  "Running pre-submission edits: CCI check, modifier validation, medical necessity, timely filing window, NPI verification. Flagging any issues before submission."
+    SCORE    claim_cleanliness +0
+    ASSERT   ClaimContext { claim_id: "" }
+    CATEGORY "adjudication"
+    PRIORITY 90
+  }
+
+  PATTERN add_modifier_25 {
+    MATCH    "modifier 25|add 25|same day EM and procedure|evaluation and management same day"
+    RESPOND  "Adding modifier 25 to the E&M code — confirms the E&M was significant and separately identifiable from the procedure performed the same day."
+    SCORE    claim_cleanliness +15
+    ASSERT   ClaimContext { has_modifier_25: true }
+    CATEGORY "adjudication"
+    PRIORITY 85
+  }
+
+  PATTERN add_modifier_59 {
+    MATCH    "modifier 59|distinct procedural service|separate procedure|add 59|not bundled"
+    RESPOND  "Adding modifier 59 — indicates a distinct procedural service not normally reported together. Use only when no other modifier applies."
+    SCORE    claim_cleanliness +10
+    ASSERT   ClaimContext { has_modifier_59: true }
+    CATEGORY "adjudication"
+    PRIORITY 80
+  }
+
+  // CCI rules — published quarterly by CMS. Violations are automatic denials.
+  RULE cci_edit_block {
+    WHEN     ClaimContext.cci_edit_applies == true
+    AND      ClaimContext.cci_modifier_exception == false
+    THEN     FLAG "cci_edit_block_submission"
+    SEVERITY critical
+    PRIORITY 100
+  }
+
+  // The BCBS rule — the one that cost you the most hours in your career
+  RULE require_modifier_25_same_day_bcbs {
+    WHEN     ClaimContext.has_same_day_procedure == true
+    AND      ClaimContext.has_modifier_25 == false
+    AND      ClaimContext.payer_id == "BCBS"
+    THEN     FLAG "add_modifier_25_em_code"
+    SEVERITY critical
+    PRIORITY 100
+  }
+
+  RULE require_modifier_25_same_day_medicare {
+    WHEN     ClaimContext.has_same_day_procedure == true
+    AND      ClaimContext.has_modifier_25 == false
+    AND      ClaimContext.payer_id == "MEDICARE"
+    THEN     FLAG "add_modifier_25_em_code"
+    SEVERITY critical
+    PRIORITY 100
+  }
+
+  RULE medical_necessity_failed {
+    WHEN     ClaimContext.medical_necessity_met == false
+    THEN     FLAG "medical_necessity_documentation_required"
+    SEVERITY critical
+    PRIORITY 100
+  }
+
+  RULE diagnosis_must_support_procedure {
+    WHEN     ClaimContext.diagnosis_supports_cpt == false
+    THEN     FLAG "diagnosis_procedure_mismatch"
+    SEVERITY critical
+    PRIORITY 100
+  }
+
+  RULE timely_filing_warning {
+    WHEN     ClaimContext.timely_filing_ok == false
+    THEN     FLAG "timely_filing_deadline_risk"
+    SEVERITY critical
+    PRIORITY 100
+  }
+
+  RULE npi_required {
+    WHEN     ClaimContext.npi_on_file == false
+    THEN     FLAG "missing_rendering_provider_npi"
+    SEVERITY critical
+    PRIORITY 100
+  }
+
+  RULE observation_billing_rule {
+    WHEN     ClaimContext.is_observation_not_inpatient == true
+    AND      ClaimContext.payer_id == "MEDICARE"
+    THEN     FLAG "condition_code_44_required"
+    SEVERITY critical
+    PRIORITY 95
+  }
+
+  STATE AdjudicationFlow {
+    INITIAL  editing
+    editing      { TRANSITION ready      WHEN claim_cleanliness >= 95 }
+    editing      { TRANSITION needs_work WHEN claim_cleanliness < 75 }
+    needs_work   { TRANSITION editing    WHEN ClaimContext.cci_edit_applies == false }
+    ready        { ON_ENTER  queue_for_submission }
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// MODULE: FeeScheduleEngine
+// Contracted rate management. Billed charge - contracted rate = contractual
+// adjustment (write-off). Not patient balance. Not collectible. Write-off.
+// Getting this wrong is a HIPAA violation and an audit finding.
+// ─────────────────────────────────────────────────────────────────────────────
+
+MODULE FeeScheduleEngine {
+  DESCRIPTION "Contracted rate lookup and contractual adjustment calculation — Medicare RBRVS, Medicaid, commercial payer contracts"
+
+  FACT FeeContext {
+    cpt_code:             string = ""
+    payer_id:             string = ""
+    modifier:             string = ""
+    billed_amount:        float  = 0.0
+    contracted_rate:      float  = 0.0
+    contractual_adjustment: float = 0.0
+    rate_not_found:       bool   = false
+    is_carve_out:         bool   = false
+    fee_schedule_expired: bool   = false
+    PERSISTENT
+  }
+
+  SCORE rate_confidence {
+    INITIAL 0
+    MIN     0
+    MAX     100
+    THRESHOLD low  AT 50 THEN flag_rate_lookup_issue
+    THRESHOLD high AT 90 THEN apply_contracted_rate
+  }
+
+  PATTERN lookup_rate {
+    MATCH    "contracted rate|fee schedule|what is the rate|look up rate|allowed amount"
+    RESPOND  "Looking up contracted rate for CPT × payer × modifier. Calculating contractual adjustment."
+    SCORE    rate_confidence +30
+    ASSERT   FeeContext { rate_not_found: false }
+    CATEGORY "fee_schedule"
+    PRIORITY 85
+  }
+
+  PATTERN update_medicare_fee_schedule {
+    MATCH    "Medicare fee schedule|RBRVS update|CMS rates|Medicare rates changed|annual fee schedule"
+    RESPOND  "Downloading CMS Medicare Physician Fee Schedule. Parsing RVU table, geographic adjusters, conversion factor. Diffing against current rates. Generating update proposals."
+    SCORE    rate_confidence +20
+    ASSERT   FeeContext { fee_schedule_expired: false }
+    CATEGORY "fee_schedule"
+    PRIORITY 90
+  }
+
+  RULE flag_rate_not_found {
+    WHEN     FeeContext.rate_not_found == true
+    AND      FeeContext.cpt_code != ""
+    THEN     FLAG "contracted_rate_missing"
+    SEVERITY critical
+    PRIORITY 100
+  }
+
+  RULE flag_expired_fee_schedule {
+    WHEN     FeeContext.fee_schedule_expired == true
+    THEN     FLAG "fee_schedule_requires_update"
+    SEVERITY warning
+    PRIORITY 85
+  }
+
+  RULE apply_contractual_adjustment {
+    WHEN     FeeContext.contracted_rate > 0.0
+    AND      FeeContext.billed_amount > 0.0
+    THEN     PostContractualAdjustment
+    SEVERITY info
+  }
+
+  RULE flag_carve_out_applies {
+    WHEN     FeeContext.is_carve_out == true
+    THEN     FLAG "carve_out_rate_applies"
+    SEVERITY warning
+    PRIORITY 80
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// MODULE: AuthorizationEngine
+// Prior auth requirements per CPT per payer — and they change constantly.
+// Unit tracking prevents overbilling. Expiry alerts prevent claim denials.
+// The auth requirement list is AI-parseable from payer portals and bulletins.
+// ─────────────────────────────────────────────────────────────────────────────
+
+MODULE AuthorizationEngine {
+  DESCRIPTION "Prior authorization tracking — requirements by CPT/payer, unit management, expiry alerts"
+
+  FACT AuthContext {
+    patient_id:        string
+    payer_id:          string = ""
+    cpt_code:          string = ""
+    auth_required:     bool   = false
+    auth_number:       string = ""
+    auth_approved:     bool   = false
+    auth_expiring:     bool   = false
+    auth_expired:      bool   = false
+    units_remaining:   number = 0
+    units_exceeded:    bool   = false
+    PERSISTENT
+  }
+
+  SCORE auth_confidence {
+    INITIAL 0
+    MIN     0
+    MAX     100
+    THRESHOLD low  AT 50 THEN request_authorization
+    THRESHOLD high AT 90 THEN auth_cleared_to_proceed
+  }
+
+  PATTERN check_auth_required {
+    MATCH    "prior auth|authorization required|does this need auth|is auth required|PA required"
+    RESPOND  "Checking prior auth requirements for this CPT × payer combination. Auth requirements change — checking current payer policy."
+    SCORE    auth_confidence +30
+    ASSERT   AuthContext { auth_required: false }
+    CATEGORY "authorization"
+    PRIORITY 90
+  }
+
+  PATTERN track_auth_units {
+    MATCH    "auth units|remaining units|how many visits|units authorized|units left"
+    RESPOND  "Checking authorized units remaining. Billing beyond authorized units results in automatic denial."
+    SCORE    auth_confidence +20
+    ASSERT   AuthContext { units_exceeded: false }
+    CATEGORY "authorization"
+    PRIORITY 85
+  }
+
+  RULE block_claim_without_required_auth {
+    WHEN     AuthContext.auth_required == true
+    AND      AuthContext.auth_approved == false
+    THEN     FLAG "prior_auth_required_before_submission"
+    SEVERITY critical
+    PRIORITY 100
+  }
+
+  RULE warn_auth_expiring {
+    WHEN     AuthContext.auth_expiring == true
+    AND      AuthContext.auth_approved == true
+    THEN     FLAG "auth_expiring_request_renewal"
+    SEVERITY warning
+    PRIORITY 85
+  }
+
+  RULE block_expired_auth {
+    WHEN     AuthContext.auth_expired == true
+    THEN     FLAG "auth_expired_claim_will_deny"
+    SEVERITY critical
+    PRIORITY 100
+  }
+
+  RULE flag_units_exceeded {
+    WHEN     AuthContext.units_exceeded == true
+    THEN     FLAG "authorized_units_exceeded"
+    SEVERITY critical
+    PRIORITY 100
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// MODULE: DenialsEngine
+// Denial code classification and action routing. 200+ reason codes.
+// 400+ remark codes. Each maps to a deterministic action.
+// CO = contractual writeoff. PR = patient balance. OA = appeal.
+// PI = payer internal — usually not your problem.
+// Timely filing denial = writeoff. No appeal. That's it.
+// ─────────────────────────────────────────────────────────────────────────────
+
+MODULE DenialsEngine {
+  DESCRIPTION "Denial classification and action routing — CO/OA/PR/PI groups, reason codes, remark codes. Every denial code has a deterministic action."
+
+  FACT DenialContext {
+    denial_group:               string = ""
+    reason_code:                string = ""
+    remark_code:                string = ""
+    is_appealable:              bool   = false
+    write_off_eligible:         bool   = false
+    patient_responsibility:     bool   = false
+    timely_filing_denial:       bool   = false
+    appeal_deadline_passed:     bool   = false
+    payer_internal_error:       bool   = false
+    correctable_and_resubmit:   bool   = false
+    PERSISTENT
+  }
+
+  SCORE denial_severity {
+    INITIAL 50
+    MIN     0
+    MAX     100
+    THRESHOLD low      AT 30 THEN auto_write_off
+    THRESHOLD medium   AT 50 THEN route_to_billing_staff
+    THRESHOLD high     AT 80 THEN escalate_to_appeal
+    THRESHOLD critical AT 95 THEN escalate_to_ai_analysis
+  }
+
+  PATTERN classify_co_denial {
+    MATCH    "CO denial|contractual obligation|contractual adjustment|CO-45|CO-97|CO-4"
+    RESPOND  "CO group denial — contractual obligation. This is a write-off per your payer contract. The patient cannot be billed for this amount. Posting contractual adjustment."
+    SCORE    denial_severity -20
+    ASSERT   DenialContext { denial_group: "CO", write_off_eligible: true }
+    CATEGORY "denials"
+    PRIORITY 90
+  }
+
+  PATTERN classify_pr_denial {
+    MATCH    "PR denial|patient responsibility|deductible|copay|coinsurance|PR-1|PR-2|PR-3"
+    RESPOND  "PR group denial — patient responsibility. This amount is collectible from the patient: deductible, copay, or coinsurance per their plan. Creating patient statement."
+    SCORE    denial_severity +10
+    ASSERT   DenialContext { denial_group: "PR", patient_responsibility: true }
+    CATEGORY "denials"
+    PRIORITY 90
+  }
+
+  PATTERN classify_oa_denial {
+    MATCH    "OA denial|other adjustment|non-covered|OA-18|OA-23|not medically necessary"
+    RESPOND  "OA group denial — other adjustment. Reviewing for appeal eligibility. OA denials are often appealable with supporting documentation."
+    SCORE    denial_severity +30
+    ASSERT   DenialContext { denial_group: "OA", is_appealable: true }
+    CATEGORY "denials"
+    PRIORITY 90
+  }
+
+  PATTERN timely_filing_denial {
+    MATCH    "timely filing|CO-29|filing deadline|claim too old|past filing deadline|missed filing"
+    RESPOND  "CO-29 timely filing denial. If the deadline was missed without exception, this is a write-off. Checking for timely filing extension eligibility."
+    SCORE    denial_severity -30
+    ASSERT   DenialContext { timely_filing_denial: true, write_off_eligible: true }
+    CATEGORY "denials"
+    PRIORITY 95
+  }
+
+  PATTERN correct_and_resubmit {
+    MATCH    "CO-4|CO-16|missing information|invalid claim|claim correction|resubmit|corrected claim"
+    RESPOND  "Correctible claim issue. Identifying the field or modifier error, correcting, and resubmitting as a corrected claim (frequency code 7)."
+    SCORE    denial_severity +20
+    ASSERT   DenialContext { correctable_and_resubmit: true }
+    CATEGORY "denials"
+    PRIORITY 85
+  }
+
+  RULE contractual_writeoff_for_co {
+    WHEN     DenialContext.denial_group == "CO"
+    AND      DenialContext.write_off_eligible == true
+    THEN     PostContractualWriteOff
+    SEVERITY info
+  }
+
+  RULE bill_patient_for_pr {
+    WHEN     DenialContext.denial_group == "PR"
+    AND      DenialContext.patient_responsibility == true
+    THEN     GeneratePatientStatement
+    SEVERITY info
+  }
+
+  RULE appeal_oa_within_deadline {
+    WHEN     DenialContext.denial_group == "OA"
+    AND      DenialContext.is_appealable == true
+    AND      DenialContext.appeal_deadline_passed == false
+    THEN     FLAG "submit_appeal"
+    SEVERITY warning
+    PRIORITY 85
+  }
+
+  RULE timely_filing_writeoff {
+    WHEN     DenialContext.timely_filing_denial == true
+    AND      DenialContext.appeal_deadline_passed == true
+    THEN     FLAG "timely_filing_writeoff_required"
+    SEVERITY critical
+    PRIORITY 100
+  }
+
+  RULE escalate_to_ai_high_value {
+    WHEN     DenialContext.is_appealable == true
+    AND      DenialContext.denial_group == "OA"
+    AND      DenialContext.payer_internal_error == true
+    THEN     FLAG "escalate_to_pattern_analysis"
+    SEVERITY critical
+    PRIORITY 90
+  }
+
+  STATE DenialsFlow {
+    INITIAL  classifying
+    classifying   { TRANSITION writing_off   WHEN DenialContext.write_off_eligible == true }
+    classifying   { TRANSITION billing_pt    WHEN DenialContext.patient_responsibility == true }
+    classifying   { TRANSITION appealing     WHEN DenialContext.is_appealable == true }
+    classifying   { TRANSITION correcting    WHEN DenialContext.correctable_and_resubmit == true }
+    appealing     { TRANSITION resolved      WHEN DenialContext.appeal_deadline_passed == false }
+    writing_off   { ON_ENTER  post_writeoff }
+    billing_pt    { ON_ENTER  create_patient_statement }
+    correcting    { ON_ENTER  queue_corrected_claim }
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// MODULE: RemittanceEngine
+// 835 payment posting. Match payments to claims. Post contractual adjustments.
+// Trigger secondary billing. Flag unmatched claims for manual review.
+// The ERA — Electronic Remittance Advice — is the source of truth.
+// ─────────────────────────────────────────────────────────────────────────────
+
+MODULE RemittanceEngine {
+  DESCRIPTION "835 remittance posting — payment matching, contractual adjustment, secondary billing trigger, COB reconciliation"
+
+  FACT RemittanceContext {
+    check_number:         string = ""
+    payer_id:             string = ""
+    total_payment:        float  = 0.0
+    claims_in_batch:      number = 0
+    claims_matched:       number = 0
+    claims_unmatched:     number = 0
+    adjustments_posted:   number = 0
+    secondary_eligible:   bool   = false
+    overpayment_detected: bool   = false
+    PERSISTENT
+  }
+
+  SCORE remittance_confidence {
+    INITIAL 0
+    MIN     0
+    MAX     100
+    THRESHOLD low  AT 50 THEN flag_remittance_matching_issue
+    THRESHOLD high AT 90 THEN auto_post_remittance
+  }
+
+  PATTERN post_era {
+    MATCH    "post ERA|post remittance|835 arrived|payment arrived|post payment|remit received"
+    RESPOND  "Posting 835 ERA. Matching CLP segments to ClaimRecord by claim control number. Posting CAS adjustments. Triggering secondary billing for COB claims."
+    SCORE    remittance_confidence +30
+    ASSERT   RemittanceContext { claims_matched: 0 }
+    CATEGORY "remittance"
+    PRIORITY 90
+  }
+
+  RULE flag_unmatched_claims {
+    WHEN     RemittanceContext.claims_unmatched > 0
+    THEN     FLAG "unmatched_claims_require_manual_review"
+    SEVERITY warning
+    PRIORITY 85
+  }
+
+  RULE trigger_secondary_billing {
+    WHEN     RemittanceContext.secondary_eligible == true
+    AND      RemittanceContext.claims_matched > 0
+    THEN     GenerateSecondaryClaim
+    SEVERITY info
+  }
+
+  RULE flag_overpayment {
+    WHEN     RemittanceContext.overpayment_detected == true
+    THEN     FLAG "overpayment_requires_refund"
+    SEVERITY critical
+    PRIORITY 95
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// MODULE: ContractEngine
+// The self-maintaining rule library. Downloads payer contracts, fee schedule
+// updates, LCD/NCD policy updates, payer bulletins. AI parses them.
+// Generates RULE proposals. Human confirms. System stays current.
+// This is the module that replaces the billing consultant subscription.
+// ─────────────────────────────────────────────────────────────────────────────
+
+MODULE ContractEngine {
+  DESCRIPTION "Self-maintaining payer rule library — AI parses contracts/bulletins/LCDs, generates PayerRule proposals, human confirms, system self-updates"
+
+  FACT ContractContext {
+    payer_id:               string = ""
+    contract_version:       string = ""
+    fee_schedule_version:   string = ""
+    days_to_expiration:     number = 365
+    pending_rule_updates:   number = 0
+    has_mid_year_amendment: bool   = false
+    lcd_update_available:   bool   = false
+    bulletin_unprocessed:   bool   = false
+    PERSISTENT
+  }
+
+  SCORE contract_freshness {
+    INITIAL 100
+    MIN     0
+    MAX     100
+    DECAY   1 PER day
+    THRESHOLD stale    AT 70 THEN flag_contract_review_due
+    THRESHOLD outdated AT 40 THEN escalate_contract_update
+    THRESHOLD critical AT 20 THEN block_claims_for_payer
+  }
+
+  PATTERN parse_payer_contract {
+    MATCH    "new contract|contract update|payer contract|fee schedule update|contract amendment|mid-year amendment"
+    RESPOND  "Parsing payer contract. AI will extract fee schedule changes, new prior auth requirements, coverage policy changes, and generate PayerRule proposals for review."
+    SCORE    contract_freshness +30
+    ASSERT   ContractContext { has_mid_year_amendment: true }
+    CATEGORY "contract"
+    PRIORITY 90
+  }
+
+  PATTERN process_lcd_update {
+    MATCH    "LCD update|local coverage determination|NCD|national coverage|policy update|coverage policy changed"
+    RESPOND  "Processing LCD/NCD update. Extracting new indications, added diagnosis requirements, and coverage restrictions. Generating rule proposals for affected CPT codes."
+    SCORE    contract_freshness +25
+    ASSERT   ContractContext { lcd_update_available: true }
+    CATEGORY "contract"
+    PRIORITY 90
+  }
+
+  PATTERN process_payer_bulletin {
+    MATCH    "payer bulletin|provider bulletin|plan update|payer notice|coverage change notice"
+    RESPOND  "Processing payer bulletin. AI scanning for new modifier requirements, prior auth list changes, and coding edits. Generating PayerRule proposals."
+    SCORE    contract_freshness +20
+    ASSERT   ContractContext { bulletin_unprocessed: true }
+    CATEGORY "contract"
+    PRIORITY 85
+  }
+
+  RULE flag_contract_expiring {
+    WHEN     ContractContext.days_to_expiration < 60
+    AND      ContractContext.payer_id != ""
+    THEN     FLAG "contract_renewal_required"
+    SEVERITY warning
+    PRIORITY 80
+  }
+
+  RULE flag_pending_rule_updates {
+    WHEN     ContractContext.pending_rule_updates > 0
+    THEN     FLAG "payer_rules_awaiting_confirmation"
+    SEVERITY warning
+    PRIORITY 85
+  }
+
+  RULE flag_bulletin_unprocessed {
+    WHEN     ContractContext.bulletin_unprocessed == true
+    THEN     FLAG "process_payer_bulletin"
+    SEVERITY warning
+    PRIORITY 80
+  }
+
+  RULE alert_lcd_update {
+    WHEN     ContractContext.lcd_update_available == true
+    THEN     FLAG "lcd_update_requires_rule_review"
+    SEVERITY warning
+    PRIORITY 85
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// MODULE: PatternIntelligence
+// THE FEEDBACK LOOP. This is why no billing software has ever beaten the
+// insurance companies. They change the rules faster than humans can track.
+// Now the AI reads the denials, identifies the patterns, and writes the rules.
+// The ES executes them. The cycle closes. The denial rate drops.
+// ─────────────────────────────────────────────────────────────────────────────
+
+MODULE PatternIntelligence {
+  DESCRIPTION "Denial pattern detection → AI rule generation → human confirmation → ES rule update. The feedback loop that makes the system smarter with every 835."
+
+  FACT PatternContext {
+    payer_id:              string = ""
+    cpt_code:              string = ""
+    diagnosis_code:        string = ""
+    reason_code:           string = ""
+    denial_rate:           float  = 0.0
+    sample_size:           number = 0
+    pattern_confidence:    float  = 0.0
+    pattern_significant:   bool   = false
+    rule_proposed:         bool   = false
+    awaiting_confirmation: bool   = false
+    confirmed:             bool   = false
+    PERSISTENT
+  }
+
+  SCORE pattern_significance {
+    INITIAL 0
+    MIN     0
+    MAX     100
+    THRESHOLD weak     AT 30 THEN log_weak_pattern
+    THRESHOLD moderate AT 60 THEN flag_pattern_for_analyst
+    THRESHOLD strong   AT 80 THEN generate_rule_proposal
+    THRESHOLD critical AT 95 THEN auto_escalate_pattern
+  }
+
+  PATTERN analyze_denial_patterns {
+    MATCH    "analyze denials|denial patterns|why are we getting denied|denial trends|what's causing denials|pattern analysis"
+    RESPOND  "Running denial pattern analysis over the last 90 days. Grouping by CPT × payer × reason code. Identifying statistically significant patterns. Generating rule proposals for review."
+    SCORE    pattern_significance +20
+    ASSERT   PatternContext { pattern_significant: false }
+    CATEGORY "patterns"
+    PRIORITY 90
+  }
+
+  PATTERN review_rule_proposal {
+    MATCH    "review rule|proposed rule|rule proposal|approve rule|confirm rule update|apply the rule"
+    RESPOND  "Presenting rule proposal for your review. This rule was generated from {{sample_size}} denial instances with {{denial_rate}}% denial rate. Confirm to apply?"
+    SCORE    pattern_significance +10
+    ASSERT   PatternContext { awaiting_confirmation: true }
+    CATEGORY "patterns"
+    PRIORITY 85
+  }
+
+  RULE escalate_high_denial_rate {
+    WHEN     PatternContext.denial_rate > 0.25
+    AND      PatternContext.sample_size > 10
+    AND      PatternContext.pattern_significant == true
+    THEN     FLAG "pattern_ready_for_ai_analysis"
+    SEVERITY critical
+    PRIORITY 90
+  }
+
+  RULE generate_rule_when_confident {
+    WHEN     PatternContext.pattern_confidence > 0.80
+    AND      PatternContext.rule_proposed == false
+    THEN     GeneratePayerRule
+    SEVERITY warning
+    PRIORITY 85
+  }
+
+  RULE present_confirmed_rule_for_apply {
+    WHEN     PatternContext.awaiting_confirmation == true
+    AND      PatternContext.confirmed == true
+    THEN     ApplyPayerRuleUpdate
+    SEVERITY info
+  }
+
+  RULE flag_critical_denial_spike {
+    WHEN     PatternContext.denial_rate > 0.50
+    AND      PatternContext.sample_size > 5
+    THEN     FLAG "critical_denial_spike_investigate"
+    SEVERITY critical
+    PRIORITY 100
+  }
+
+  STATE PatternFlow {
+    INITIAL  monitoring
+    monitoring   { TRANSITION analyzing   WHEN PatternContext.pattern_significant == true }
+    analyzing    { TRANSITION proposing   WHEN PatternContext.pattern_confidence > 0.80 }
+    proposing    { TRANSITION confirming  WHEN PatternContext.rule_proposed == true }
+    confirming   { TRANSITION applying    WHEN PatternContext.confirmed == true }
+    applying     { TRANSITION monitoring  WHEN PatternContext.confirmed == false }
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// WORKFLOWS — full claim lifecycle from eligibility to remittance
+// ─────────────────────────────────────────────────────────────────────────────
+
+WORKFLOW pre_service_eligibility {
+  IDEMPOTENT true
+  STEP send_270            { ACTION Send270EligibilityInquiry    ON_FAIL abort }
+  STEP parse_271           { ACTION Parse271EligibilityResponse  ON_FAIL abort }
+  STEP calculate_tos       { ACTION CalculatePatientResponsibility ON_FAIL skip }
+  STEP update_benefits     { ACTION UpdateBenefitsPlan           ON_FAIL abort }
+  STEP notify_front_desk   { ACTION NotifyFrontDesk              ON_FAIL skip  }
+}
+
+WORKFLOW pre_submission_claim_edit {
+  IDEMPOTENT true
+  STEP check_cci           { ACTION CheckCCIEdits                ON_FAIL abort }
+  STEP check_auth          { ACTION VerifyAuthorizationOnFile    ON_FAIL abort }
+  STEP check_modifiers     { ACTION ValidateModifiers            ON_FAIL abort }
+  STEP check_necessity     { ACTION CheckMedicalNecessity        ON_FAIL abort }
+  STEP check_timely_filing { ACTION CheckTimelyFilingWindow      ON_FAIL abort }
+  STEP check_fee_schedule  { ACTION LookupContractedRate         ON_FAIL skip  }
+  STEP scrub_claim         { ACTION RunClearinghouseScrub        ON_FAIL abort }
+}
+
+WORKFLOW submit_claim_837 {
+  IDEMPOTENT false
+  STEP build_837           { ACTION Build837Claim                ON_FAIL abort }
+  STEP validate_837        { ACTION ValidateX12Segments          ON_FAIL abort }
+  STEP submit_to_payer     { ACTION TransmitClaimToPayer         ON_FAIL abort }
+  STEP log_submission      { ACTION LogClaimSubmission           ON_FAIL skip  }
+  STEP set_follow_up       { ACTION ScheduleClaimFollowUp        ON_FAIL skip  }
+}
+
+WORKFLOW track_claim_status {
+  IDEMPOTENT true
+  STEP send_276            { ACTION Send276StatusInquiry         ON_FAIL abort }
+  STEP parse_277           { ACTION Parse277StatusResponse       ON_FAIL abort }
+  STEP update_claim        { ACTION UpdateClaimStatus            ON_FAIL abort }
+  STEP reschedule_if_pend  { ACTION ScheduleClaimFollowUp        ON_FAIL skip  }
+}
+
+WORKFLOW post_remittance_835 {
+  IDEMPOTENT false
+  STEP parse_835           { ACTION ParseX12_835                 ON_FAIL abort }
+  STEP match_claims        { ACTION MatchRemittanceToClaims      ON_FAIL abort }
+  STEP post_payments       { ACTION PostClaimPayments            ON_FAIL abort }
+  STEP post_adjustments    { ACTION PostContractualAdjustment    ON_FAIL abort }
+  STEP create_denials      { ACTION CreateDenialRecords          ON_FAIL skip  }
+  STEP trigger_secondary   { ACTION TriggerSecondaryBilling      ON_FAIL skip  }
+  STEP generate_statements { ACTION QueuePatientStatements       ON_FAIL skip  }
+  STEP feed_pattern_engine { ACTION LogDenialPatternData         ON_FAIL skip  }
+}
+
+WORKFLOW process_denial {
+  IDEMPOTENT false
+  STEP classify_denial     { ACTION ClassifyDenialCode           ON_FAIL abort }
+  STEP determine_action    { ACTION RouteDenialAction            ON_FAIL abort }
+  STEP execute_action      { ACTION ExecuteDenialAction          ON_FAIL abort }
+  STEP update_denial       { ACTION UpdateDenialRecord           ON_FAIL skip  }
+  STEP log_pattern_data    { ACTION LogDenialPatternData         ON_FAIL skip  }
+}
+
+WORKFLOW appeal_denial {
+  IDEMPOTENT false
+  STEP gather_documentation { ACTION GatherAppealDocumentation   ON_FAIL abort }
+  STEP write_appeal_letter  { ACTION GenerateAppealLetter        ON_FAIL abort }
+  STEP submit_appeal        { ACTION SubmitAppealToPayer         ON_FAIL abort }
+  STEP set_follow_up        { ACTION ScheduleAppealFollowUp      ON_FAIL skip  }
+  STEP log_appeal           { ACTION LogAppealSubmission         ON_FAIL skip  }
+}
+
+WORKFLOW update_fee_schedule {
+  IDEMPOTENT true
+  STEP download_schedule   { ACTION DownloadCMSFeeSchedule       ON_FAIL abort }
+  STEP parse_schedule      { ACTION ParseFeeScheduleUpdate       ON_FAIL abort }
+  STEP diff_rates          { ACTION DiffFeeScheduleRates         ON_FAIL abort }
+  STEP generate_updates    { ACTION GenerateFeeScheduleRules     ON_FAIL abort }
+  STEP present_for_review  { ACTION PresentFeeUpdateForReview    ON_FAIL skip  }
+}
+
+WORKFLOW parse_payer_contract {
+  IDEMPOTENT false
+  STEP ingest_contract     { ACTION IngestPayerContract          ON_FAIL abort }
+  STEP extract_rules       { ACTION ExtractContractRules         ON_FAIL abort }
+  STEP generate_proposals  { ACTION GeneratePayerRule            ON_FAIL abort }
+  STEP present_proposals   { ACTION PresentRulesForConfirmation  ON_FAIL skip  }
+  STEP log_contract_version { ACTION LogContractVersion          ON_FAIL skip  }
+}
+
+WORKFLOW analyze_and_update_rules {
+  IDEMPOTENT true
+  STEP analyze_patterns    { ACTION AnalyzeDenialPatterns        ON_FAIL abort }
+  STEP generate_rules      { ACTION GeneratePayerRule            ON_FAIL abort }
+  STEP present_for_confirm { ACTION PresentRulesForConfirmation  ON_FAIL skip  }
+}
+
+WORKFLOW apply_confirmed_rule {
+  IDEMPOTENT false
+  STEP validate_rule_dsl   { ACTION ValidatePayerRuleDSL         ON_FAIL abort }
+  STEP apply_rule          { ACTION ApplyPayerRuleUpdate         ON_FAIL abort }
+  STEP activate_in_es      { ACTION ActivatePayerRule            ON_FAIL abort }
+  STEP log_rule_change     { ACTION LogPayerRuleChange           ON_FAIL skip  }
+  STEP verify_rule_effect  { ACTION VerifyRuleEffect             ON_FAIL skip  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// ACTIONS
+// ─────────────────────────────────────────────────────────────────────────────
+
+ACTION Send270EligibilityInquiry {
+  INPUT  patient_id: string, payer_id: string, service_date: date, tenant_id: string
+  OUTPUT transaction_id: string
+  IMPL   "build X12 270 with subscriber ID, date of service, service type codes; transmit via payer portal or clearinghouse; log to InterchangeMessage"
+}
+
+ACTION Parse271EligibilityResponse {
+  INPUT  transaction_id: string, tenant_id: string
+  OUTPUT has_active_coverage: bool, deductible_remaining: float, oop_remaining: float, copay: float, coinsurance_rate: float, has_secondary: bool
+  IMPL   "parse X12 271 EB segments; extract benefit information by service type code; update BenefitsPlan and EligibilityContext FACT"
+}
+
+ACTION CalculatePatientResponsibility {
+  INPUT  patient_id: string, allowed_amount: float, payer_id: string, tenant_id: string
+  OUTPUT patient_responsibility: float, deductible_portion: float, coinsurance_portion: float, copay_portion: float
+  IMPL   "fetch BenefitsPlan; calculate: MIN(deductible_remaining, allowed) + MAX(0, allowed - deductible) × coinsurance + copay, bounded by oop_remaining; return breakdown"
+}
+
+ACTION UpdateBenefitsPlan {
+  INPUT  patient_id: string, payer_id: string, benefits_json: json, tenant_id: string
+  OUTPUT benefits_id: string
+  IMPL   "upsert BenefitsPlan with 271 response data; update deductible_met, oop_met from accumulator segments"
+}
+
+ACTION CheckCCIEdits {
+  INPUT  cpt_codes: string, modifiers: string, tenant_id: string
+  OUTPUT cci_conflicts: json, modifier_exceptions: json
+  IMPL   "query CCI edit table (downloaded quarterly from CMS) for all CPT code pairs in claim; return conflicts and whether modifiers override them; set ClaimContext.cci_edit_applies and cci_modifier_exception"
+}
+
+ACTION ValidateModifiers {
+  INPUT  claim_id: string, payer_id: string, tenant_id: string
+  OUTPUT modifier_issues: json, is_valid: bool
+  IMPL   "validate modifier usage per payer rules; check modifier 25 requirement for same-day E&M + procedure per payer; check modifier 59 vs XS/XE/XP/XU; set ClaimContext modifier flags"
+}
+
+ACTION CheckMedicalNecessity {
+  INPUT  cpt_code: string, diagnosis_codes: string, payer_id: string, tenant_id: string
+  OUTPUT necessity_met: bool, required_diagnoses: string
+  IMPL   "lookup LCD/NCD coverage policies for CPT × payer; verify that at least one submitted diagnosis code appears in covered indications; set ClaimContext.medical_necessity_met"
+}
+
+ACTION CheckTimelyFilingWindow {
+  INPUT  service_date: date, payer_id: string, tenant_id: string
+  OUTPUT days_remaining: number, timely_filing_ok: bool, deadline: date
+  IMPL   "fetch PayerContract.timely_filing_days; calculate deadline from service_date; return days remaining and ok flag; set ClaimContext.timely_filing_ok"
+}
+
+ACTION LookupContractedRate {
+  INPUT  cpt_code: string, modifier: string, payer_id: string, tenant_id: string
+  OUTPUT contracted_rate: float, rate_found: bool, adjustment: float
+  IMPL   "query FeeScheduleEntry by cpt_code + modifier + payer_id + current date; calculate contractual_adjustment = billed_rate - contracted_rate; set FeeContext fields"
+}
+
+ACTION RunClearinghouseScrub {
+  INPUT  claim_id: string, tenant_id: string
+  OUTPUT scrub_passed: bool, errors: json
+  IMPL   "submit claim to clearinghouse pre-submission scrubber; return payer-specific edit failures before 837 generation"
+}
+
+ACTION Build837Claim {
+  INPUT  claim_id: string, payer_id: string, tenant_id: string
+  OUTPUT raw_edi: string, claim_control: string
+  IMPL   "transform ClaimRecord and ClaimLine records to X12 837 CLM/DTP/SV1/DX segments with ICD-10 codes, CPT codes, NPI, referring provider, facility NPI; wrap in ISA/GS/ST envelope"
+}
+
+ACTION TransmitClaimToPayer {
+  INPUT  raw_edi: string, payer_id: string, tenant_id: string
+  OUTPUT submitted: bool, clearinghouse_id: string
+  IMPL   "transmit 837 to payer via clearinghouse (AS2 or HTTPS); await 999 TA1 acknowledgment; update ClaimRecord.submitted_at and status"
+  EMIT   claim_submitted {
+    source: string, claim_id: string, payer_id: string, billed_amount: float, tenant_id: string
+  }
+}
+
+ACTION Send276StatusInquiry {
+  INPUT  claim_id: string, payer_id: string, tenant_id: string
+  OUTPUT transaction_id: string
+  IMPL   "build X12 276 with claim control number, patient ID, service date; transmit to payer; log to InterchangeMessage"
+}
+
+ACTION Parse277StatusResponse {
+  INPUT  transaction_id: string, tenant_id: string
+  OUTPUT claim_status: string, status_category: string, status_code: string
+  IMPL   "parse X12 277 STC segments; map payer claim status category codes to ClaimRecord.status values; update ClaimRecord"
+}
+
+ACTION ClassifyDenialCode {
+  INPUT  denial_group: string, reason_code: string, remark_code: string, tenant_id: string
+  OUTPUT action_code: string, is_appealable: bool, patient_responsibility: bool, write_off_eligible: bool
+  IMPL   "look up denial action matrix by CO/OA/PR/PI group + reason_code + remark_code; set DenialContext boolean flags; return deterministic action"
+}
+
+ACTION RouteDenialAction {
+  INPUT  denial_id: string, action_code: string, tenant_id: string
+  OUTPUT routed_to: string
+  IMPL   "dispatch denial to correct workflow: CO→PostContractualWriteOff, PR→GeneratePatientStatement, OA→AppealDenial, PI→ReviewAndResubmit, CO-29→TFWriteOff"
+}
+
+ACTION PostContractualWriteOff {
+  INPUT  claim_id: string, adjustment_amount: float, reason_code: string, tenant_id: string
+  OUTPUT posted: bool
+  IMPL   "create contractual adjustment GL entry; update ClaimRecord.contractual_adjustment; update ClaimRecord.status; patient cannot be billed for this amount"
+  EMIT   contractual_writeoff_posted {
+    source: string, claim_id: string, amount: float, reason_code: string, tenant_id: string
+  }
+}
+
+ACTION GeneratePatientStatement {
+  INPUT  patient_id: string, claim_id: string, amount: float, tenant_id: string
+  OUTPUT statement_id: string
+  IMPL   "create patient statement with itemized balance; include plain-language explanation of why patient owes this amount (deductible, copay, or coinsurance)"
+}
+
+ACTION CreateDenialRecords {
+  INPUT  remittance_id: string, claims_json: json, tenant_id: string
+  OUTPUT denials_created: number
+  IMPL   "for each CLP with denied CAS lines, create DenialRecord with denial_group, reason_code, remark_code from CAS segments; set appeal_deadline from PayerContract.appeal_days"
+}
+
+ACTION GatherAppealDocumentation {
+  INPUT  denial_id: string, tenant_id: string
+  OUTPUT documentation_list: string
+  IMPL   "determine required documentation for this denial type: medical records, operative notes, supporting diagnosis documentation, prior auth records, LCD coverage criteria"
+}
+
+ACTION GenerateAppealLetter {
+  INPUT  denial_id: string, documentation_list: string, tenant_id: string
+  OUTPUT appeal_letter: string
+  AI     "Generate a professional medical billing appeal letter for this denial. Use the denial reason code, remark code, claim details, clinical documentation, and applicable LCD/NCD coverage criteria to make the strongest possible case for payment. Be specific about the clinical necessity and cite the relevant coverage policy sections."
+}
+
+ACTION AnalyzeDenialPatterns {
+  INPUT  payer_id: string, days_back: number, min_sample_size: number, tenant_id: string
+  OUTPUT patterns: json, pattern_count: number
+  AI     "Analyze denial history for the specified payer over the past N days. Group denials by CPT code, diagnosis code, reason code, and remark code combinations. Identify patterns with denial rates exceeding 20% with a sample size above the minimum threshold. For each significant pattern, describe what is likely causing the denial and what rule change would prevent it. Return structured pattern analysis."
+}
+
+ACTION GeneratePayerRule {
+  INPUT  pattern_json: json, payer_id: string, tenant_id: string
+  OUTPUT rule_name: string, rule_description: string, dsl_text: string, confidence: float
+  AI     "Given this denial pattern analysis, generate an Agicore DSL RULE declaration that would prevent claims matching this pattern from being submitted without the required correction. Use valid Agicore RULE syntax: WHEN ClaimContext.field op literal AND ClaimContext.field op literal THEN FLAG 'action_description' SEVERITY critical PRIORITY 100. Return the rule_name, a plain-language rule_description for billing staff review, the dsl_text, and your confidence score."
+}
+
+ACTION PresentRulesForConfirmation {
+  INPUT  rule_ids: string, tenant_id: string
+  OUTPUT presented_count: number
+  IMPL   "update PayerRule records to status=pending_review; notify billing manager via Eliza interface; present rule_description and dsl_text for each proposal"
+}
+
+ACTION ValidatePayerRuleDSL {
+  INPUT  dsl_text: string, tenant_id: string
+  OUTPUT is_valid: bool, errors: string
+  IMPL   "parse the proposed RULE DSL text against the Agicore parser; verify field references exist in ClaimContext FACT; verify operator and literal types; return validation result"
+}
+
+ACTION ApplyPayerRuleUpdate {
+  INPUT  rule_id: string, confirmed_by: string, tenant_id: string
+  OUTPUT applied: bool
+  IMPL   "update PayerRule.status to active; update PayerRule.confirmed_by and confirmed_at; inject new rule into ClaimAdjudicationEngine RULE evaluation for this payer"
+  EMIT   payer_rule_applied {
+    source: string, rule_id: string, payer_id: string, confirmed_by: string, tenant_id: string
+  }
+}
+
+ACTION ActivatePayerRule {
+  INPUT  rule_id: string, tenant_id: string
+  OUTPUT active: bool
+  IMPL   "set PayerRule.active = true; add rule to live ClaimAdjudicationEngine evaluation; log to configuration audit trail"
+}
+
+ACTION LogDenialPatternData {
+  INPUT  denial_id: string, cpt_code: string, diagnosis_code: string, payer_id: string, reason_code: string, tenant_id: string
+  OUTPUT logged: bool
+  IMPL   "update PatternContext FACT with incremental denial data; recalculate denial_rate for this CPT × payer × reason_code combination; set pattern_significant flag if threshold exceeded"
+}
+
+ACTION DownloadCMSFeeSchedule {
+  INPUT  year: number, locality: string, tenant_id: string
+  OUTPUT schedule_url: string, record_count: number
+  IMPL   "download CMS Physician Fee Schedule zip from CMS.gov for specified year and locality; extract and parse RBRVS data file; return record count"
+}
+
+ACTION ParseFeeScheduleUpdate {
+  INPUT  schedule_url: string, payer_id: string, tenant_id: string
+  OUTPUT entries_parsed: number, entries_changed: number
+  IMPL   "parse CMS fee schedule records; calculate allowed amount = work_RVU × work_GPCI + facility_PE_RVU × PE_GPCI + malpractice_RVU × MP_GPCI × conversion_factor; compare to current FeeScheduleEntry records"
+}
+
+ACTION TriggerSecondaryBilling {
+  INPUT  primary_claim_id: string, tenant_id: string
+  OUTPUT secondary_claim_id: string
+  IMPL   "fetch primary EOB from RemittanceRecord; build secondary 837 with COB information in Loop 2320; submit to secondary payer"
+  EMIT   secondary_claim_submitted {
+    source: string, primary_claim_id: string, secondary_claim_id: string, tenant_id: string
+  }
+}
+
+ACTION GenerateBillingReport {
+  INPUT  days_back: number, tenant_id: string
+  OUTPUT report: string
+  AI     "Analyze billing performance for the past N days. Report on: clean claim rate, denial rate by payer, top denial reasons, average days to payment, outstanding AR by aging bucket (0-30, 31-60, 61-90, 90+), revenue at risk from timely filing deadlines, and which active PayerRules have prevented the most denials. Include recommendations for rule updates based on current denial patterns."
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// VIEWS
+// ─────────────────────────────────────────────────────────────────────────────
+
+VIEW ClaimWorkqueue {
+  ENTITY  ClaimRecord
+  LAYOUT  kanban
+  ACTIONS read, edit
+}
+
+VIEW DenialManagement {
+  ENTITY  DenialRecord
+  LAYOUT  kanban
+  ACTIONS read, edit
+}
+
+VIEW PayerRuleLibrary {
+  ENTITY  PayerRule
+  LAYOUT  table
+  ACTIONS read, edit
+}
+
+VIEW FeeScheduleManager {
+  ENTITY  FeeScheduleEntry
+  LAYOUT  table
+  ACTIONS create, edit
+}
+
+VIEW ARAgingDashboard {
+  ENTITY  ClaimRecord
+  LAYOUT  dashboard
+  ACTIONS read
+}
+
+VIEW AuthorizationTracker {
+  ENTITY  AuthorizationRecord
+  LAYOUT  table
+  ACTIONS create, edit
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// PREFERENCES
+// ─────────────────────────────────────────────────────────────────────────────
+
+PREFERENCE denial_pattern_threshold {
+  TYPE    number
+  DEFAULT 25
+  LABEL   "Denial rate percentage that triggers AI pattern analysis (e.g., 25 = 25%)"
+}
+
+PREFERENCE pattern_min_sample_size {
+  TYPE    number
+  DEFAULT 10
+  LABEL   "Minimum denial count before a pattern is considered significant"
+}
+
+PREFERENCE timely_filing_warning_days {
+  TYPE    number
+  DEFAULT 14
+  LABEL   "Days before timely filing deadline to trigger warning flag"
+}
+
+PREFERENCE auto_approve_contractual_writeoff {
+  TYPE    bool
+  DEFAULT true
+  LABEL   "Auto-post contractual adjustments for CO group denials without manual review"
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// SEED — demo payer rules, contracts, and denial patterns
+// These represent encoded knowledge from real billing experience.
+// ─────────────────────────────────────────────────────────────────────────────
+
+SEED PayerContract {
+  payer_id:           "BCBS"
+  payer_name:         "Blue Cross Blue Shield"
+  contract_version:   "2026-01"
+  effective_date:     "2026-01-01"
+  fee_schedule_id:    "BCBS-2026-MAIN"
+  timely_filing_days: 180
+  appeal_days:        180
+  active:             true
+  tenant_id:          "acme"
+}
+
+SEED PayerContract {
+  payer_id:           "MEDICARE"
+  payer_name:         "Medicare Part B"
+  contract_version:   "2026-CMS"
+  effective_date:     "2026-01-01"
+  fee_schedule_id:    "CMS-RBRVS-2026"
+  timely_filing_days: 365
+  appeal_days:        120
+  active:             true
+  tenant_id:          "acme"
+}
+
+SEED PayerContract {
+  payer_id:           "MEDICAID"
+  payer_name:         "State Medicaid"
+  contract_version:   "2026-STATE"
+  effective_date:     "2026-01-01"
+  fee_schedule_id:    "MEDICAID-2026"
+  timely_filing_days: 90
+  appeal_days:        90
+  active:             true
+  tenant_id:          "acme"
+}
+
+SEED PayerRule {
+  payer_id:          "BCBS"
+  rule_name:         "bcbs_modifier_25_same_day_em_procedure"
+  rule_description:  "BCBS requires modifier 25 on E&M codes (99202-99215) when a procedure is performed the same day. Without it, BCBS bundles the E&M into the procedure and denies it. This rule was generated from 847 denials over 6 months."
+  dsl_text:          "WHEN ClaimContext.has_same_day_procedure == true AND ClaimContext.has_modifier_25 == false AND ClaimContext.payer_id == \"BCBS\" THEN FLAG \"add_modifier_25_em_code\" SEVERITY critical PRIORITY 100"
+  cpt_scope:         "99202,99203,99204,99205,99211,99212,99213,99214,99215"
+  source:            "ai_generated"
+  status:            "active"
+  denial_count:      847
+  confidence:        0.96
+  active:            true
+  tenant_id:         "acme"
+}
+
+SEED PayerRule {
+  payer_id:          "MEDICARE"
+  rule_name:         "medicare_cci_office_visit_bundled_with_injection"
+  rule_description:  "CCI edit: Medicare bundles 99213 with J3301 (triamcinolone injection) when billed same day without modifier 25. Modifier 25 required to establish E&M was separately identifiable."
+  dsl_text:          "WHEN ClaimContext.has_same_day_procedure == true AND ClaimContext.has_modifier_25 == false AND ClaimContext.payer_id == \"MEDICARE\" THEN FLAG \"add_modifier_25_em_code\" SEVERITY critical PRIORITY 100"
+  cpt_scope:         "99213,99214"
+  source:            "ai_generated"
+  status:            "active"
+  denial_count:      312
+  confidence:        0.94
+  active:            true
+  tenant_id:         "acme"
+}
+
+SEED PayerRule {
+  payer_id:          "BCBS"
+  rule_name:         "bcbs_j301_requires_allergy_workup_documentation"
+  rule_description:  "BCBS is denying allergic rhinitis (J30.1) claims citing LCD L34520 — requires documentation of prior allergy workup or failed antihistamine trial. Attach clinical notes confirming workup. Generated from 156 denials in Q1 2026."
+  dsl_text:          "WHEN ClaimContext.diagnosis_primary == \"J30.1\" AND ClaimContext.has_required_docs == false AND ClaimContext.payer_id == \"BCBS\" THEN FLAG \"attach_allergy_workup_documentation\" SEVERITY critical PRIORITY 100"
+  diagnosis_scope:   "J30.1,J30.2,J30.4,J30.9"
+  source:            "ai_generated"
+  status:            "active"
+  denial_count:      156
+  confidence:        0.91
+  active:            true
+  tenant_id:         "acme"
+}
+
+SEED DenialRecord {
+  claim_id:           "CLM-2026-001"
+  denial_group:       "CO"
+  reason_code:        "CO-97"
+  remark_code:        "M15"
+  denial_description: "Claim bundled — payment included in allowance for another service"
+  status:             "classified"
+  action_taken:       "contractual_writeoff"
+  tenant_id:          "acme"
+}
+
+SEED DenialRecord {
+  claim_id:           "CLM-2026-002"
+  denial_group:       "OA"
+  reason_code:        "OA-18"
+  remark_code:        "N115"
+  denial_description: "Duplicate claim — this service was previously adjudicated"
+  status:             "classified"
+  action_taken:       "review_and_resubmit"
+  tenant_id:          "acme"
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// TESTS
+// ─────────────────────────────────────────────────────────────────────────────
+
+TEST payer_contract_create {
+  GIVEN   PayerContract { payer_id: "TEST-PAYER", payer_name: "Test Insurance", contract_version: "2026", effective_date: "2026-01-01", fee_schedule_id: "TEST-FS", tenant_id: "test" }
+  EXPECT  create -> payer_id IS NOT NULL
+  EXPECT  create -> active == true
+  EXPECT  create -> timely_filing_days == 90
+}
+
+TEST claim_record_create {
+  GIVEN   ClaimRecord { patient_id: "PAT-001", payer_id: "BCBS", claim_control: "CLM-TEST-001", service_date: "2026-05-20", tenant_id: "test" }
+  EXPECT  create -> id IS NOT NULL
+  EXPECT  create -> status == "draft"
+  EXPECT  create -> denial_count == 0
+}
+
+TEST payer_rule_pending_review {
+  GIVEN   PayerRule { payer_id: "BCBS", rule_name: "test_rule", rule_description: "Test", dsl_text: "WHEN ClaimContext.payer_id == \"BCBS\" THEN FLAG \"test\"", source: "ai_generated", tenant_id: "test" }
+  EXPECT  create -> status == "pending_review"
+  EXPECT  create -> active == false
+}
+
+TEST denial_record_create {
+  GIVEN   DenialRecord { claim_id: "CLM-001", denial_group: "CO", reason_code: "CO-45", denial_description: "Contractual obligation", tenant_id: "test" }
+  EXPECT  create -> id IS NOT NULL
+  EXPECT  create -> status == "new"
+}

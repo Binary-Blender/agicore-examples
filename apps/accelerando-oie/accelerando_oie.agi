@@ -1,0 +1,672 @@
+// accelerando_oie.agi
+// Accelerando Organizational Intelligence Engine
+//
+// "Crystal Reports for activity logs."
+//
+// Where Crystal Reports turned database records into reports, the OIE turns
+// ERP and CRM activity logs into organizational intelligence. It runs as a
+// standalone Tauri desktop app alongside Accelerando — consuming telemetry
+// from every service call, workflow, and chat interaction, then reasoning
+// over it to surface what matters to leadership.
+//
+// Architecture: Telemetry → Reasoning → Governance → Leadership Dashboard
+//
+//   ENTITY + STAGES          → persists events, insights, automation candidates
+//   PACKET + CHANNEL         → typed ingestion pipeline from Accelerando subsystems
+//   AUTHORITY                → governs who can sign and access insights
+//   COGNITION_ROLE           → OIEAnalyst, SeniorAnalyst, PersonalCoach
+//   REASONER × 4            → daily batch, weekly trend, on-demand, personal coach
+//   SKILLDOC                 → what good insight means (non-engineers own this)
+//   QC_MESH                  → 4-model consensus validates insights before leadership sees them
+//   NBVE + ESCALATION_CHAIN → model quality governance under telemetry load
+//   ACTION × 4             → summarize health, explain bottleneck, propose automation, coach user
+//   VIEW × 5               → dashboard, kanban, split review, monitor, bottleneck list
+//   PREFERENCE × 3         → configurable tenant, window, confidence threshold
+//   SEED                    → demo data: three insights and two automation candidates
+
+APP accelerando_oie {
+  TITLE   "Accelerando OIE"
+  WINDOW  1400x900 frameless
+  DB      oie.db
+  PORT    5261
+  THEME   dark
+  TRAY
+  HOTKEY  "CmdOrCtrl+Shift+O"
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// TELEMETRY DATA MODEL
+// TelemetryEvent: every significant Accelerando action emits one row.
+// input_summary and outcome_summary carry the SENSITIVE modifier:
+// #[serde(skip_serializing)] in Rust + never? in TypeScript.
+// PII never crosses the IPC bridge to the UI layer.
+// ═══════════════════════════════════════════════════════════════════════════════
+
+ENTITY TelemetryEvent {
+  timestamp:           datetime
+  user_id:             string
+  user_roles:          json
+  source:              string REQUIRED
+  event_type:          string REQUIRED
+  tool_or_service:     string
+  input_summary:       json SENSITIVE
+  outcome_summary:     json SENSITIVE
+  success:             bool = true
+  duration_ms:         number
+  correlation_id:      string
+  tenant_id:           string REQUIRED
+  TIMESTAMPS
+  CRUD read, list
+}
+
+ENTITY OrgInsight {
+  tenant_id:    string REQUIRED
+  scope:        string REQUIRED
+  target_id:    string
+  category:     string REQUIRED
+  headline:     string REQUIRED
+  detail:       string REQUIRED
+  confidence:   float
+  impact_score: float
+  reviewed:     bool = false
+  archived:     bool = false
+  TIMESTAMPS
+  CRUD read, list, edit
+}
+
+ENTITY AutomationCandidate {
+  tenant_id:              string REQUIRED
+  pattern_description:    string REQUIRED
+  affected_service:       string REQUIRED
+  frequency_per_week:     number
+  estimated_minutes_saved: number
+  example_context:        json SENSITIVE
+  status:                 string = "pending"
+  reviewer_notes:         string
+  TIMESTAMPS
+  CRUD read, list, edit
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// STAGES — AutomationCandidate review workflow
+// ═══════════════════════════════════════════════════════════════════════════════
+
+STAGES AutomationCandidate.status {
+  TRANSITION "pending" -> "approved" {
+    MATCH any
+    REQUIRE AutomationCandidate.pattern_description IS NOT NULL
+    REQUIRE AutomationCandidate.frequency_per_week >= 3
+  }
+  TRANSITION "pending" -> "dismissed" {
+    MATCH any
+    REQUIRE AutomationCandidate.pattern_description IS NOT NULL
+  }
+  TRANSITION "approved" -> "archived" {
+    MATCH any
+    REQUIRE AutomationCandidate.reviewer_notes IS NOT NULL
+  }
+  TRANSITION "dismissed" -> "archived" {
+    MATCH any
+    REQUIRE AutomationCandidate.pattern_description IS NOT NULL
+  }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// SEMANTIC INFRASTRUCTURE
+// ═══════════════════════════════════════════════════════════════════════════════
+
+PACKET TelemetryPacket {
+  DESCRIPTION "Normalized activity record from any Accelerando subsystem"
+
+  PAYLOAD {
+    source:          string REQUIRED
+    event_type:      string REQUIRED
+    user_id:         string
+    tenant_id:       string REQUIRED
+    success:         bool   REQUIRED
+    duration_ms:     number
+    correlation_id:  string
+  }
+
+  METADATA {
+    PROVENANCE    true
+    LINEAGE       false
+    SIGNATURES    false
+    ADMISSIBILITY true
+    TTL           90
+  }
+
+  VALIDATION {
+    has_source:  source IS NOT NULL
+    has_event:   event_type IS NOT NULL
+    has_tenant:  tenant_id IS NOT NULL
+  }
+}
+
+PACKET InsightPacket {
+  DESCRIPTION "Governance-stamped organizational insight ready for leadership review"
+
+  PAYLOAD {
+    scope:        string REQUIRED
+    category:     string REQUIRED
+    headline:     string REQUIRED
+    confidence:   float
+    impact_score: float
+  }
+
+  METADATA {
+    PROVENANCE    true
+    LINEAGE       true
+    SIGNATURES    true
+    ADMISSIBILITY true
+    TTL           30
+  }
+
+  VALIDATION {
+    valid_scope:    scope IS NOT NULL
+    valid_category: category IS NOT NULL
+    has_headline:   headline IS NOT NULL
+  }
+}
+
+CHANNEL telemetry_ingress {
+  DESCRIPTION "Firehose of every recorded action across Accelerando ERP, CRM, chat, and workflows"
+  PROTOCOL    local
+  DIRECTION   inbound
+  PACKET      TelemetryPacket
+  RETRY       3
+  TIMEOUT     5000
+}
+
+CHANNEL insight_channel {
+  DESCRIPTION "Tamper-evident outbound stream delivering insights to the leadership dashboard"
+  PROTOCOL    local
+  DIRECTION   outbound
+  PACKET      InsightPacket
+  ORDERING    fifo
+}
+
+AUTHORITY OrgAuthority {
+  DESCRIPTION "Signing authority for organizational intelligence artifacts"
+
+  LEVELS {
+    employee:  "Standard employee — no cross-user insight access"
+    team_lead: "Team lead — team-scoped insights"
+    analyst:   "Analyst — can trigger on-demand reasoning"
+    admin:     "Admin — global insights and full dashboard"
+  }
+
+  SIGNING {
+    REQUIRED      true
+    ALGORITHM     "ed25519"
+    VERIFY_CHAIN  true
+  }
+
+  ADMISSIBILITY {
+    valid_signature: signature IS NOT NULL
+  }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// COGNITION ROLES
+// ═══════════════════════════════════════════════════════════════════════════════
+
+COGNITION_ROLE OIEAnalyst {
+  RESPONSIBILITIES  bottleneck_detection, automation_identification, risk_assessment, pattern_recognition, cross_team_analysis
+  MODEL_HIERARCHY   opus, sonnet
+  QC_PROFILE        InsightQuality
+  ESCALATE_TO       SeniorAnalyst
+  PROMOTION_POLICY  SPC_AUTOMATIC
+  FALLBACK_POLICY   ESCALATE
+}
+
+COGNITION_ROLE SeniorAnalyst {
+  RESPONSIBILITIES  strategic_synthesis, executive_summary, complex_risk_assessment, board_level_reporting
+  MODEL_HIERARCHY   opus
+  PROMOTION_POLICY  MANUAL
+  FALLBACK_POLICY   FAIL
+}
+
+COGNITION_ROLE PersonalCoach {
+  RESPONSIBILITIES  user_coaching, workflow_suggestions, personalized_recommendations, training_identification
+  MODEL_HIERARCHY   sonnet, haiku
+  PROMOTION_POLICY  SPC_AUTOMATIC
+  FALLBACK_POLICY   DEGRADE
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// ESCALATION CHAIN
+// ═══════════════════════════════════════════════════════════════════════════════
+
+ESCALATION_CHAIN OIEChain {
+  DESCRIPTION  "Escalates to stronger models when insight quality degrades under telemetry volume"
+  ROLES        OIEAnalyst, SeniorAnalyst
+  ESCALATE_ON {
+    SPC_VIOLATION  3
+    ERROR_RATE     0.10
+    EXPLICIT       true
+  }
+  DEESCALATE_ON {
+    STABILITY_WINDOW 30
+    ERROR_RATE       0.05
+  }
+  COOLDOWN "1800s"
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// NBVE — shadow testing: can sonnet replace opus for daily org analysis?
+// ═══════════════════════════════════════════════════════════════════════════════
+
+NBVE org_reasoner_nbve {
+  DESCRIPTION  "Shadow test: sonnet vs opus on organizational reasoning quality"
+  PRODUCTION   "opus"
+  SHADOW       "sonnet"
+  CHAIN        OIEChain
+  METRICS      [ insight_coherence, actionability_score, bottleneck_precision, risk_recall ]
+  PROMOTION    auto
+  FALLBACK     production
+  SPC {
+    WINDOW               50
+    CONFIDENCE           0.95
+    ACCURACY_THRESHOLD   0.90
+    STABILITY_THRESHOLD  0.92
+    DEFECT_RATE_MAX      0.05
+  }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// SKILLDOC — what "good insight" means (non-engineers own this document)
+// ═══════════════════════════════════════════════════════════════════════════════
+
+SKILLDOC oie_insight_standards {
+  DESCRIPTION  "Defines what constitutes a high-quality organizational insight for leadership"
+  VERSION      "1.0.0"
+  DOMAIN       "operations"
+  CONTENT      "skilldocs/oie_insight_standards.md"
+  KEYWORDS     bottleneck, automation, risk, training, telemetry, operations
+  PRIORITY     20
+
+  GOVERNANCE {
+    SIGNED_BY    OrgAuthority
+    REQUIRE      analyst
+    DISALLOW     export_raw, log_external
+    AUDIT        all_actions
+  }
+
+  COMPRESSION {
+    SEMANTIC_DENSITY    0.85
+    INTENT_PRESERVATION 0.95
+    TOKEN_EFFICIENCY    0.70
+  }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// QC MESH — four independent evaluators, majority consensus, > 5σ at full mesh
+// ═══════════════════════════════════════════════════════════════════════════════
+
+QC_MESH InsightQuality {
+  DESCRIPTION  "Consensus-based validation: OIE insights must be grounded, actionable, and proportionate before leadership sees them"
+  EVALUATORS   [ "claude-opus", "gpt-4o", "gemini-pro", "mistral-large" ]
+  CRITERIA     oie_insight_standards
+  CONSENSUS    majority
+  ON_FAIL      flag
+  SPC {
+    MIN_EVALUATORS   2
+    MAX_EVALUATORS   4
+    DRIFT_RATE       0.10
+    STABILITY_WINDOW 50
+  }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// NODE
+// ═══════════════════════════════════════════════════════════════════════════════
+
+NODE analytics_node {
+  DESCRIPTION "Dedicated analytics environment for OIE reasoning jobs"
+  TYPE        environment
+  HARDWARE    "server"
+  AI_TIER     hybrid
+  COMMS       wifi
+  OFFLINE     false
+  SAFETY      high
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// REASONERS — the company brain: four cadences
+// ═══════════════════════════════════════════════════════════════════════════════
+
+REASONER daily_org_reasoner {
+  DESCRIPTION "Daily batch: 24h of telemetry → bottlenecks, automation candidates, risk signals"
+
+  INPUT {
+    CHANNEL  telemetry_ingress
+    WINDOW   "24h"
+    FILTER   "success IS NOT NULL"
+  }
+
+  USES       OIEAnalyst
+  TIER       2
+
+  OUTPUT {
+    PACKET   InsightPacket
+    CHANNEL  insight_channel
+  }
+
+  SCHEDULE   daily
+  IDEMPOTENT true
+
+  GOVERNANCE {
+    SIGNED_BY    OrgAuthority
+    REQUIRE      analyst
+    AUDIT        all_actions
+  }
+}
+
+REASONER weekly_trend_reasoner {
+  DESCRIPTION "Weekly: 7-day telemetry → cross-team patterns, week-over-week drift, emerging automation candidates"
+
+  INPUT {
+    CHANNEL  telemetry_ingress
+    WINDOW   "7d"
+  }
+
+  USES       SeniorAnalyst
+  TIER       3
+
+  OUTPUT {
+    PACKET   InsightPacket
+    CHANNEL  insight_channel
+  }
+
+  SCHEDULE   weekly
+
+  GOVERNANCE {
+    SIGNED_BY    OrgAuthority
+    REQUIRE      admin
+    AUDIT        all_actions
+  }
+}
+
+REASONER on_demand_summary {
+  DESCRIPTION "Triggered by 'summarize org health' chat command — 24h snapshot for leadership"
+
+  INPUT {
+    CHANNEL  telemetry_ingress
+    WINDOW   "24h"
+  }
+
+  USES       OIEAnalyst
+  TIER       2
+
+  OUTPUT {
+    PACKET   InsightPacket
+    CHANNEL  insight_channel
+  }
+
+  SCHEDULE   on_demand
+
+  GOVERNANCE {
+    SIGNED_BY    OrgAuthority
+    REQUIRE      admin
+    AUDIT        all_access
+  }
+}
+
+REASONER personal_coach_reasoner {
+  DESCRIPTION "Per-user: compares individual patterns against team norms, generates personalized workflow suggestions"
+
+  INPUT {
+    CHANNEL  telemetry_ingress
+    WINDOW   "7d"
+    FILTER   "user_id IS NOT NULL"
+  }
+
+  USES       PersonalCoach
+  TIER       1
+
+  OUTPUT {
+    CHANNEL  insight_channel
+  }
+
+  SCHEDULE   daily
+
+  GOVERNANCE {
+    SIGNED_BY    OrgAuthority
+    REQUIRE      employee
+    AUDIT        all_access
+  }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// ACTIONS
+// ═══════════════════════════════════════════════════════════════════════════════
+
+ACTION summarize_org_health {
+  INPUT   scope: string, tenant_id: string
+  OUTPUT  summary: string
+  AI      """
+    You are the Organizational Intelligence Engine for Accelerando.
+    Analyze the latest organizational activity data for tenant {{tenant_id}} at scope {{scope}}.
+    Produce a concise executive summary covering:
+    - Top 3 operational bottlenecks with estimated business impact
+    - Top 3 automation candidates with estimated weekly time savings
+    - Any active risk signals requiring immediate leadership attention
+    - Overall organizational health score (1-10) with one-sentence rationale
+    Be direct. Use specific numbers where available. Leadership time is scarce.
+  """
+  ROLE    OIEAnalyst
+}
+
+ACTION explain_bottleneck {
+  INPUT   insight_id: string
+  OUTPUT  explanation: string
+  AI      """
+    Given bottleneck insight {{insight_id}}, explain in plain language:
+    - What is happening operationally
+    - Which teams or roles are most affected and at what scale
+    - The most likely root cause based on the observed activity pattern
+    - Two or three concrete steps leadership can take to address it
+    Keep it under 200 words. No jargon. Name the pattern, not the people.
+  """
+  ROLE    OIEAnalyst
+}
+
+ACTION generate_automation_proposal {
+  INPUT   candidate_id: string
+  OUTPUT  proposal: string
+  AI      """
+    Based on automation candidate {{candidate_id}}, draft a workflow automation proposal:
+    - Current manual process: what users are doing repeatedly
+    - Proposed automation: what an Accelerando workflow would do instead
+    - Estimated weekly time savings in minutes
+    - Implementation complexity (low / medium / high) with brief rationale
+    - Which Accelerando workflow primitives would be used
+    Format as a structured proposal ready for engineering sprint planning.
+  """
+  ROLE    SeniorAnalyst
+}
+
+ACTION coach_user {
+  INPUT   user_id: string, insight_id: string
+  OUTPUT  coaching: string
+  AI      """
+    Based on insight {{insight_id}} for user {{user_id}},
+    draft a brief constructive coaching note:
+    - The pattern observed (without blame)
+    - A specific Accelerando feature or shortcut that would help
+    - The expected time saving if adopted
+    Tone: a helpful colleague, not a performance review. Under 100 words.
+  """
+  ROLE    PersonalCoach
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// VIEWS — the leadership console
+// ═══════════════════════════════════════════════════════════════════════════════
+
+VIEW OrgHealthDashboard {
+  ENTITY  OrgInsight
+  LAYOUT  dashboard
+  FIELDS  category, scope, headline, confidence, impact_score, created_at
+  ACTIONS read
+  SIDEBAR icon: BarChart
+}
+
+VIEW InsightReview {
+  ENTITY  OrgInsight
+  LAYOUT  split
+  FIELDS  category, scope, headline, detail, confidence, impact_score, reviewed
+  ACTIONS read, edit
+  SIDEBAR icon: FileText
+}
+
+VIEW BottleneckList {
+  ENTITY  OrgInsight
+  LAYOUT  table
+  FIELDS  headline, scope, impact_score, confidence, created_at, reviewed
+  ACTIONS read, edit
+  SIDEBAR icon: AlertTriangle
+}
+
+VIEW AutomationBoard {
+  ENTITY   AutomationCandidate
+  LAYOUT   kanban
+  GROUP_BY status
+  FIELDS   pattern_description, affected_service, frequency_per_week, estimated_minutes_saved
+  ACTIONS  read, edit
+  SIDEBAR  icon: Zap
+}
+
+VIEW TelemetryMonitor {
+  ENTITY  TelemetryEvent
+  LAYOUT  table
+  FIELDS  source, event_type, success, duration_ms, tenant_id, timestamp
+  ACTIONS read
+  SIDEBAR icon: Activity
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// PREFERENCES
+// ═══════════════════════════════════════════════════════════════════════════════
+
+PREFERENCE active_tenant {
+  TYPE    string
+  DEFAULT "default"
+  KEY     "oie.active_tenant"
+}
+
+PREFERENCE telemetry_window {
+  TYPE    string
+  DEFAULT "24h"
+  KEY     "oie.telemetry_window"
+}
+
+PREFERENCE insight_min_confidence {
+  TYPE    number
+  DEFAULT 0.7
+  KEY     "oie.insight_min_confidence"
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// SEED — demo data: three insights + two automation candidates
+// Shows the dashboard without a live Accelerando connection
+// ═══════════════════════════════════════════════════════════════════════════════
+
+SEED OrgInsight {
+  tenant_id    "demo"
+  scope        "GLOBAL"
+  category     "BOTTLENECK"
+  headline     "Invoice approval averaging 4.2 days — 3x above industry benchmark"
+  detail       "AP team processes 87 invoices per week. 34% require manual rework due to missing PO numbers. Peak backlog occurs Monday mornings after weekend batch imports."
+  confidence   0.91
+  impact_score 0.88
+  reviewed     false
+  archived     false
+}
+
+SEED OrgInsight {
+  tenant_id    "demo"
+  scope        "GLOBAL"
+  category     "AUTOMATION"
+  headline     "Quote-to-cash handoff is manual in 67% of cases — 14 hours per week recoverable"
+  detail       "Sales reps are manually copying quote data into the ERP after CRM approval. An Accelerando workflow could trigger this automatically on deal close."
+  confidence   0.87
+  impact_score 0.82
+  reviewed     false
+  archived     false
+}
+
+SEED OrgInsight {
+  tenant_id    "demo"
+  scope        "TEAM"
+  category     "RISK"
+  headline     "Support ticket escalation rate up 40% this week — concentrated in three service types"
+  detail       "CreateServiceRequest, UpdateTicketStatus, and EscalateToTier2 account for 78% of escalations this week. Correlates with the recent product update deployment on Tuesday."
+  confidence   0.78
+  impact_score 0.75
+  reviewed     false
+  archived     false
+}
+
+SEED AutomationCandidate {
+  tenant_id               "demo"
+  pattern_description     "Users manually re-entering PO numbers on invoices after CRM quote approval"
+  affected_service        "CreateInvoice"
+  frequency_per_week      47
+  estimated_minutes_saved 90
+  status                  "pending"
+}
+
+SEED AutomationCandidate {
+  tenant_id               "demo"
+  pattern_description     "Support agents copy-paste customer address from CRM into ERP service request form"
+  affected_service        "CreateServiceRequest"
+  frequency_per_week      23
+  estimated_minutes_saved 45
+  status                  "pending"
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// TESTS
+// ═══════════════════════════════════════════════════════════════════════════════
+
+TEST telemetry_capture {
+  GIVEN TelemetryEvent {
+    source: "ERP_SERVICE"
+    event_type: "invoice_created"
+    success: true
+    duration_ms: 142
+    tenant_id: "acme"
+  }
+  EXPECT create -> id IS NOT NULL
+  EXPECT get_by_id -> event_type == "invoice_created"
+  EXPECT get_by_id -> success == true
+}
+
+TEST insight_persistence {
+  GIVEN OrgInsight {
+    tenant_id: "acme"
+    scope: "GLOBAL"
+    category: "BOTTLENECK"
+    headline: "Invoice approval averaging 4.2 days"
+    detail: "AP team processing bottleneck identified from telemetry"
+    confidence: 0.87
+    impact_score: 0.85
+  }
+  EXPECT create -> id IS NOT NULL
+  EXPECT get_by_id -> category == "BOTTLENECK"
+  EXPECT get_by_id -> reviewed == false
+}
+
+TEST automation_candidate_lifecycle {
+  GIVEN AutomationCandidate {
+    tenant_id: "acme"
+    pattern_description: "Manual PO number re-entry on invoice creation"
+    affected_service: "CreateInvoice"
+    frequency_per_week: 47
+    estimated_minutes_saved: 90
+  }
+  EXPECT create -> id IS NOT NULL
+  EXPECT get_by_id -> status == "pending"
+}

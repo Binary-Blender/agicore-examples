@@ -1,0 +1,1544 @@
+APP accelerando_interchange {
+  TITLE "Accelerando Interchange"
+  DB    accelerando_interchange
+  PORT  3002
+}
+
+TARGET web { RUNTIME axum  FRONTEND react  DEPLOY docker }
+AUTH   { STRATEGY jwt  EXPIRY "8h"  REFRESH true }
+TENANT { MODEL row_level  ISOLATE strict }
+
+// Standard data interchange for every industry Accelerando serves.
+//
+// The manufacturing interfaces you built in the 90s? EDI X12.
+// The HL7 interfaces you built in healthcare? Same X12 envelope,
+// different transaction sets. One standard. Two industries. One module.
+//
+// All of these formats are fully standardized. The message structures
+// are published specs. The validation rules are published specs.
+// Encoding them as Agicore RULEs is just... doing the obvious thing.
+//
+// Inbound:  external message → parse → validate → transform → ERP entity
+// Outbound: ERP entity → transform → validate → emit → acknowledge
+//
+// Every message is logged. Every error is named. Every acknowledgment
+// is tracked. The interchange is as auditable as the ERP itself.
+
+// ─────────────────────────────────────────────────────────────────────────────
+// ENTITIES
+// ─────────────────────────────────────────────────────────────────────────────
+
+ENTITY TradingPartner {
+  tenant_id:        string REQUIRED
+  partner_id:       string REQUIRED
+  name:             string REQUIRED
+  partner_type:     string REQUIRED
+  standard:         string REQUIRED
+  connection_type:  string REQUIRED
+  isa_sender_id:    string
+  isa_receiver_id:  string
+  msh_application:  string
+  msh_facility:     string
+  fhir_base_url:    string
+  as2_url:          string
+  sftp_host:        string
+  sftp_path:        string
+  active:           bool = true
+  TIMESTAMPS
+  CRUD create, read, list, edit
+}
+
+ENTITY InterchangeMessage {
+  tenant_id:             string REQUIRED
+  partner_id:            string REQUIRED
+  direction:             string REQUIRED
+  standard:              string REQUIRED
+  transaction_type:      string REQUIRED
+  status:                string = "received"
+  raw_payload:           string REQUIRED
+  processed_entity_type: string
+  processed_entity_id:   string
+  error_code:            string
+  error_detail:          string
+  control_number:        string
+  TIMESTAMPS
+  CRUD create, read, list, edit
+}
+
+ENTITY MessageAcknowledgment {
+  tenant_id:   string REQUIRED
+  message_id:  string REQUIRED
+  ack_type:    string REQUIRED
+  ack_code:    string REQUIRED
+  ack_detail:  string
+  sent_at:     datetime
+  TIMESTAMPS
+  CRUD create, read, list
+}
+
+ENTITY InterchangeError {
+  tenant_id:    string REQUIRED
+  message_id:   string REQUIRED
+  error_code:   string REQUIRED
+  error_detail: string REQUIRED
+  segment:      string
+  resolved:     bool = false
+  TIMESTAMPS
+  CRUD create, read, list, edit
+}
+
+STAGES InterchangeMessage.status {
+  TRANSITION "received" -> "validated" {
+    MATCH any
+  }
+  TRANSITION "received" -> "error" {
+    MATCH any
+    REQUIRE InterchangeMessage.error_code IS NOT NULL
+  }
+  TRANSITION "validated" -> "transformed" {
+    MATCH any
+  }
+  TRANSITION "transformed" -> "applied" {
+    MATCH any
+    REQUIRE InterchangeMessage.processed_entity_id IS NOT NULL
+  }
+  TRANSITION "applied" -> "acknowledged" {
+    MATCH any
+  }
+  TRANSITION "error" -> "validated" {
+    MATCH any
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// PACKETS — typed message schemas for every interchange standard
+// ─────────────────────────────────────────────────────────────────────────────
+
+PACKET HL7ADTPacket {
+  message_type:     string
+  message_control:  string
+  sending_app:      string
+  sending_facility: string
+  patient_id:       string
+  patient_name:     string
+  date_of_birth:    string
+  gender:           string
+  admission_date:   string
+  discharge_date:   string
+  visit_number:     string
+  facility_id:      string
+  raw_hl7:          string
+  tenant_id:        string
+  SIGNATURES       true
+  TTL              2555
+}
+
+PACKET HL7ORMPacket {
+  message_type:    string
+  order_number:    string
+  patient_id:      string
+  ordering_provider: string
+  order_datetime:  string
+  order_control:   string
+  service_id:      string
+  quantity:        string
+  raw_hl7:         string
+  tenant_id:       string
+  SIGNATURES      true
+  TTL             365
+}
+
+PACKET HL7ORUPacket {
+  message_type:     string
+  observation_id:   string
+  patient_id:       string
+  order_number:     string
+  result_status:    string
+  result_value:     string
+  result_units:     string
+  reference_range:  string
+  abnormal_flag:    string
+  observation_time: string
+  raw_hl7:          string
+  tenant_id:        string
+  SIGNATURES       true
+  TTL              2555
+}
+
+PACKET FHIRResourcePacket {
+  resource_type:  string
+  resource_id:    string
+  fhir_version:   string
+  operation:      string
+  payload_json:   json
+  source_url:     string
+  tenant_id:      string
+  SIGNATURES     true
+  TTL            365
+}
+
+PACKET X12_850_Packet {
+  interchange_control: string
+  group_control:       string
+  transaction_control: string
+  po_number:           string
+  po_date:             string
+  vendor_isa_id:       string
+  ship_to_id:          string
+  line_items_json:     json
+  terms:               string
+  raw_edi:             string
+  tenant_id:           string
+  TTL                  365
+}
+
+PACKET X12_810_Packet {
+  interchange_control: string
+  invoice_number:      string
+  invoice_date:        string
+  po_number:           string
+  vendor_isa_id:       string
+  invoice_total:       string
+  line_items_json:     json
+  payment_terms:       string
+  raw_edi:             string
+  tenant_id:           string
+  TTL                  365
+}
+
+PACKET X12_856_Packet {
+  interchange_control: string
+  shipment_id:         string
+  ship_date:           string
+  po_number:           string
+  carrier_code:        string
+  tracking_number:     string
+  line_items_json:     json
+  raw_edi:             string
+  tenant_id:           string
+  TTL                  365
+}
+
+PACKET X12_997_Packet {
+  interchange_control: string
+  original_control:    string
+  transaction_set:     string
+  ack_code:            string
+  error_segments:      string
+  raw_edi:             string
+  tenant_id:           string
+  TTL                  90
+}
+
+PACKET X12_837_Packet {
+  interchange_control:  string
+  claim_control:        string
+  patient_id:           string
+  subscriber_id:        string
+  payer_id:             string
+  provider_npi:         string
+  service_date:         string
+  diagnosis_codes:      string
+  procedure_codes:      string
+  claim_total:          string
+  raw_edi:              string
+  tenant_id:            string
+  SIGNATURES           true
+  TTL                  2555
+}
+
+PACKET X12_835_Packet {
+  interchange_control:  string
+  payer_id:             string
+  payee_npi:            string
+  check_number:         string
+  payment_date:         string
+  claims_json:          json
+  raw_edi:              string
+  tenant_id:            string
+  SIGNATURES           true
+  TTL                  2555
+}
+
+PACKET X12_270_Packet {
+  interchange_control: string
+  subscriber_id:       string
+  payer_id:            string
+  provider_npi:        string
+  service_type:        string
+  raw_edi:             string
+  tenant_id:           string
+  TTL                  30
+}
+
+PACKET EDIFACTPacket {
+  message_type:     string
+  interchange_ref:  string
+  sender_id:        string
+  recipient_id:     string
+  document_number:  string
+  document_date:    string
+  line_items_json:  json
+  raw_edifact:      string
+  tenant_id:        string
+  TTL               365
+}
+
+PACKET RosettaNetPacket {
+  pip_code:         string
+  pip_version:      string
+  action_code:      string
+  from_party:       string
+  to_party:         string
+  instance_id:      string
+  payload_xml:      string
+  tenant_id:        string
+  SIGNATURES       true
+  TTL              365
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// CHANNELS — inbound and outbound per standard
+// ─────────────────────────────────────────────────────────────────────────────
+
+CHANNEL hl7_adt_inbound {
+  SOURCE      external_ehr
+  DESTINATION accelerando_interchange
+  TYPE        HL7ADTPacket
+  CAPACITY    100000
+  PERSISTENT  true
+}
+
+CHANNEL hl7_orm_inbound {
+  SOURCE      external_ehr
+  DESTINATION accelerando_interchange
+  TYPE        HL7ORMPacket
+  CAPACITY    50000
+  PERSISTENT  true
+}
+
+CHANNEL hl7_oru_outbound {
+  SOURCE      accelerando_interchange
+  DESTINATION external_ehr
+  TYPE        HL7ORUPacket
+  CAPACITY    50000
+  PERSISTENT  true
+}
+
+CHANNEL fhir_inbound {
+  SOURCE      external_fhir
+  DESTINATION accelerando_interchange
+  TYPE        FHIRResourcePacket
+  CAPACITY    100000
+  PERSISTENT  true
+}
+
+CHANNEL fhir_outbound {
+  SOURCE      accelerando_interchange
+  DESTINATION external_fhir
+  TYPE        FHIRResourcePacket
+  CAPACITY    50000
+  PERSISTENT  true
+}
+
+CHANNEL x12_850_inbound {
+  SOURCE      trading_partner
+  DESTINATION accelerando_interchange
+  TYPE        X12_850_Packet
+  CAPACITY    10000
+  PERSISTENT  true
+}
+
+CHANNEL x12_810_inbound {
+  SOURCE      trading_partner
+  DESTINATION accelerando_interchange
+  TYPE        X12_810_Packet
+  CAPACITY    10000
+  PERSISTENT  true
+}
+
+CHANNEL x12_856_inbound {
+  SOURCE      trading_partner
+  DESTINATION accelerando_interchange
+  TYPE        X12_856_Packet
+  CAPACITY    10000
+  PERSISTENT  true
+}
+
+CHANNEL x12_810_outbound {
+  SOURCE      accelerando_interchange
+  DESTINATION trading_partner
+  TYPE        X12_810_Packet
+  CAPACITY    10000
+  PERSISTENT  true
+}
+
+CHANNEL x12_850_outbound {
+  SOURCE      accelerando_interchange
+  DESTINATION trading_partner
+  TYPE        X12_850_Packet
+  CAPACITY    10000
+  PERSISTENT  true
+}
+
+CHANNEL x12_997_outbound {
+  SOURCE      accelerando_interchange
+  DESTINATION trading_partner
+  TYPE        X12_997_Packet
+  CAPACITY    50000
+  PERSISTENT  true
+}
+
+CHANNEL x12_837_outbound {
+  SOURCE      accelerando_interchange
+  DESTINATION payer
+  TYPE        X12_837_Packet
+  CAPACITY    10000
+  PERSISTENT  true
+}
+
+CHANNEL x12_835_inbound {
+  SOURCE      payer
+  DESTINATION accelerando_interchange
+  TYPE        X12_835_Packet
+  CAPACITY    10000
+  PERSISTENT  true
+}
+
+CHANNEL edifact_inbound {
+  SOURCE      international_partner
+  DESTINATION accelerando_interchange
+  TYPE        EDIFACTPacket
+  CAPACITY    10000
+  PERSISTENT  true
+}
+
+CHANNEL edifact_outbound {
+  SOURCE      accelerando_interchange
+  DESTINATION international_partner
+  TYPE        EDIFACTPacket
+  CAPACITY    10000
+  PERSISTENT  true
+}
+
+CHANNEL rosettanet_inbound {
+  SOURCE      supply_chain_partner
+  DESTINATION accelerando_interchange
+  TYPE        RosettaNetPacket
+  CAPACITY    5000
+  PERSISTENT  true
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// MODULE: InterchangeEngine
+// Global routing and duplicate detection. Every inbound message passes
+// through here before being dispatched to its standard-specific module.
+// ─────────────────────────────────────────────────────────────────────────────
+
+MODULE InterchangeEngine {
+  DESCRIPTION "Global interchange routing — message dispatch, duplicate detection, partner validation, volume monitoring"
+
+  FACT InterchangeContext {
+    partner_id:        string
+    standard:          string = "unknown"
+    transaction_type:  string = ""
+    message_id:        string
+    control_number:    string
+    is_duplicate:      bool   = false
+    partner_active:    bool   = false
+    validation_passed: bool   = false
+    requires_ack:      bool   = true
+    PERSISTENT
+  }
+
+  SCORE message_volume {
+    INITIAL 0
+    MIN     0
+    MAX     100
+    DECAY   20 PER hour
+    THRESHOLD high    AT 80 THEN alert_volume_spike
+    THRESHOLD critical AT 95 THEN throttle_inbound
+  }
+
+  RULE reject_duplicate_message {
+    WHEN     InterchangeContext.is_duplicate == true
+    THEN     FLAG "duplicate_message_rejected"
+    SEVERITY warning
+    PRIORITY 100
+  }
+
+  RULE reject_inactive_partner {
+    WHEN     InterchangeContext.partner_active == false
+    THEN     FLAG "inactive_trading_partner"
+    SEVERITY critical
+    PRIORITY 100
+  }
+
+  RULE send_ack_after_validation {
+    WHEN     InterchangeContext.requires_ack == true
+    AND      InterchangeContext.validation_passed == true
+    THEN     SendFunctionalAcknowledgment
+    SEVERITY info
+  }
+
+  RULE alert_validation_failure {
+    WHEN     InterchangeContext.validation_passed == false
+    AND      InterchangeContext.transaction_type != ""
+    THEN     FLAG "validation_failed"
+    SEVERITY critical
+    PRIORITY 95
+  }
+
+  STATE InterchangeFlow {
+    INITIAL  receiving
+    receiving    { TRANSITION routing     WHEN InterchangeContext.partner_active == true }
+    routing      { TRANSITION validating  WHEN InterchangeContext.standard != "unknown" }
+    validating   { TRANSITION transforming WHEN InterchangeContext.validation_passed == true }
+    validating   { TRANSITION error_state WHEN InterchangeContext.validation_passed == false }
+    transforming { TRANSITION applied     WHEN InterchangeContext.message_id != "" }
+    applied      { TRANSITION acknowledged WHEN InterchangeContext.requires_ack == false }
+    error_state  { ON_ENTER log_interchange_error }
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// MODULE: HL7Module
+// HL7 v2.x message processing — the standard you know from every hospital
+// interface project. ADT events drive patient demographics into the ERP.
+// ORM/ORU handle orders and results. DFT handles charges.
+// Every segment, every field, every required value encoded as RULEs.
+// ─────────────────────────────────────────────────────────────────────────────
+
+MODULE HL7Module {
+  DESCRIPTION "HL7 v2.x inbound/outbound — ADT, ORM, ORU, DFT, MDM. Healthcare and clinical data interchange."
+  ACTIVATE_WHEN InterchangeContext.standard == "hl7v2"
+
+  FACT HL7MessageContext {
+    message_type:      string = ""
+    trigger_event:     string = ""
+    patient_id:        string = ""
+    visit_number:      string = ""
+    sending_app:       string = ""
+    sending_facility:  string = ""
+    has_pid_segment:   bool   = false
+    has_pv1_segment:   bool   = false
+    has_obr_segment:   bool   = false
+    is_test_message:   bool   = false
+    PERSISTENT
+  }
+
+  SCORE hl7_confidence {
+    INITIAL 100
+    MIN     0
+    MAX     100
+    THRESHOLD low     AT 60 THEN flag_hl7_parsing_issue
+    THRESHOLD critical AT 30 THEN reject_hl7_message
+  }
+
+  PATTERN hl7_adt_admit {
+    MATCH    "ADT^A01|patient admit|admission message|A01 event"
+    RESPOND  "Processing ADT^A01 patient admission. Validating PID, PV1 segments. Creating or updating customer/patient record in ERP."
+    SCORE    hl7_confidence +0
+    ASSERT   HL7MessageContext { message_type: "ADT", trigger_event: "A01" }
+    CATEGORY "hl7_adt"
+    PRIORITY 90
+  }
+
+  PATTERN hl7_adt_discharge {
+    MATCH    "ADT^A03|patient discharge|A03 event|discharge message"
+    RESPOND  "Processing ADT^A03 discharge. Updating visit record, triggering DFT charge capture workflow."
+    SCORE    hl7_confidence +0
+    ASSERT   HL7MessageContext { message_type: "ADT", trigger_event: "A03" }
+    CATEGORY "hl7_adt"
+    PRIORITY 90
+  }
+
+  PATTERN hl7_adt_update {
+    MATCH    "ADT^A08|patient update|demographics update|A08 event"
+    RESPOND  "Processing ADT^A08 demographics update. Merging patient record changes."
+    SCORE    hl7_confidence +0
+    ASSERT   HL7MessageContext { message_type: "ADT", trigger_event: "A08" }
+    CATEGORY "hl7_adt"
+    PRIORITY 85
+  }
+
+  PATTERN hl7_orm_order {
+    MATCH    "ORM^O01|order message|new order|O01 event"
+    RESPOND  "Processing ORM^O01 order. Validating ORC, OBR segments. Creating service request in ERP."
+    SCORE    hl7_confidence +0
+    ASSERT   HL7MessageContext { message_type: "ORM", trigger_event: "O01" }
+    CATEGORY "hl7_orm"
+    PRIORITY 90
+  }
+
+  PATTERN hl7_oru_result {
+    MATCH    "ORU^R01|observation result|lab result|R01 event"
+    RESPOND  "Processing ORU^R01 result. Validating OBR, OBX segments. Updating service request status."
+    SCORE    hl7_confidence +0
+    ASSERT   HL7MessageContext { message_type: "ORU", trigger_event: "R01" }
+    CATEGORY "hl7_oru"
+    PRIORITY 85
+  }
+
+  RULE hl7_pid_required {
+    WHEN     HL7MessageContext.message_type == "ADT"
+    AND      HL7MessageContext.has_pid_segment == false
+    THEN     FLAG "hl7_missing_pid_segment"
+    SEVERITY critical
+    PRIORITY 100
+  }
+
+  RULE hl7_pv1_required_for_adt {
+    WHEN     HL7MessageContext.trigger_event == "A01"
+    AND      HL7MessageContext.has_pv1_segment == false
+    THEN     FLAG "hl7_missing_pv1_segment"
+    SEVERITY critical
+    PRIORITY 100
+  }
+
+  RULE hl7_patient_id_required {
+    WHEN     HL7MessageContext.patient_id == ""
+    AND      HL7MessageContext.message_type != ""
+    THEN     FLAG "hl7_missing_patient_id"
+    SEVERITY critical
+    PRIORITY 100
+  }
+
+  RULE hl7_discard_test_messages {
+    WHEN     HL7MessageContext.is_test_message == true
+    THEN     FLAG "hl7_test_message_discarded"
+    SEVERITY info
+    PRIORITY 80
+  }
+
+  RULE hl7_obr_required_for_orm {
+    WHEN     HL7MessageContext.message_type == "ORM"
+    AND      HL7MessageContext.has_obr_segment == false
+    THEN     FLAG "hl7_missing_obr_segment"
+    SEVERITY critical
+    PRIORITY 100
+  }
+
+  STATE HL7Flow {
+    INITIAL  parsing
+    parsing      { TRANSITION validating   WHEN HL7MessageContext.message_type != "" }
+    validating   { TRANSITION transforming WHEN HL7MessageContext.has_pid_segment == true }
+    transforming { TRANSITION applied      WHEN InterchangeContext.validation_passed == true }
+    applied      { ON_ENTER  send_hl7_ack }
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// MODULE: FHIRModule
+// HL7 FHIR R4 — the modern REST-based standard replacing HL7 v2.x.
+// FHIR resources map directly to Accelerando entities.
+// Patient → Customer, Encounter → ServiceTicket, Claim → Invoice.
+// ─────────────────────────────────────────────────────────────────────────────
+
+MODULE FHIRModule {
+  DESCRIPTION "HL7 FHIR R4 — REST-based healthcare data interchange. Patient, Encounter, Claim, Coverage, Observation."
+  ACTIVATE_WHEN InterchangeContext.standard == "fhir"
+
+  FACT FHIRContext {
+    resource_type:   string = ""
+    resource_id:     string = ""
+    operation:       string = ""
+    fhir_version:    string = ""
+    has_identifier:  bool   = false
+    has_subject:     bool   = false
+    is_contained:    bool   = false
+    PERSISTENT
+  }
+
+  SCORE fhir_confidence {
+    INITIAL 100
+    MIN     0
+    MAX     100
+    THRESHOLD low     AT 60 THEN flag_fhir_validation_issue
+    THRESHOLD critical AT 30 THEN reject_fhir_resource
+  }
+
+  PATTERN fhir_patient {
+    MATCH    "Patient|FHIR patient|patient resource"
+    RESPOND  "Processing FHIR Patient resource. Mapping to Accelerando Customer entity."
+    SCORE    fhir_confidence +0
+    ASSERT   FHIRContext { resource_type: "Patient" }
+    CATEGORY "fhir"
+    PRIORITY 90
+  }
+
+  PATTERN fhir_encounter {
+    MATCH    "Encounter|FHIR encounter|clinical encounter|visit resource"
+    RESPOND  "Processing FHIR Encounter. Mapping to ServiceTicket with clinical metadata."
+    SCORE    fhir_confidence +0
+    ASSERT   FHIRContext { resource_type: "Encounter" }
+    CATEGORY "fhir"
+    PRIORITY 90
+  }
+
+  PATTERN fhir_claim {
+    MATCH    "Claim|FHIR claim|insurance claim|claim resource"
+    RESPOND  "Processing FHIR Claim. Mapping to Invoice with payer, diagnosis, and procedure coding."
+    SCORE    fhir_confidence +0
+    ASSERT   FHIRContext { resource_type: "Claim" }
+    CATEGORY "fhir"
+    PRIORITY 90
+  }
+
+  PATTERN fhir_coverage {
+    MATCH    "Coverage|insurance coverage|FHIR coverage|coverage resource"
+    RESPOND  "Processing FHIR Coverage. Mapping subscriber and payer to Contract entity."
+    SCORE    fhir_confidence +0
+    ASSERT   FHIRContext { resource_type: "Coverage" }
+    CATEGORY "fhir"
+    PRIORITY 85
+  }
+
+  PATTERN fhir_observation {
+    MATCH    "Observation|clinical observation|FHIR observation|vital sign|lab value"
+    RESPOND  "Processing FHIR Observation. Storing result against patient record."
+    SCORE    fhir_confidence +0
+    ASSERT   FHIRContext { resource_type: "Observation" }
+    CATEGORY "fhir"
+    PRIORITY 80
+  }
+
+  RULE fhir_identifier_required {
+    WHEN     FHIRContext.resource_type != ""
+    AND      FHIRContext.has_identifier == false
+    THEN     FLAG "fhir_missing_identifier"
+    SEVERITY critical
+    PRIORITY 100
+  }
+
+  RULE fhir_subject_required_for_clinical {
+    WHEN     FHIRContext.resource_type == "Observation"
+    AND      FHIRContext.has_subject == false
+    THEN     FLAG "fhir_missing_subject_reference"
+    SEVERITY critical
+    PRIORITY 100
+  }
+
+  RULE fhir_r4_version_required {
+    WHEN     FHIRContext.fhir_version != "4.0"
+    AND      FHIRContext.resource_type != ""
+    THEN     FLAG "fhir_version_mismatch"
+    SEVERITY warning
+    PRIORITY 80
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// MODULE: X12Module
+// ANSI X12 EDI — the workhorse standard of North American business.
+// Manufacturing: 850 PO, 810 Invoice, 856 ASN, 855 Acknowledgment
+// Healthcare: 837 Claim, 835 Remittance, 270/271 Eligibility
+// The envelope is identical. Only the transaction set changes.
+// ─────────────────────────────────────────────────────────────────────────────
+
+MODULE X12Module {
+  DESCRIPTION "ANSI X12 EDI — supply chain (850/810/856/855) and healthcare (837/835/270/271). One envelope, every industry."
+  ACTIVATE_WHEN InterchangeContext.standard == "x12"
+
+  FACT EDIContext {
+    transaction_set:    string = ""
+    interchange_id:     string = ""
+    group_control:      string = ""
+    transaction_control: string = ""
+    sender_isa_id:      string = ""
+    receiver_isa_id:    string = ""
+    po_number:          string = ""
+    invoice_number:     string = ""
+    has_isa_segment:    bool   = false
+    has_gs_segment:     bool   = false
+    has_st_segment:     bool   = false
+    has_beg_segment:    bool   = false
+    isa_validated:      bool   = false
+    PERSISTENT
+  }
+
+  SCORE edi_confidence {
+    INITIAL 100
+    MIN     0
+    MAX     100
+    THRESHOLD low     AT 60 THEN flag_edi_parsing_issue
+    THRESHOLD critical AT 30 THEN reject_edi_transaction
+  }
+
+  // Supply chain transaction sets
+
+  PATTERN x12_850_inbound {
+    MATCH    "850|purchase order|inbound PO|vendor PO|EDI 850"
+    RESPOND  "Processing X12 850 Purchase Order. Validating ISA/GS envelope, BEG segment, PO1 line items. Creating PurchaseOrder in ERP."
+    SCORE    edi_confidence +0
+    ASSERT   EDIContext { transaction_set: "850" }
+    CATEGORY "x12_supply_chain"
+    PRIORITY 90
+  }
+
+  PATTERN x12_810_inbound {
+    MATCH    "810|EDI invoice|vendor invoice|inbound invoice|EDI 810"
+    RESPOND  "Processing X12 810 Invoice. Validating BIG header, IT1 line items, TDS total. Creating vendor Invoice in ERP."
+    SCORE    edi_confidence +0
+    ASSERT   EDIContext { transaction_set: "810" }
+    CATEGORY "x12_supply_chain"
+    PRIORITY 90
+  }
+
+  PATTERN x12_856_inbound {
+    MATCH    "856|advance ship notice|ASN|ship notice|EDI 856"
+    RESPOND  "Processing X12 856 ASN. Validating BSN header, HL hierarchy, TD3 carrier. Updating InventoryItem receipt status in ERP."
+    SCORE    edi_confidence +0
+    ASSERT   EDIContext { transaction_set: "856" }
+    CATEGORY "x12_supply_chain"
+    PRIORITY 90
+  }
+
+  PATTERN x12_855_outbound {
+    MATCH    "855|PO acknowledgment|purchase order ack|EDI 855"
+    RESPOND  "Generating X12 855 Purchase Order Acknowledgment. Mapping from Accelerando PO status. Emitting to trading partner."
+    SCORE    edi_confidence +0
+    ASSERT   EDIContext { transaction_set: "855" }
+    CATEGORY "x12_supply_chain"
+    PRIORITY 85
+  }
+
+  // Healthcare transaction sets
+
+  PATTERN x12_837_outbound {
+    MATCH    "837|healthcare claim|insurance claim|EDI 837|claim submission"
+    RESPOND  "Generating X12 837 Healthcare Claim. Mapping Invoice to CLM segment, diagnosis ICD-10 codes, procedure CPT codes, NPI. Emitting to payer."
+    SCORE    edi_confidence +0
+    ASSERT   EDIContext { transaction_set: "837" }
+    CATEGORY "x12_healthcare"
+    PRIORITY 90
+  }
+
+  PATTERN x12_835_inbound {
+    MATCH    "835|remittance|ERA|explanation of benefits|EOB|EDI 835"
+    RESPOND  "Processing X12 835 Remittance Advice. Matching CLP claim payments to Invoice records. Posting adjustments."
+    SCORE    edi_confidence +0
+    ASSERT   EDIContext { transaction_set: "835" }
+    CATEGORY "x12_healthcare"
+    PRIORITY 90
+  }
+
+  PATTERN x12_270_outbound {
+    MATCH    "270|eligibility inquiry|eligibility check|benefits inquiry|EDI 270"
+    RESPOND  "Generating X12 270 Eligibility Inquiry. Mapping subscriber demographics and service type codes to payer."
+    SCORE    edi_confidence +0
+    ASSERT   EDIContext { transaction_set: "270" }
+    CATEGORY "x12_healthcare"
+    PRIORITY 85
+  }
+
+  PATTERN x12_271_inbound {
+    MATCH    "271|eligibility response|benefits response|EDI 271"
+    RESPOND  "Processing X12 271 Eligibility Response. Parsing EB segments, updating Coverage record in ERP."
+    SCORE    edi_confidence +0
+    ASSERT   EDIContext { transaction_set: "271" }
+    CATEGORY "x12_healthcare"
+    PRIORITY 85
+  }
+
+  // Validation rules — the published spec encoded as Agicore RULEs
+
+  RULE x12_isa_segment_required {
+    WHEN     EDIContext.has_isa_segment == false
+    AND      EDIContext.sender_isa_id != ""
+    THEN     FLAG "x12_missing_isa_segment"
+    SEVERITY critical
+    PRIORITY 100
+  }
+
+  RULE x12_gs_segment_required {
+    WHEN     EDIContext.has_gs_segment == false
+    AND      EDIContext.has_isa_segment == true
+    THEN     FLAG "x12_missing_gs_segment"
+    SEVERITY critical
+    PRIORITY 100
+  }
+
+  RULE x12_beg_required_for_850 {
+    WHEN     EDIContext.transaction_set == "850"
+    AND      EDIContext.has_beg_segment == false
+    THEN     FLAG "x12_850_missing_beg_segment"
+    SEVERITY critical
+    PRIORITY 100
+  }
+
+  RULE x12_po_number_required_for_850 {
+    WHEN     EDIContext.transaction_set == "850"
+    AND      EDIContext.po_number == ""
+    THEN     FLAG "x12_850_missing_po_number"
+    SEVERITY critical
+    PRIORITY 100
+  }
+
+  RULE x12_always_send_997 {
+    WHEN     EDIContext.isa_validated == true
+    AND      InterchangeContext.requires_ack == true
+    THEN     SendFunctionalAcknowledgment
+    SEVERITY info
+  }
+
+  RULE x12_reject_unknown_transaction_set {
+    WHEN     EDIContext.transaction_set == ""
+    AND      EDIContext.has_st_segment == true
+    THEN     FLAG "x12_unknown_transaction_set"
+    SEVERITY critical
+    PRIORITY 95
+  }
+
+  STATE EDIFlow {
+    INITIAL  envelope_validation
+    envelope_validation { TRANSITION segment_validation WHEN EDIContext.isa_validated == true }
+    segment_validation  { TRANSITION transformation     WHEN EDIContext.has_beg_segment == true }
+    transformation      { TRANSITION applied            WHEN InterchangeContext.validation_passed == true }
+    applied             { ON_ENTER  send_997_ack }
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// MODULE: EDIFACTModule
+// UN/EDIFACT — the international EDI standard. European and global
+// supply chains use EDIFACT where North America uses X12.
+// Same concept, different syntax. ORDERS=850, INVOIC=810, DESADV=856.
+// ─────────────────────────────────────────────────────────────────────────────
+
+MODULE EDIFACTModule {
+  DESCRIPTION "UN/EDIFACT — international supply chain interchange. ORDERS, INVOIC, DESADV, ORDRSP, REMADV."
+  ACTIVATE_WHEN InterchangeContext.standard == "edifact"
+
+  FACT EDIFACTContext {
+    message_type:     string = ""
+    interchange_ref:  string = ""
+    sender_id:        string = ""
+    recipient_id:     string = ""
+    document_number:  string = ""
+    has_unb_segment:  bool   = false
+    has_unh_segment:  bool   = false
+    has_bgm_segment:  bool   = false
+    PERSISTENT
+  }
+
+  SCORE edifact_confidence {
+    INITIAL 100
+    MIN     0
+    MAX     100
+    THRESHOLD low     AT 60 THEN flag_edifact_issue
+    THRESHOLD critical AT 30 THEN reject_edifact_message
+  }
+
+  PATTERN edifact_orders {
+    MATCH    "ORDERS|EDIFACT purchase order|international PO|UN/EDIFACT order"
+    RESPOND  "Processing EDIFACT ORDERS (equivalent: X12 850). Validating UNB/UNH envelope, BGM header, LIN line items. Creating PurchaseOrder."
+    SCORE    edifact_confidence +0
+    ASSERT   EDIFACTContext { message_type: "ORDERS" }
+    CATEGORY "edifact"
+    PRIORITY 90
+  }
+
+  PATTERN edifact_invoic {
+    MATCH    "INVOIC|EDIFACT invoice|international invoice|UN/EDIFACT invoice"
+    RESPOND  "Processing EDIFACT INVOIC (equivalent: X12 810). Validating BGM, DTM, MOA segments. Creating Invoice in ERP."
+    SCORE    edifact_confidence +0
+    ASSERT   EDIFACTContext { message_type: "INVOIC" }
+    CATEGORY "edifact"
+    PRIORITY 90
+  }
+
+  PATTERN edifact_desadv {
+    MATCH    "DESADV|dispatch advice|EDIFACT shipment|delivery notice"
+    RESPOND  "Processing EDIFACT DESADV (equivalent: X12 856 ASN). Updating InventoryItem receipt in ERP."
+    SCORE    edifact_confidence +0
+    ASSERT   EDIFACTContext { message_type: "DESADV" }
+    CATEGORY "edifact"
+    PRIORITY 85
+  }
+
+  PATTERN edifact_remadv {
+    MATCH    "REMADV|remittance advice|EDIFACT payment|payment advice"
+    RESPOND  "Processing EDIFACT REMADV (equivalent: X12 835). Posting payment against Invoice records."
+    SCORE    edifact_confidence +0
+    ASSERT   EDIFACTContext { message_type: "REMADV" }
+    CATEGORY "edifact"
+    PRIORITY 85
+  }
+
+  RULE edifact_unb_required {
+    WHEN     EDIFACTContext.has_unb_segment == false
+    AND      EDIFACTContext.sender_id != ""
+    THEN     FLAG "edifact_missing_unb_segment"
+    SEVERITY critical
+    PRIORITY 100
+  }
+
+  RULE edifact_bgm_required {
+    WHEN     EDIFACTContext.message_type != ""
+    AND      EDIFACTContext.has_bgm_segment == false
+    THEN     FLAG "edifact_missing_bgm_segment"
+    SEVERITY critical
+    PRIORITY 100
+  }
+
+  RULE edifact_document_number_required {
+    WHEN     EDIFACTContext.document_number == ""
+    AND      EDIFACTContext.message_type != ""
+    THEN     FLAG "edifact_missing_document_number"
+    SEVERITY critical
+    PRIORITY 100
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// MODULE: RosettaNetModule
+// RosettaNet PIPs — high-tech manufacturing and supply chain B2B.
+// Semiconductor, electronics, and aerospace industries use PIPs
+// for purchase orders, order acknowledgments, and shipment notifications.
+// PIP 3A4 = purchase order. PIP 3A7 = PO change. PIP 3B2 = ASN.
+// ─────────────────────────────────────────────────────────────────────────────
+
+MODULE RosettaNetModule {
+  DESCRIPTION "RosettaNet PIPs — high-tech manufacturing B2B. PIP 3A4, 3A7, 3B2, 3C3. Semiconductor and electronics supply chains."
+  ACTIVATE_WHEN InterchangeContext.standard == "rosettanet"
+
+  FACT RosettaNetContext {
+    pip_code:       string = ""
+    pip_version:    string = ""
+    action_code:    string = ""
+    from_party:     string = ""
+    to_party:       string = ""
+    instance_id:    string = ""
+    is_signal:      bool   = false
+    requires_signal: bool  = true
+    PERSISTENT
+  }
+
+  SCORE rosettanet_confidence {
+    INITIAL 100
+    MIN     0
+    MAX     100
+    THRESHOLD low     AT 60 THEN flag_rosettanet_issue
+    THRESHOLD critical AT 30 THEN reject_rosettanet_pip
+  }
+
+  PATTERN pip_3a4_po {
+    MATCH    "PIP 3A4|RosettaNet purchase order|3A4 PurchaseOrderRequest"
+    RESPOND  "Processing RosettaNet PIP 3A4 Purchase Order Request. Validating RNIF envelope, creating PurchaseOrder. Preparing 3A4 PurchaseOrderConfirmation signal."
+    SCORE    rosettanet_confidence +0
+    ASSERT   RosettaNetContext { pip_code: "3A4", requires_signal: true }
+    CATEGORY "rosettanet"
+    PRIORITY 90
+  }
+
+  PATTERN pip_3a7_change {
+    MATCH    "PIP 3A7|RosettaNet PO change|3A7 ChangeOrder"
+    RESPOND  "Processing RosettaNet PIP 3A7 Change Purchase Order Request. Updating PurchaseOrder in ERP."
+    SCORE    rosettanet_confidence +0
+    ASSERT   RosettaNetContext { pip_code: "3A7", requires_signal: true }
+    CATEGORY "rosettanet"
+    PRIORITY 85
+  }
+
+  PATTERN pip_3b2_asn {
+    MATCH    "PIP 3B2|RosettaNet ship notice|3B2 AdvanceShipmentNotification"
+    RESPOND  "Processing RosettaNet PIP 3B2 ASN. Updating InventoryItem receipt in ERP."
+    SCORE    rosettanet_confidence +0
+    ASSERT   RosettaNetContext { pip_code: "3B2", requires_signal: true }
+    CATEGORY "rosettanet"
+    PRIORITY 85
+  }
+
+  PATTERN pip_3c3_invoice {
+    MATCH    "PIP 3C3|RosettaNet invoice|3C3 InvoiceRequest"
+    RESPOND  "Processing RosettaNet PIP 3C3 Invoice. Mapping to Invoice entity with PO reference."
+    SCORE    rosettanet_confidence +0
+    ASSERT   RosettaNetContext { pip_code: "3C3", requires_signal: true }
+    CATEGORY "rosettanet"
+    PRIORITY 85
+  }
+
+  RULE rosettanet_party_required {
+    WHEN     RosettaNetContext.from_party == ""
+    AND      RosettaNetContext.pip_code != ""
+    THEN     FLAG "rosettanet_missing_from_party"
+    SEVERITY critical
+    PRIORITY 100
+  }
+
+  RULE rosettanet_instance_id_required {
+    WHEN     RosettaNetContext.instance_id == ""
+    AND      RosettaNetContext.pip_code != ""
+    THEN     FLAG "rosettanet_missing_instance_id"
+    SEVERITY critical
+    PRIORITY 100
+  }
+
+  RULE send_rosettanet_signal {
+    WHEN     RosettaNetContext.requires_signal == true
+    AND      RosettaNetContext.is_signal == false
+    AND      InterchangeContext.validation_passed == true
+    THEN     SendRosettaNetSignal
+    SEVERITY info
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// WORKFLOWS — full inbound and outbound interchange sequences
+// ─────────────────────────────────────────────────────────────────────────────
+
+WORKFLOW inbound_hl7_adt {
+  IDEMPOTENT false
+  STEP parse_message      { ACTION ParseHL7Message       ON_FAIL abort }
+  STEP validate_segments  { ACTION ValidateHL7Segments   ON_FAIL abort }
+  STEP check_duplicate    { ACTION CheckDuplicateMessage ON_FAIL skip  }
+  STEP transform_to_erp   { ACTION TransformHL7ToERP     ON_FAIL abort }
+  STEP apply_to_erp       { ACTION ApplyERPChanges       ON_FAIL abort }
+  STEP send_ack           { ACTION SendHL7ACK            ON_FAIL skip  }
+  STEP log_message        { ACTION LogInterchangeMessage ON_FAIL skip  }
+}
+
+WORKFLOW inbound_hl7_orm {
+  IDEMPOTENT false
+  STEP parse_message      { ACTION ParseHL7Message       ON_FAIL abort }
+  STEP validate_segments  { ACTION ValidateHL7Segments   ON_FAIL abort }
+  STEP check_duplicate    { ACTION CheckDuplicateMessage ON_FAIL skip  }
+  STEP create_order       { ACTION CreateServiceRequest  ON_FAIL abort }
+  STEP send_ack           { ACTION SendHL7ACK            ON_FAIL skip  }
+  STEP log_message        { ACTION LogInterchangeMessage ON_FAIL skip  }
+}
+
+WORKFLOW inbound_x12_850 {
+  IDEMPOTENT false
+  STEP validate_envelope  { ACTION ValidateX12Envelope   ON_FAIL abort }
+  STEP validate_segments  { ACTION ValidateX12Segments   ON_FAIL abort }
+  STEP check_duplicate    { ACTION CheckDuplicateMessage ON_FAIL abort }
+  STEP transform_to_po    { ACTION TransformX12ToPO      ON_FAIL abort }
+  STEP create_po          { ACTION ERPCreatePurchaseOrder ON_FAIL abort }
+  STEP send_997           { ACTION Send997Acknowledgment ON_FAIL skip  }
+  STEP send_855           { ACTION GenerateX12_855       ON_FAIL skip  }
+  STEP log_message        { ACTION LogInterchangeMessage ON_FAIL skip  }
+}
+
+WORKFLOW inbound_x12_810 {
+  IDEMPOTENT false
+  STEP validate_envelope  { ACTION ValidateX12Envelope   ON_FAIL abort }
+  STEP validate_segments  { ACTION ValidateX12Segments   ON_FAIL abort }
+  STEP match_po           { ACTION MatchInvoiceToPO      ON_FAIL abort }
+  STEP transform_invoice  { ACTION TransformX12ToInvoice ON_FAIL abort }
+  STEP create_invoice     { ACTION ERPCreateVendorInvoice ON_FAIL abort }
+  STEP send_997           { ACTION Send997Acknowledgment ON_FAIL skip  }
+  STEP log_message        { ACTION LogInterchangeMessage ON_FAIL skip  }
+}
+
+WORKFLOW inbound_x12_856 {
+  IDEMPOTENT true
+  STEP validate_envelope  { ACTION ValidateX12Envelope   ON_FAIL abort }
+  STEP validate_segments  { ACTION ValidateX12Segments   ON_FAIL abort }
+  STEP match_shipment     { ACTION MatchShipmentToPO     ON_FAIL abort }
+  STEP update_inventory   { ACTION UpdateInventoryReceipt ON_FAIL abort }
+  STEP send_997           { ACTION Send997Acknowledgment ON_FAIL skip  }
+  STEP log_message        { ACTION LogInterchangeMessage ON_FAIL skip  }
+}
+
+WORKFLOW outbound_x12_837 {
+  IDEMPOTENT false
+  STEP fetch_invoice      { ACTION FetchInvoiceForClaim  ON_FAIL abort }
+  STEP build_claim        { ACTION BuildX12_837          ON_FAIL abort }
+  STEP validate_claim     { ACTION ValidateX12Segments   ON_FAIL abort }
+  STEP transmit_claim     { ACTION TransmitToChannel     ON_FAIL abort }
+  STEP track_submission   { ACTION LogInterchangeMessage ON_FAIL skip  }
+}
+
+WORKFLOW inbound_x12_835 {
+  IDEMPOTENT false
+  STEP validate_envelope  { ACTION ValidateX12Envelope   ON_FAIL abort }
+  STEP parse_remittance   { ACTION ParseX12_835          ON_FAIL abort }
+  STEP match_claims       { ACTION MatchRemittanceToClaims ON_FAIL abort }
+  STEP post_payments      { ACTION PostClaimPayments     ON_FAIL abort }
+  STEP post_adjustments   { ACTION PostClaimAdjustments  ON_FAIL skip  }
+  STEP send_997           { ACTION Send997Acknowledgment ON_FAIL skip  }
+  STEP log_message        { ACTION LogInterchangeMessage ON_FAIL skip  }
+}
+
+WORKFLOW inbound_edifact {
+  IDEMPOTENT false
+  STEP validate_envelope  { ACTION ValidateEDIFACTEnvelope ON_FAIL abort }
+  STEP parse_message      { ACTION ParseEDIFACTMessage    ON_FAIL abort }
+  STEP check_duplicate    { ACTION CheckDuplicateMessage  ON_FAIL skip  }
+  STEP transform_to_erp   { ACTION TransformEDIFACTToERP  ON_FAIL abort }
+  STEP apply_to_erp       { ACTION ApplyERPChanges        ON_FAIL abort }
+  STEP send_contrl        { ACTION SendEDIFACTContrl      ON_FAIL skip  }
+  STEP log_message        { ACTION LogInterchangeMessage  ON_FAIL skip  }
+}
+
+WORKFLOW inbound_rosettanet_pip {
+  IDEMPOTENT false
+  STEP validate_rnif      { ACTION ValidateRNIFEnvelope   ON_FAIL abort }
+  STEP parse_pip          { ACTION ParseRosettaNetPIP     ON_FAIL abort }
+  STEP check_duplicate    { ACTION CheckDuplicateMessage  ON_FAIL abort }
+  STEP transform_to_erp   { ACTION TransformPIPToERP      ON_FAIL abort }
+  STEP apply_to_erp       { ACTION ApplyERPChanges        ON_FAIL abort }
+  STEP send_signal        { ACTION SendRosettaNetSignal   ON_FAIL skip  }
+  STEP log_message        { ACTION LogInterchangeMessage  ON_FAIL skip  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// ACTIONS
+// ─────────────────────────────────────────────────────────────────────────────
+
+ACTION ParseHL7Message {
+  INPUT  raw_hl7: string, partner_id: string, tenant_id: string
+  OUTPUT message_type: string, trigger_event: string, segments_json: json
+  IMPL   "parse HL7 v2.x pipe-delimited message, extract MSH segment fields, return structured segment map"
+}
+
+ACTION ValidateHL7Segments {
+  INPUT  segments_json: json, message_type: string, tenant_id: string
+  OUTPUT is_valid: bool, errors: string
+  IMPL   "validate required segments for message_type against HL7 v2.x spec, set HL7MessageContext boolean flags, return validation result and error list"
+}
+
+ACTION TransformHL7ToERP {
+  INPUT  segments_json: json, message_type: string, tenant_id: string
+  OUTPUT entity_type: string, entity_json: json
+  IMPL   "map HL7 segment fields to Accelerando entity: ADT→Customer+Visit, ORM→ServiceRequest, ORU→ServiceTicket update, DFT→Invoice line item"
+}
+
+ACTION SendHL7ACK {
+  INPUT  message_control: string, ack_code: string, partner_id: string, tenant_id: string
+  OUTPUT success: bool
+  IMPL   "generate HL7 ACK message with MSH, MSA segments, transmit via partner connection (MLLP or HTTP), log to MessageAcknowledgment"
+}
+
+ACTION ValidateX12Envelope {
+  INPUT  raw_edi: string, partner_id: string, tenant_id: string
+  OUTPUT is_valid: bool, isa_control: string, transaction_set: string, errors: string
+  IMPL   "parse X12 ISA/GS/ST envelope segments, validate sender ISA ID against TradingPartner record, set EDIContext flags, return validation result"
+}
+
+ACTION ValidateX12Segments {
+  INPUT  raw_edi: string, transaction_set: string, tenant_id: string
+  OUTPUT is_valid: bool, errors: string, segment_count: number
+  IMPL   "validate required segments for transaction_set against X12 published spec, set EDIContext boolean flags, return validation result and error list"
+}
+
+ACTION TransformX12ToPO {
+  INPUT  raw_edi: string, partner_id: string, tenant_id: string
+  OUTPUT po_json: json
+  IMPL   "map X12 850 BEG/PO1/CTT segments to Accelerando PurchaseOrder and POLineItem structure"
+}
+
+ACTION TransformX12ToInvoice {
+  INPUT  raw_edi: string, partner_id: string, tenant_id: string
+  OUTPUT invoice_json: json
+  IMPL   "map X12 810 BIG/IT1/TDS segments to Accelerando Invoice and InvoiceLineItem structure"
+}
+
+ACTION MatchInvoiceToPO {
+  INPUT  po_number: string, vendor_id: string, tenant_id: string
+  OUTPUT po_id: string, match_found: bool
+  IMPL   "look up PurchaseOrder by po_number and vendor_id in ERP, validate that invoice amount is within PO tolerance, return po_id"
+}
+
+ACTION MatchShipmentToPO {
+  INPUT  po_number: string, partner_id: string, tenant_id: string
+  OUTPUT po_id: string, match_found: bool
+  IMPL   "look up PurchaseOrder by po_number, validate line items against PO, return po_id for receipt update"
+}
+
+ACTION UpdateInventoryReceipt {
+  INPUT  po_id: string, line_items_json: json, tenant_id: string
+  OUTPUT items_received: number
+  IMPL   "update InventoryItem quantities received, update PurchaseOrder status to received, create receipt record"
+  EMIT   inventory_received {
+    source: string, po_id: string, items_received: number, tenant_id: string
+  }
+}
+
+ACTION Send997Acknowledgment {
+  INPUT  interchange_control: string, ack_code: string, partner_id: string, tenant_id: string
+  OUTPUT success: bool
+  IMPL   "generate X12 997 Functional Acknowledgment with AK1/AK2/AK9 segments, transmit via AS2 or SFTP to partner, log to MessageAcknowledgment"
+}
+
+ACTION GenerateX12_855 {
+  INPUT  po_id: string, partner_id: string, tenant_id: string
+  OUTPUT raw_edi: string
+  IMPL   "transform PurchaseOrder to X12 855 BAK/PO1 segments, wrap in ISA/GS envelope, emit to x12_850_outbound channel"
+}
+
+ACTION BuildX12_837 {
+  INPUT  invoice_id: string, payer_id: string, tenant_id: string
+  OUTPUT raw_edi: string
+  IMPL   "transform Invoice to X12 837 CLM/DTP/SV1 segments with ICD-10 diagnosis and CPT procedure codes, NPI, wrap in ISA/GS/ST envelope"
+}
+
+ACTION ParseX12_835 {
+  INPUT  raw_edi: string, tenant_id: string
+  OUTPUT claims_json: json, payment_total: float
+  IMPL   "parse X12 835 CLP/SVC/PLB segments, extract claim payment and adjustment amounts, return structured claims list"
+}
+
+ACTION MatchRemittanceToClaims {
+  INPUT  claims_json: json, payer_id: string, tenant_id: string
+  OUTPUT matched_count: number, unmatched_claims: string
+  IMPL   "match 835 CLP claim payment records to Invoice records by claim_control number, flag unmatched for manual review"
+}
+
+ACTION PostClaimPayments {
+  INPUT  claims_json: json, tenant_id: string
+  OUTPUT posted_count: number, total_posted: float
+  IMPL   "create Payment records in ERP for each matched claim, update Invoice status to paid or partially paid"
+  EMIT   claim_payment_posted {
+    source: string, payer_id: string, posted_count: number, total_posted: float, tenant_id: string
+  }
+}
+
+ACTION PostClaimAdjustments {
+  INPUT  claims_json: json, tenant_id: string
+  OUTPUT adjustments_posted: number
+  IMPL   "post CAS adjustment reason codes as credit/debit memo lines against Invoice records"
+}
+
+ACTION CheckDuplicateMessage {
+  INPUT  control_number: string, partner_id: string, transaction_type: string, tenant_id: string
+  OUTPUT is_duplicate: bool, original_message_id: string
+  IMPL   "look up InterchangeMessage by control_number + partner_id + transaction_type, set InterchangeContext.is_duplicate, return result"
+}
+
+ACTION ValidateEDIFACTEnvelope {
+  INPUT  raw_edifact: string, partner_id: string, tenant_id: string
+  OUTPUT is_valid: bool, message_type: string, errors: string
+  IMPL   "parse EDIFACT UNB/UNG/UNH envelope segments, validate sender/recipient identifiers against TradingPartner record"
+}
+
+ACTION ParseEDIFACTMessage {
+  INPUT  raw_edifact: string, message_type: string, tenant_id: string
+  OUTPUT segments_json: json
+  IMPL   "parse EDIFACT message segments for message_type (ORDERS, INVOIC, DESADV, REMADV), return structured segment map"
+}
+
+ACTION TransformEDIFACTToERP {
+  INPUT  segments_json: json, message_type: string, tenant_id: string
+  OUTPUT entity_type: string, entity_json: json
+  IMPL   "map EDIFACT segments to Accelerando entities: ORDERS→PurchaseOrder, INVOIC→Invoice, DESADV→InventoryReceipt, REMADV→Payment"
+}
+
+ACTION SendEDIFACTContrl {
+  INPUT  interchange_ref: string, ack_code: string, partner_id: string, tenant_id: string
+  OUTPUT success: bool
+  IMPL   "generate EDIFACT CONTRL acknowledgment message, transmit to partner, log to MessageAcknowledgment"
+}
+
+ACTION ValidateRNIFEnvelope {
+  INPUT  payload_xml: string, partner_id: string, tenant_id: string
+  OUTPUT is_valid: bool, pip_code: string, instance_id: string
+  IMPL   "validate RosettaNet RNIF 2.0 service header, preamble header, and delivery header. Verify digital signature against partner certificate."
+}
+
+ACTION ParseRosettaNetPIP {
+  INPUT  payload_xml: string, pip_code: string, tenant_id: string
+  OUTPUT pip_content_json: json
+  IMPL   "parse PIP-specific XML payload (3A4 PurchaseOrderRequest, 3B2 ASN, 3C3 Invoice), return structured content"
+}
+
+ACTION TransformPIPToERP {
+  INPUT  pip_content_json: json, pip_code: string, tenant_id: string
+  OUTPUT entity_type: string, entity_json: json
+  IMPL   "map PIP content to Accelerando entities: 3A4→PurchaseOrder, 3A7→PO update, 3B2→InventoryReceipt, 3C3→Invoice"
+}
+
+ACTION SendRosettaNetSignal {
+  INPUT  instance_id: string, pip_code: string, signal_code: string, partner_id: string, tenant_id: string
+  OUTPUT success: bool
+  IMPL   "generate RosettaNet signal document (ReceiptAcknowledgment or Exception), sign with tenant certificate, transmit via HTTPS to partner endpoint"
+}
+
+ACTION SendFunctionalAcknowledgment {
+  INPUT  message_id: string, standard: string, partner_id: string, tenant_id: string
+  OUTPUT success: bool
+  IMPL   "dispatch to appropriate acknowledgment action by standard: X12→Send997, HL7→SendHL7ACK, EDIFACT→SendEDIFACTContrl, RosettaNet→SendRosettaNetSignal"
+}
+
+ACTION ApplyERPChanges {
+  INPUT  entity_type: string, entity_json: json, tenant_id: string
+  OUTPUT entity_id: string
+  IMPL   "upsert the entity into Accelerando ERP via internal API — Customer, Invoice, PurchaseOrder, InventoryItem, ServiceRequest — return created/updated entity_id"
+  EMIT   erp_entity_applied {
+    source: string, entity_type: string, entity_id: string, tenant_id: string
+  }
+}
+
+ACTION LogInterchangeMessage {
+  INPUT  partner_id: string, direction: string, standard: string, transaction_type: string,
+         raw_payload: string, entity_id: string, status: string, tenant_id: string
+  OUTPUT message_id: string
+  IMPL   "create InterchangeMessage record with full audit data, return message_id"
+}
+
+ACTION GenerateInterchangeReport {
+  INPUT  days_back: number, tenant_id: string
+  OUTPUT report: string
+  AI     "Analyze interchange message history for the past N days. Identify volume trends by standard and partner, error rate by transaction type, partners with high error rates, and any validation failures that indicate a spec mismatch or partner configuration issue. Return a structured report with recommendations."
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// VIEWS
+// ─────────────────────────────────────────────────────────────────────────────
+
+VIEW InterchangeDashboard {
+  ENTITY  InterchangeMessage
+  LAYOUT  dashboard
+  ACTIONS read
+}
+
+VIEW MessageQueue {
+  ENTITY  InterchangeMessage
+  LAYOUT  table
+  ACTIONS read, edit
+}
+
+VIEW ErrorQueue {
+  ENTITY  InterchangeError
+  LAYOUT  kanban
+  ACTIONS read, edit
+}
+
+VIEW TradingPartnerManager {
+  ENTITY  TradingPartner
+  LAYOUT  table
+  ACTIONS create, edit
+}
+
+VIEW AcknowledgmentLog {
+  ENTITY  MessageAcknowledgment
+  LAYOUT  table
+  ACTIONS read
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// PREFERENCES
+// ─────────────────────────────────────────────────────────────────────────────
+
+PREFERENCE duplicate_detection_window_hours {
+  TYPE    number
+  DEFAULT 24
+  LABEL   "Hours to check back for duplicate interchange control numbers"
+}
+
+PREFERENCE ack_timeout_minutes {
+  TYPE    number
+  DEFAULT 60
+  LABEL   "Minutes to wait for acknowledgment before flagging as unacknowledged"
+}
+
+PREFERENCE max_message_size_kb {
+  TYPE    number
+  DEFAULT 10240
+  LABEL   "Maximum inbound message size in KB before rejection"
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// SEED — demo trading partners across all supported standards
+// ─────────────────────────────────────────────────────────────────────────────
+
+SEED TradingPartner {
+  partner_id:      "northgate-supplies"
+  name:            "Northgate Supplies"
+  partner_type:    "vendor"
+  standard:        "x12"
+  connection_type: "as2"
+  isa_sender_id:   "NORTHGATE001"
+  isa_receiver_id: "ACCELERANDO01"
+  active:          true
+  tenant_id:       "acme"
+}
+
+SEED TradingPartner {
+  partner_id:      "brightline-payer"
+  name:            "Brightline Insurance"
+  partner_type:    "payer"
+  standard:        "x12"
+  connection_type: "sftp"
+  isa_sender_id:   "BRIGHTPAY001"
+  isa_receiver_id: "ACCELERANDO01"
+  active:          true
+  tenant_id:       "acme"
+}
+
+SEED TradingPartner {
+  partner_id:      "vertex-ehr"
+  name:            "Vertex EHR System"
+  partner_type:    "ehr"
+  standard:        "hl7v2"
+  connection_type: "mllp"
+  msh_application: "VERTEX_EHR"
+  msh_facility:    "VERTEX_MAIN"
+  active:          true
+  tenant_id:       "acme"
+}
+
+SEED TradingPartner {
+  partner_id:      "acme-erp-fhir"
+  name:            "Acme FHIR Gateway"
+  partner_type:    "ehr"
+  standard:        "fhir"
+  connection_type: "http"
+  fhir_base_url:   "https://fhir.acme-health.example/r4"
+  active:          true
+  tenant_id:       "acme"
+}
+
+SEED TradingPartner {
+  partner_id:      "heidelberg-gmbh"
+  name:            "Heidelberg GmbH"
+  partner_type:    "vendor"
+  standard:        "edifact"
+  connection_type: "sftp"
+  isa_sender_id:   "HEIDELBERG001"
+  isa_receiver_id: "ACCELERANDO01"
+  active:          true
+  tenant_id:       "acme"
+}
+
+SEED TradingPartner {
+  partner_id:      "intel-supply-chain"
+  name:            "Intel Supply Chain Portal"
+  partner_type:    "customer"
+  standard:        "rosettanet"
+  connection_type: "http"
+  isa_sender_id:   "INTEL_SC_001"
+  isa_receiver_id: "ACCELERANDO01"
+  active:          true
+  tenant_id:       "acme"
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// TESTS
+// ─────────────────────────────────────────────────────────────────────────────
+
+TEST trading_partner_create {
+  GIVEN   TradingPartner { partner_id: "test-vendor", name: "Test Vendor", partner_type: "vendor", standard: "x12", connection_type: "as2", tenant_id: "test" }
+  EXPECT  create -> partner_id IS NOT NULL
+  EXPECT  create -> active == true
+}
+
+TEST interchange_message_create {
+  GIVEN   InterchangeMessage { partner_id: "test-vendor", direction: "inbound", standard: "x12", transaction_type: "850", raw_payload: "ISA*...", tenant_id: "test" }
+  EXPECT  create -> id IS NOT NULL
+  EXPECT  create -> status == "received"
+}
+
+TEST interchange_error_create {
+  GIVEN   InterchangeError { message_id: "msg-001", error_code: "HL7_MISSING_PID", error_detail: "PID segment not found", tenant_id: "test" }
+  EXPECT  create -> id IS NOT NULL
+  EXPECT  create -> resolved == false
+}
+
+TEST acknowledgment_create {
+  GIVEN   MessageAcknowledgment { message_id: "msg-001", ack_type: "997", ack_code: "AA", tenant_id: "test" }
+  EXPECT  create -> id IS NOT NULL
+  EXPECT  get_by_id -> ack_code == "AA"
+}

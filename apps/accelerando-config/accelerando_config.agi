@@ -1,0 +1,1156 @@
+APP accelerando_config {
+  TITLE "Accelerando Configuration Intelligence"
+  DB    accelerando_config
+  WINDOW 1400x900 frameless
+}
+
+// The ERP that knows itself.
+//
+// ERP customization looks infinite. It isn't.
+// It's a combinatorial space over ~20 industries × 5 size tiers
+// × 10 regulatory frameworks × 50 workflow patterns.
+// SAP's implementation consultants navigate this space manually.
+// Accelerando encodes it once as a deterministic expert system.
+//
+// Phase 1: AI-guided intake → initial configuration generated
+// Phase 2: ES monitors business state → recommends known configurations
+// Phase 3: Operator confirms → deterministic application, no AI required
+//
+// What used to cost $500k and 3 months takes one conversation.
+
+// ─────────────────────────────────────────────────────────────────────────────
+// ENTITIES — configuration library and audit trail
+// ─────────────────────────────────────────────────────────────────────────────
+
+ENTITY ConfigurationTemplate {
+  config_id:       string REQUIRED
+  name:            string REQUIRED
+  industry:        string REQUIRED
+  size_tier:       string REQUIRED
+  compliance_tags: string
+  modules_to_add:  string REQUIRED
+  preferences_json: json
+  description:     string REQUIRED
+  usage_count:     number = 0
+  active:          bool   = true
+  TIMESTAMPS
+  CRUD create, read, list, edit
+}
+
+ENTITY ConfigurationChange {
+  tenant_id:       string REQUIRED
+  change_type:     string REQUIRED
+  config_id:       string
+  operator_id:     string REQUIRED
+  before_state:    json
+  after_state:     json
+  modules_added:   string
+  modules_removed: string
+  triggered_by:    string REQUIRED
+  TIMESTAMPS
+  CRUD create, read, list
+}
+
+ENTITY ComplianceCheck {
+  tenant_id:    string REQUIRED
+  framework:    string REQUIRED
+  status:       string = "pending"
+  gaps_found:   number = 0
+  gap_detail:   json
+  checked_at:   datetime
+  remediated_at: datetime
+  TIMESTAMPS
+  CRUD create, read, list, edit
+}
+
+STAGES ComplianceCheck.status {
+  TRANSITION "pending" -> "clean" {
+    MATCH any
+    REQUIRE ComplianceCheck.gaps_found IS NOT NULL
+  }
+  TRANSITION "pending" -> "gaps_found" {
+    MATCH any
+    REQUIRE ComplianceCheck.gap_detail IS NOT NULL
+  }
+  TRANSITION "gaps_found" -> "remediated" {
+    MATCH any
+    REQUIRE ComplianceCheck.remediated_at IS NOT NULL
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// MODULE: ConfigurationEngine
+// Master configuration state. Every other module reads and writes this FACT.
+// Setup is a conversation. The FACT is the accumulating picture of the business.
+// ─────────────────────────────────────────────────────────────────────────────
+
+MODULE ConfigurationEngine {
+  DESCRIPTION "Master configuration state — intake flow, profile accumulation, deployment gate"
+
+  FACT ConfigurationProfile {
+    tenant_id:                string
+    industry:                 string = "general"
+    employee_tier:            string = "startup"
+    revenue_tier:             string = "pre_revenue"
+    approval_complexity:      string = "flat"
+    has_inventory:            bool   = false
+    has_manufacturing:        bool   = false
+    has_multi_warehouse:      bool   = false
+    has_subscription_billing: bool   = false
+    has_project_billing:      bool   = false
+    has_bom_module:           bool   = false
+    has_time_tracking:        bool   = false
+    has_government_contracts: bool   = false
+    has_multi_entity:         bool   = false
+    has_international:        bool   = false
+    compliance_sox:           bool   = false
+    compliance_hipaa:         bool   = false
+    compliance_government:    bool   = false
+    compliance_gdpr:          bool   = false
+    active_modules:           string = "core"
+    setup_complete:           bool   = false
+    matched_template_id:      string = ""
+    PERSISTENT
+  }
+
+  SCORE configuration_completeness {
+    INITIAL 0
+    MIN     0
+    MAX     100
+    THRESHOLD low      AT 25 THEN prompt_industry_question
+    THRESHOLD partial  AT 50 THEN prompt_compliance_question
+    THRESHOLD ready    AT 75 THEN suggest_configuration
+    THRESHOLD complete AT 95 THEN finalize_configuration
+  }
+
+  PATTERN start_setup {
+    MATCH    "set up|configure|get started|initial setup|onboard|first time|configure accelerando|set up my erp"
+    RESPOND  "Let's configure Accelerando for your business. I'll ask a few questions and then match you to a known configuration — or generate a custom one if you're unusual. First: what industry are you in?"
+    SCORE    configuration_completeness +10
+    ASSERT   ConfigurationProfile { setup_complete: false }
+    CATEGORY "setup"
+    PRIORITY 90
+  }
+
+  PATTERN what_template_am_i {
+    MATCH    "what configuration|what template|how am I configured|what modules do I have|show my configuration|current setup"
+    RESPOND  "Your current configuration: industry={{industry}}, tier={{employee_tier}}, active modules={{active_modules}}. Compliance flags: SOX={{compliance_sox}}, HIPAA={{compliance_hipaa}}. Template matched: {{matched_template_id}}."
+    SCORE    configuration_completeness +5
+    ASSERT   ConfigurationProfile { tenant_id: "" }
+    CATEGORY "meta"
+    PRIORITY 70
+  }
+
+  PATTERN reconfigure {
+    MATCH    "reconfigure|update configuration|change our setup|add a module|expand the system|we need more features"
+    RESPOND  "I can update your configuration. The ES will check your current profile against known configurations and recommend what to add. What's changed in your business?"
+    SCORE    configuration_completeness +10
+    ASSERT   ConfigurationProfile { setup_complete: false }
+    CATEGORY "setup"
+    PRIORITY 80
+  }
+
+  RULE block_deploy_until_complete {
+    WHEN     ConfigurationProfile.setup_complete == false
+    AND      ConfigurationProfile.industry == "general"
+    THEN     FLAG "incomplete_setup"
+    SEVERITY warning
+    PRIORITY 85
+  }
+
+  RULE auto_match_template {
+    WHEN     ConfigurationProfile.setup_complete == false
+    AND      ConfigurationProfile.matched_template_id == ""
+    AND      ConfigurationProfile.industry != "general"
+    THEN     MatchConfigurationTemplate
+    SEVERITY info
+  }
+
+  STATE SetupFlow {
+    INITIAL  intake
+    intake       { TRANSITION profiling  WHEN ConfigurationProfile.industry != "general" }
+    profiling    { TRANSITION compliance WHEN ConfigurationProfile.employee_tier != "startup" }
+    compliance   { TRANSITION matching   WHEN configuration_completeness >= 75 }
+    matching     { TRANSITION review     WHEN ConfigurationProfile.matched_template_id != "" }
+    review       { TRANSITION deployed   WHEN ConfigurationProfile.setup_complete == true }
+    deployed     { ON_ENTER  notify_configuration_applied }
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// MODULE: IndustryAdvisor
+// Industry-specific configuration recommendations. Each vertical has a known
+// set of modules, workflows, and preferences that apply to it.
+// ─────────────────────────────────────────────────────────────────────────────
+
+MODULE IndustryAdvisor {
+  DESCRIPTION "Industry-specific configuration — manufacturing, SaaS, services, retail, healthcare, construction"
+  ACTIVATE_WHEN ConfigurationProfile.industry != "general"
+
+  FACT IndustryContext {
+    detected_industry:      string = ""
+    sub_vertical:           string = ""
+    has_physical_product:   bool   = false
+    has_recurring_revenue:  bool   = false
+    has_billable_hours:     bool   = false
+    has_regulated_data:     bool   = false
+    PERSISTENT
+  }
+
+  SCORE industry_match {
+    INITIAL 0
+    MIN     0
+    MAX     100
+    THRESHOLD low  AT 40 THEN request_industry_detail
+    THRESHOLD high AT 80 THEN apply_industry_template
+  }
+
+  PATTERN industry_manufacturing {
+    MATCH    "manufacturing|make products|fabricate|assembly|factory|production|we manufacture|build products|industrial"
+    RESPOND  "Manufacturing — got it. Do you have multiple production facilities or warehouses? And do you manage bills of materials?"
+    SCORE    industry_match +40
+    ASSERT   ConfigurationProfile { industry: "manufacturing", has_manufacturing: true, has_inventory: true }
+    CATEGORY "industry"
+    PRIORITY 90
+  }
+
+  PATTERN industry_manufacturing_multi_site {
+    MATCH    "multiple warehouses|multiple facilities|multi-site|several locations|distribution centers"
+    RESPOND  "Multi-site manufacturing — adding multi-warehouse configuration. This includes inter-warehouse transfers, location-level inventory, and consolidated reporting."
+    SCORE    industry_match +20
+    ASSERT   ConfigurationProfile { has_multi_warehouse: true }
+    CATEGORY "industry"
+    PRIORITY 85
+  }
+
+  PATTERN industry_saas {
+    MATCH    "SaaS|software|subscription|monthly recurring|ARR|MRR|cloud software|software company"
+    RESPOND  "SaaS — got it. I'll configure subscription billing, MRR tracking, and churn detection. Are you B2B, B2C, or both?"
+    SCORE    industry_match +40
+    ASSERT   ConfigurationProfile { industry: "saas", has_subscription_billing: true }
+    CATEGORY "industry"
+    PRIORITY 90
+  }
+
+  PATTERN industry_professional_services {
+    MATCH    "consulting|professional services|agency|law firm|accounting firm|advisory|we bill by the hour|billable hours"
+    RESPOND  "Professional services — configuring project billing, time tracking, and utilization reporting. Do you work on retainer, hourly, or fixed-fee projects?"
+    SCORE    industry_match +40
+    ASSERT   ConfigurationProfile { industry: "services", has_project_billing: true, has_time_tracking: true }
+    CATEGORY "industry"
+    PRIORITY 90
+  }
+
+  PATTERN industry_retail {
+    MATCH    "retail|store|shop|sell products|point of sale|e-commerce|consumer goods|we sell to consumers"
+    RESPOND  "Retail — configuring inventory management, POS integration hooks, and seasonal workflow templates. Do you sell online, in-store, or both?"
+    SCORE    industry_match +40
+    ASSERT   ConfigurationProfile { industry: "retail", has_inventory: true }
+    CATEGORY "industry"
+    PRIORITY 90
+  }
+
+  PATTERN industry_healthcare {
+    MATCH    "healthcare|medical|clinic|hospital|health services|patient|HIPAA|dental|veterinary"
+    RESPOND  "Healthcare — HIPAA compliance is mandatory for your industry. I'm flagging this for the compliance configuration. Do you bill insurance, patients directly, or both?"
+    SCORE    industry_match +40
+    ASSERT   ConfigurationProfile { industry: "healthcare", has_regulated_data: true, compliance_hipaa: true }
+    CATEGORY "industry"
+    PRIORITY 90
+  }
+
+  PATTERN industry_construction {
+    MATCH    "construction|contractor|builder|project-based|job costing|subcontractor|building|infrastructure"
+    RESPOND  "Construction — configuring job costing, progress billing, and subcontractor management. Do you have government or public-sector contracts?"
+    SCORE    industry_match +40
+    ASSERT   ConfigurationProfile { industry: "construction", has_project_billing: true }
+    CATEGORY "industry"
+    PRIORITY 90
+  }
+
+  RULE manufacturing_needs_bom {
+    WHEN     ConfigurationProfile.has_manufacturing == true
+    AND      ConfigurationProfile.has_bom_module == false
+    THEN     FLAG "recommend_bom_module"
+    SEVERITY warning
+    PRIORITY 80
+  }
+
+  RULE saas_needs_subscription_module {
+    WHEN     ConfigurationProfile.industry == "saas"
+    AND      ConfigurationProfile.has_subscription_billing == false
+    THEN     FLAG "recommend_subscription_billing"
+    SEVERITY warning
+    PRIORITY 80
+  }
+
+  RULE services_needs_time_tracking {
+    WHEN     ConfigurationProfile.has_billable_hours == true
+    AND      ConfigurationProfile.has_time_tracking == false
+    THEN     FLAG "recommend_time_tracking"
+    SEVERITY warning
+    PRIORITY 80
+  }
+
+  RULE healthcare_requires_hipaa {
+    WHEN     ConfigurationProfile.industry == "healthcare"
+    AND      ConfigurationProfile.compliance_hipaa == false
+    THEN     FLAG "hipaa_mandatory_for_healthcare"
+    SEVERITY critical
+    PRIORITY 100
+  }
+
+  RULE multi_warehouse_needs_transfers {
+    WHEN     ConfigurationProfile.has_multi_warehouse == true
+    AND      ConfigurationProfile.has_inventory == false
+    THEN     FLAG "recommend_inventory_module"
+    SEVERITY warning
+    PRIORITY 85
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// MODULE: GrowthAdvisor
+// Size-tier transition intelligence. Every company grows through the same
+// inflection points. The ES knows exactly what changes at each one.
+// ─────────────────────────────────────────────────────────────────────────────
+
+MODULE GrowthAdvisor {
+  DESCRIPTION "Growth-stage configuration transitions — startup to enterprise, each stage has known requirements"
+  ACTIVATE_WHEN ConfigurationProfile.employee_tier != "enterprise"
+
+  FACT GrowthContext {
+    employee_count:      number = 0
+    annual_revenue:      float  = 0.0
+    customer_count:      number = 0
+    invoice_avg_days:    float  = 0.0
+    ar_overdue_rate:     float  = 0.0
+    needs_tier_upgrade:  bool   = false
+    needs_tier_downgrade: bool  = false
+    PERSISTENT
+  }
+
+  SCORE growth_readiness {
+    INITIAL 0
+    MIN     0
+    MAX     100
+    THRESHOLD low  AT 30 THEN assess_growth_stage
+    THRESHOLD high AT 75 THEN recommend_tier_upgrade
+  }
+
+  PATTERN set_headcount {
+    MATCH    "we have X employees|team of|headcount is|we hired|staff of|people on the team|employees now"
+    RESPOND  "Got it — updating your growth profile. How many employees are you at now?"
+    SCORE    growth_readiness +20
+    ASSERT   GrowthContext { needs_tier_upgrade: false }
+    CATEGORY "growth"
+    PRIORITY 80
+  }
+
+  PATTERN company_grew {
+    MATCH    "we just hired|we hit a hundred|growing fast|scaled up|doubling|team doubled|passed fifty employees|past a hundred"
+    RESPOND  "Growth is great — it usually means some configuration upgrades are due. What's the new headcount?"
+    SCORE    growth_readiness +30
+    ASSERT   GrowthContext { needs_tier_upgrade: true }
+    CATEGORY "growth"
+    PRIORITY 85
+  }
+
+  PATTERN new_revenue_milestone {
+    MATCH    "crossing a million|hit ten million|ARR milestone|revenue growing|series A|raised funding|new round"
+    RESPOND  "Congratulations! Revenue milestones often trigger configuration needs — board-level reporting, audit readiness, tighter approval chains. What's the new ARR?"
+    SCORE    growth_readiness +25
+    ASSERT   GrowthContext { needs_tier_upgrade: true }
+    CATEGORY "growth"
+    PRIORITY 80
+  }
+
+  PATTERN going_international {
+    MATCH    "international|global|overseas|foreign currency|multi-currency|expand to Europe|sell internationally"
+    RESPOND  "International expansion requires multi-currency, entity-level reporting, and likely GDPR compliance. I'll add those to your configuration profile."
+    SCORE    growth_readiness +20
+    ASSERT   ConfigurationProfile { has_international: true, compliance_gdpr: true }
+    CATEGORY "growth"
+    PRIORITY 85
+  }
+
+  PATTERN adding_entity {
+    MATCH    "new subsidiary|new entity|acquired a company|holding company|parent company|multi-entity|consolidation"
+    RESPOND  "Multi-entity structures need consolidated reporting, inter-company eliminations, and entity-level access controls. Adding multi-entity configuration."
+    SCORE    growth_readiness +20
+    ASSERT   ConfigurationProfile { has_multi_entity: true }
+    CATEGORY "growth"
+    PRIORITY 85
+  }
+
+  RULE startup_to_small_transition {
+    WHEN     GrowthContext.employee_count > 10
+    AND      ConfigurationProfile.employee_tier == "startup"
+    THEN     FLAG "recommend_small_tier_upgrade"
+    SEVERITY warning
+    PRIORITY 75
+  }
+
+  RULE small_to_medium_transition {
+    WHEN     GrowthContext.employee_count > 50
+    AND      ConfigurationProfile.employee_tier == "small"
+    THEN     FLAG "recommend_medium_tier_upgrade"
+    SEVERITY warning
+    PRIORITY 80
+  }
+
+  RULE medium_to_large_transition {
+    WHEN     GrowthContext.employee_count > 250
+    AND      ConfigurationProfile.employee_tier == "medium"
+    THEN     FLAG "recommend_large_tier_upgrade"
+    SEVERITY warning
+    PRIORITY 80
+  }
+
+  RULE large_to_enterprise_transition {
+    WHEN     GrowthContext.employee_count > 1000
+    AND      ConfigurationProfile.employee_tier == "large"
+    THEN     FLAG "recommend_enterprise_tier_upgrade"
+    SEVERITY warning
+    PRIORITY 80
+  }
+
+  RULE ar_stress_signal {
+    WHEN     GrowthContext.ar_overdue_rate > 20.0
+    THEN     FLAG "recommend_tighter_credit_controls"
+    SEVERITY warning
+    PRIORITY 70
+  }
+
+  RULE international_needs_multi_currency {
+    WHEN     ConfigurationProfile.has_international == true
+    AND      ConfigurationProfile.has_multi_entity == false
+    THEN     FLAG "recommend_multi_entity_module"
+    SEVERITY warning
+    PRIORITY 85
+  }
+
+  STATE GrowthFlow {
+    INITIAL  stable
+    stable       { TRANSITION assessing   WHEN GrowthContext.needs_tier_upgrade == true }
+    assessing    { TRANSITION recommending WHEN growth_readiness >= 75 }
+    recommending { TRANSITION applying    WHEN ConfigurationProfile.matched_template_id != "" }
+    applying     { TRANSITION stable      WHEN ConfigurationProfile.employee_tier != "startup" }
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// MODULE: ComplianceAdvisor
+// Regulatory gap detection. Compliance requirements are deterministic:
+// either you meet the standard or you don't. The ES knows every gap.
+// "sox_gap_journal_approval" is not a judgment call — it's a fact.
+// ─────────────────────────────────────────────────────────────────────────────
+
+MODULE ComplianceAdvisor {
+  DESCRIPTION "Regulatory gap detection — SOX, HIPAA, government contracting, GDPR, ISO. Every gap has a name."
+  ACTIVATE_WHEN ConfigurationProfile.compliance_sox == true
+
+  FACT ComplianceContext {
+    sox_journal_approval_missing:      bool = false
+    sox_4eyes_missing:                 bool = false
+    sox_audit_trail_missing:           bool = false
+    hipaa_access_controls_missing:     bool = false
+    hipaa_baa_tracking_missing:        bool = false
+    government_cost_accounting_missing: bool = false
+    government_far_workflows_missing:  bool = false
+    gdpr_data_residency_missing:       bool = false
+    gdpr_right_to_erasure_missing:     bool = false
+    gaps_detected:                     bool = false
+    PERSISTENT
+  }
+
+  SCORE compliance_score {
+    INITIAL 100
+    MIN     0
+    MAX     100
+    THRESHOLD critical AT 60 THEN escalate_compliance_gaps
+    THRESHOLD warning  AT 80 THEN flag_compliance_gaps
+    THRESHOLD clean    AT 95 THEN certify_compliance_clean
+  }
+
+  PATTERN sox_required {
+    MATCH    "SOX|Sarbanes-Oxley|public company|SEC reporting|going public|IPO|audited financials|external audit"
+    RESPOND  "SOX compliance requires: 4-eyes approval on journal entries, segregation of AP/AR roles, immutable audit trail, and quarterly reconciliation workflows. Scanning your current configuration for gaps."
+    SCORE    compliance_score -10
+    ASSERT   ConfigurationProfile { compliance_sox: true }
+    CATEGORY "compliance"
+    PRIORITY 95
+  }
+
+  PATTERN hipaa_required {
+    MATCH    "HIPAA|patient data|health information|PHI|medical records|healthcare compliance|BAA"
+    RESPOND  "HIPAA requires access controls on all PHI, BAA tracking for business associates, and audit logs on every data access. Adding HIPAA configuration layer."
+    SCORE    compliance_score -10
+    ASSERT   ConfigurationProfile { compliance_hipaa: true }
+    CATEGORY "compliance"
+    PRIORITY 95
+  }
+
+  PATTERN government_required {
+    MATCH    "government contract|federal contract|defense contract|FAR compliance|DCAA|cost accounting standards|CAS"
+    RESPOND  "Government contracting requires FAR-compliant approval workflows, DCAA-auditable cost accounting, and segregated contract reporting. This is a significant configuration package."
+    SCORE    compliance_score -15
+    ASSERT   ConfigurationProfile { compliance_government: true, has_government_contracts: true }
+    CATEGORY "compliance"
+    PRIORITY 95
+  }
+
+  PATTERN gdpr_required {
+    MATCH    "GDPR|European customers|EU data|data privacy|right to erasure|data protection|DPA"
+    RESPOND  "GDPR requires data residency controls, right-to-erasure workflows, and a Data Processing Agreement tracker. Adding GDPR configuration."
+    SCORE    compliance_score -10
+    ASSERT   ConfigurationProfile { compliance_gdpr: true }
+    CATEGORY "compliance"
+    PRIORITY 90
+  }
+
+  PATTERN run_compliance_scan {
+    MATCH    "compliance scan|check compliance|audit readiness|are we compliant|compliance gaps|what are we missing"
+    RESPOND  "Running compliance gap analysis against your active frameworks. One moment."
+    SCORE    compliance_score +0
+    ASSERT   ComplianceContext { gaps_detected: false }
+    CATEGORY "compliance"
+    PRIORITY 85
+  }
+
+  RULE sox_gap_journal_approval {
+    WHEN     ConfigurationProfile.compliance_sox == true
+    AND      ComplianceContext.sox_journal_approval_missing == true
+    THEN     FLAG "sox_gap_journal_approval"
+    SEVERITY critical
+    PRIORITY 100
+  }
+
+  RULE sox_gap_4eyes {
+    WHEN     ConfigurationProfile.compliance_sox == true
+    AND      ComplianceContext.sox_4eyes_missing == true
+    THEN     FLAG "sox_gap_4eyes_approval"
+    SEVERITY critical
+    PRIORITY 100
+  }
+
+  RULE sox_gap_audit_trail {
+    WHEN     ConfigurationProfile.compliance_sox == true
+    AND      ComplianceContext.sox_audit_trail_missing == true
+    THEN     FLAG "sox_gap_audit_trail"
+    SEVERITY critical
+    PRIORITY 100
+  }
+
+  RULE hipaa_gap_access_controls {
+    WHEN     ConfigurationProfile.compliance_hipaa == true
+    AND      ComplianceContext.hipaa_access_controls_missing == true
+    THEN     FLAG "hipaa_gap_access_controls"
+    SEVERITY critical
+    PRIORITY 100
+  }
+
+  RULE hipaa_gap_baa_tracking {
+    WHEN     ConfigurationProfile.compliance_hipaa == true
+    AND      ComplianceContext.hipaa_baa_tracking_missing == true
+    THEN     FLAG "hipaa_gap_baa_tracking"
+    SEVERITY critical
+    PRIORITY 95
+  }
+
+  RULE government_gap_cost_accounting {
+    WHEN     ConfigurationProfile.compliance_government == true
+    AND      ComplianceContext.government_cost_accounting_missing == true
+    THEN     FLAG "government_gap_cost_accounting"
+    SEVERITY critical
+    PRIORITY 100
+  }
+
+  RULE gdpr_gap_erasure_workflow {
+    WHEN     ConfigurationProfile.compliance_gdpr == true
+    AND      ComplianceContext.gdpr_right_to_erasure_missing == true
+    THEN     FLAG "gdpr_gap_erasure_workflow"
+    SEVERITY critical
+    PRIORITY 95
+  }
+
+  RULE compliance_scan_on_change {
+    WHEN     ComplianceContext.gaps_detected == false
+    AND      ConfigurationProfile.compliance_sox == true
+    THEN     ScanComplianceGaps
+    SEVERITY info
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// MODULE: WorkflowAdvisor
+// Workflow maturity recommendations. Companies evolve from informal to
+// structured to regulated. Each stage has known workflow additions.
+// ─────────────────────────────────────────────────────────────────────────────
+
+MODULE WorkflowAdvisor {
+  DESCRIPTION "Workflow maturity recommendations — approval chains, automation opportunities, SLA policies"
+  ACTIVATE_WHEN ConfigurationProfile.approval_complexity == "flat"
+
+  FACT WorkflowContext {
+    has_expense_policy:        bool   = false
+    has_po_approval_chain:     bool   = false
+    has_invoice_approval:      bool   = false
+    has_credit_controls:       bool   = false
+    has_sla_policy:            bool   = false
+    manual_conversion_rate:    float  = 0.0
+    approval_avg_days:         float  = 0.0
+    PERSISTENT
+  }
+
+  SCORE workflow_maturity {
+    INITIAL 20
+    MIN     0
+    MAX     100
+    THRESHOLD basic    AT 40 THEN recommend_basic_workflows
+    THRESHOLD standard AT 65 THEN recommend_standard_workflows
+    THRESHOLD mature   AT 85 THEN recommend_advanced_workflows
+  }
+
+  PATTERN add_approval_chain {
+    MATCH    "approval workflow|approval chain|approval process|sign off|who approves|purchase approval"
+    RESPOND  "Adding approval chains. For your size tier I recommend: auto-approve under $1k, manager approval $1k-$10k, director approval $10k-$50k, board above $50k. Does this match your policy?"
+    SCORE    workflow_maturity +20
+    ASSERT   WorkflowContext { has_po_approval_chain: true }
+    CATEGORY "workflow"
+    PRIORITY 80
+  }
+
+  PATTERN add_credit_controls {
+    MATCH    "credit controls|customer credit|AR policy|outstanding balances|slow payers|collections"
+    RESPOND  "Adding credit control workflows: utilization warning at 80%, order block at 100% with 30+ days overdue, collections trigger at 60 days, legal escalation at 90 days."
+    SCORE    workflow_maturity +15
+    ASSERT   WorkflowContext { has_credit_controls: true }
+    CATEGORY "workflow"
+    PRIORITY 80
+  }
+
+  PATTERN add_sla_policy {
+    MATCH    "SLA|service level|response time|support targets|ticket response|support policy"
+    RESPOND  "Adding SLA enforcement: critical tickets escalate after 2h unassigned, high after 8h, enterprise customers get elevated thresholds. Configuring SLAEnforcement module."
+    SCORE    workflow_maturity +15
+    ASSERT   WorkflowContext { has_sla_policy: true }
+    CATEGORY "workflow"
+    PRIORITY 75
+  }
+
+  RULE recommend_expense_policy_at_small {
+    WHEN     ConfigurationProfile.employee_tier == "small"
+    AND      WorkflowContext.has_expense_policy == false
+    THEN     FLAG "recommend_expense_policy"
+    SEVERITY warning
+    PRIORITY 70
+  }
+
+  RULE recommend_approval_chain_at_medium {
+    WHEN     ConfigurationProfile.employee_tier == "medium"
+    AND      WorkflowContext.has_po_approval_chain == false
+    THEN     FLAG "recommend_po_approval_chain"
+    SEVERITY warning
+    PRIORITY 80
+  }
+
+  RULE recommend_credit_controls_on_ar_stress {
+    WHEN     WorkflowContext.has_credit_controls == false
+    AND      GrowthContext.ar_overdue_rate > 15.0
+    THEN     FLAG "recommend_credit_controls"
+    SEVERITY warning
+    PRIORITY 75
+  }
+
+  RULE invoice_approval_bottleneck {
+    WHEN     WorkflowContext.approval_avg_days > 5.0
+    AND      WorkflowContext.has_invoice_approval == true
+    THEN     FLAG "approval_chain_bottleneck"
+    SEVERITY warning
+    PRIORITY 65
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// MODULE: IntegrationAdvisor
+// Common integration configuration recommendations.
+// Every company at certain stages outgrows their current integrations.
+// The ES knows exactly when.
+// ─────────────────────────────────────────────────────────────────────────────
+
+MODULE IntegrationAdvisor {
+  DESCRIPTION "Integration configuration recommendations — when to add, migrate, or consolidate integrations"
+
+  FACT IntegrationContext {
+    using_quickbooks:    bool   = false
+    using_stripe:        bool   = false
+    using_salesforce:    bool   = false
+    using_shopify:       bool   = false
+    has_payroll_system:  bool   = false
+    revenue_on_platform: float  = 0.0
+    PERSISTENT
+  }
+
+  SCORE integration_maturity {
+    INITIAL 30
+    MIN     0
+    MAX     100
+    THRESHOLD low  AT 40 THEN recommend_core_integrations
+    THRESHOLD high AT 80 THEN recommend_advanced_integrations
+  }
+
+  PATTERN migrate_from_quickbooks {
+    MATCH    "QuickBooks|QuickBooks Online|QBO|moving off QuickBooks|replacing QuickBooks"
+    RESPOND  "QuickBooks migration is common at your growth stage. I'll configure the GL migration workflow, chart-of-accounts mapping, and historical data import. Do you have a migration date in mind?"
+    SCORE    integration_maturity +20
+    ASSERT   IntegrationContext { using_quickbooks: true }
+    CATEGORY "integration"
+    PRIORITY 80
+  }
+
+  PATTERN add_stripe_integration {
+    MATCH    "Stripe|payment processor|online payments|card payments|payment gateway"
+    RESPOND  "Adding Stripe integration — automated AR reconciliation, payment event capture, and failed payment workflow. This eliminates most manual AR work."
+    SCORE    integration_maturity +20
+    ASSERT   IntegrationContext { using_stripe: true }
+    CATEGORY "integration"
+    PRIORITY 75
+  }
+
+  PATTERN crm_consolidation {
+    MATCH    "Salesforce|HubSpot|we have a CRM|CRM data|import our CRM|sync with CRM"
+    RESPOND  "CRM consolidation into Accelerando ERP eliminates the sync problem. I'll configure the pipeline import and bidirectional sync. Which CRM are you migrating from?"
+    SCORE    integration_maturity +20
+    ASSERT   IntegrationContext { using_salesforce: true }
+    CATEGORY "integration"
+    PRIORITY 75
+  }
+
+  RULE quickbooks_migration_point {
+    WHEN     IntegrationContext.using_quickbooks == true
+    AND      GrowthContext.employee_count > 25
+    THEN     FLAG "quickbooks_outgrown"
+    SEVERITY warning
+    PRIORITY 70
+  }
+
+  RULE stripe_ar_automation_available {
+    WHEN     IntegrationContext.using_stripe == true
+    AND      WorkflowContext.has_invoice_approval == false
+    THEN     FLAG "recommend_stripe_ar_automation"
+    SEVERITY info
+    PRIORITY 65
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// WORKFLOWS — configuration application sequences
+// Each applies a known configuration package deterministically.
+// The AI did the work once; the workflow applies it forever.
+// ─────────────────────────────────────────────────────────────────────────────
+
+WORKFLOW initial_configuration {
+  IDEMPOTENT false
+  STEP conduct_intake      { ACTION ConductSetupInterview      ON_FAIL abort }
+  STEP match_template      { ACTION MatchConfigurationTemplate ON_FAIL skip  }
+  STEP generate_config     { ACTION GenerateInitialConfiguration ON_FAIL abort }
+  STEP apply_config        { ACTION ApplyKnownConfiguration    ON_FAIL abort }
+  STEP run_compliance_scan { ACTION ScanComplianceGaps         ON_FAIL skip  }
+  STEP notify_complete     { ACTION NotifyConfigurationApplied ON_FAIL skip  }
+}
+
+WORKFLOW apply_manufacturing_profile {
+  IDEMPOTENT true
+  STEP add_bom_module      { ACTION ApplyModuleTemplate        ON_FAIL abort }
+  STEP add_work_orders     { ACTION ApplyModuleTemplate        ON_FAIL abort }
+  STEP add_inventory       { ACTION ApplyModuleTemplate        ON_FAIL skip  }
+  STEP set_preferences     { ACTION ApplyPreferenceSet         ON_FAIL skip  }
+  STEP log_change          { ACTION LogConfigurationChange     ON_FAIL skip  }
+}
+
+WORKFLOW apply_saas_profile {
+  IDEMPOTENT true
+  STEP add_subscription    { ACTION ApplyModuleTemplate        ON_FAIL abort }
+  STEP add_mrr_tracking    { ACTION ApplyModuleTemplate        ON_FAIL skip  }
+  STEP add_churn_detection { ACTION ApplyModuleTemplate        ON_FAIL skip  }
+  STEP set_preferences     { ACTION ApplyPreferenceSet         ON_FAIL skip  }
+  STEP log_change          { ACTION LogConfigurationChange     ON_FAIL skip  }
+}
+
+WORKFLOW apply_sox_compliance {
+  IDEMPOTENT true
+  STEP add_4eyes_approval  { ACTION ApplyModuleTemplate        ON_FAIL abort }
+  STEP add_journal_approval { ACTION ApplyModuleTemplate       ON_FAIL abort }
+  STEP add_audit_trail     { ACTION ApplyModuleTemplate        ON_FAIL abort }
+  STEP add_reconciliation  { ACTION ApplyModuleTemplate        ON_FAIL skip  }
+  STEP run_gap_check       { ACTION ScanComplianceGaps         ON_FAIL abort }
+  STEP log_change          { ACTION LogConfigurationChange     ON_FAIL skip  }
+}
+
+WORKFLOW apply_government_compliance {
+  IDEMPOTENT true
+  STEP add_cost_accounting { ACTION ApplyModuleTemplate        ON_FAIL abort }
+  STEP add_far_workflows   { ACTION ApplyModuleTemplate        ON_FAIL abort }
+  STEP add_dcaa_reporting  { ACTION ApplyModuleTemplate        ON_FAIL skip  }
+  STEP run_gap_check       { ACTION ScanComplianceGaps         ON_FAIL abort }
+  STEP log_change          { ACTION LogConfigurationChange     ON_FAIL skip  }
+}
+
+WORKFLOW apply_growth_small_to_medium {
+  IDEMPOTENT true
+  STEP add_director_tier   { ACTION ApplyModuleTemplate        ON_FAIL abort }
+  STEP add_expense_policy  { ACTION ApplyModuleTemplate        ON_FAIL skip  }
+  STEP add_dept_budgets    { ACTION ApplyModuleTemplate        ON_FAIL skip  }
+  STEP update_tier_flag    { ACTION UpdateConfigurationProfile ON_FAIL abort }
+  STEP log_change          { ACTION LogConfigurationChange     ON_FAIL skip  }
+}
+
+WORKFLOW apply_growth_medium_to_large {
+  IDEMPOTENT true
+  STEP add_board_approval  { ACTION ApplyModuleTemplate        ON_FAIL abort }
+  STEP add_internal_audit  { ACTION ApplyModuleTemplate        ON_FAIL skip  }
+  STEP assess_sox_need     { ACTION ScanComplianceGaps         ON_FAIL skip  }
+  STEP add_consolidated    { ACTION ApplyModuleTemplate        ON_FAIL skip  }
+  STEP update_tier_flag    { ACTION UpdateConfigurationProfile ON_FAIL abort }
+  STEP log_change          { ACTION LogConfigurationChange     ON_FAIL skip  }
+}
+
+WORKFLOW scan_and_remediate_compliance {
+  IDEMPOTENT true
+  STEP scan_gaps           { ACTION ScanComplianceGaps         ON_FAIL abort }
+  STEP generate_report     { ACTION GenerateComplianceReport   ON_FAIL skip  }
+  STEP apply_remediations  { ACTION ApplyKnownConfiguration    ON_FAIL skip  }
+  STEP rescan              { ACTION ScanComplianceGaps         ON_FAIL skip  }
+  STEP notify_controller   { ACTION NotifyComplianceStatus     ON_FAIL skip  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// ACTIONS
+// ─────────────────────────────────────────────────────────────────────────────
+
+ACTION ConductSetupInterview {
+  INPUT  tenant_id: string
+  OUTPUT profile_json: string, recommended_template: string
+  AI     "Conduct a structured intake interview to determine the business's industry, size tier, compliance requirements, and workflow needs. Ask questions sequentially. Build a ConfigurationProfile from the answers. Identify the closest matching configuration template from the known library. Return the profile as JSON and the template ID."
+}
+
+ACTION MatchConfigurationTemplate {
+  INPUT  profile_json: string, tenant_id: string
+  OUTPUT template_id: string, match_confidence: number, delta_modules: string
+  IMPL   "score all ConfigurationTemplate records against the incoming profile JSON, return the highest-confidence match, the template_id, and the list of modules the current config is missing"
+}
+
+ACTION GenerateInitialConfiguration {
+  INPUT  profile_json: string, template_id: string, tenant_id: string
+  OUTPUT agi_modules: string, preference_overrides: string
+  AI     "Given the business profile and the matched template as a starting point, generate the complete set of .agi MODULE additions and PREFERENCE overrides needed to configure Accelerando for this business. Output valid DSL. Flag any requirements that fall outside the known template library."
+}
+
+ACTION ApplyKnownConfiguration {
+  INPUT  config_id: string, tenant_id: string, operator_id: string
+  OUTPUT modules_applied: number, preferences_set: number, summary: string
+  IMPL   "look up ConfigurationTemplate by config_id, apply each module in modules_to_add to the running Accelerando instance, apply preferences_json values to PREFERENCE store, increment usage_count, create ConfigurationChange record"
+  EMIT   configuration_applied {
+    source: string, config_id: string, tenant_id: string, modules_applied: number, operator_id: string
+  }
+}
+
+ACTION GenerateCustomConfiguration {
+  INPUT  requirements: string, current_profile: string, tenant_id: string
+  OUTPUT agi_preview: string, new_template_id: string
+  AI     "The business requirements fall outside the known configuration library. Generate a custom .agi MODULE block that implements the specific requirements. Validate it against Agicore DSL syntax. If the custom configuration is likely to be reusable, generate a new ConfigurationTemplate record for the library."
+}
+
+ACTION ApplyModuleTemplate {
+  INPUT  module_name: string, tenant_id: string
+  OUTPUT success: bool, module_config: string
+  IMPL   "retrieve the named module template from the configuration library, inject it into the running Accelerando instance, update ConfigurationProfile.active_modules"
+}
+
+ACTION ApplyPreferenceSet {
+  INPUT  preference_set_id: string, tenant_id: string
+  OUTPUT preferences_applied: number
+  IMPL   "retrieve the named preference set, apply each preference to the PREFERENCE store of the running Accelerando instance"
+}
+
+ACTION UpdateConfigurationProfile {
+  INPUT  field: string, value: string, tenant_id: string
+  OUTPUT success: bool
+  IMPL   "update the named field in ConfigurationProfile FACT, trigger re-evaluation of all advisor RULEs"
+}
+
+ACTION ScanComplianceGaps {
+  INPUT  tenant_id: string
+  OUTPUT gaps: json, gap_count: number, severity: string
+  IMPL   "evaluate ComplianceContext against ConfigurationProfile for all active frameworks (SOX, HIPAA, Government, GDPR), set boolean gap flags on ComplianceContext FACT, create ComplianceCheck record with gap_detail, return structured gap report"
+}
+
+ACTION GenerateComplianceReport {
+  INPUT  tenant_id: string, framework: string
+  OUTPUT report: string, remediation_steps: string
+  AI     "Given the compliance gap scan results and the current configuration profile, generate a plain-language compliance status report for the specified framework. List each gap found, explain why it is a gap, and provide prioritized remediation steps in terms of Accelerando configuration changes."
+}
+
+ACTION LogConfigurationChange {
+  INPUT  tenant_id: string, operator_id: string, change_type: string, config_id: string
+  OUTPUT change_id: string
+  IMPL   "create ConfigurationChange record with before/after state snapshot from ConfigurationProfile FACT"
+  EMIT   configuration_changed {
+    source: string, tenant_id: string, change_type: string, config_id: string, operator_id: string
+  }
+}
+
+ACTION NotifyConfigurationApplied {
+  INPUT  tenant_id: string, config_id: string, modules_applied: number
+  OUTPUT success: bool
+  IMPL   "send configuration completion summary to operator email, log to audit trail"
+}
+
+ACTION NotifyComplianceStatus {
+  INPUT  tenant_id: string, gap_count: number, severity: string
+  OUTPUT success: bool
+  IMPL   "send compliance scan results to controller and admin, log to ComplianceCheck record"
+}
+
+ACTION AuditConfigurationHistory {
+  INPUT  tenant_id: string, days_back: number
+  OUTPUT report: string
+  AI     "Analyze the ConfigurationChange history for this tenant. Identify the configuration evolution over time, flag any configurations that were applied and then reversed, and assess whether the current configuration matches best practices for the tenant's industry and size tier."
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// VIEWS
+// ─────────────────────────────────────────────────────────────────────────────
+
+VIEW ConfigurationDashboard {
+  ENTITY  ConfigurationTemplate
+  LAYOUT  dashboard
+  ACTIONS read
+}
+
+VIEW TemplateLibrary {
+  ENTITY  ConfigurationTemplate
+  LAYOUT  table
+  ACTIONS create, edit
+}
+
+VIEW ChangeHistory {
+  ENTITY  ConfigurationChange
+  LAYOUT  table
+  ACTIONS read
+}
+
+VIEW ComplianceStatus {
+  ENTITY  ComplianceCheck
+  LAYOUT  kanban
+  ACTIONS read, edit
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// PREFERENCES
+// ─────────────────────────────────────────────────────────────────────────────
+
+PREFERENCE auto_apply_known_configs {
+  TYPE    bool
+  DEFAULT false
+  LABEL   "Auto-apply known configuration templates without confirmation"
+}
+
+PREFERENCE compliance_scan_interval_days {
+  TYPE    number
+  DEFAULT 30
+  LABEL   "Days between automated compliance gap scans"
+}
+
+PREFERENCE usage_threshold_for_library {
+  TYPE    number
+  DEFAULT 5
+  LABEL   "Minimum tenant count before a custom config is promoted to the template library"
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// SEED — the configuration template library
+// This is the encoded knowledge of 50 years of ERP implementations.
+// Each row is a known configuration. Each one deterministically applicable.
+// ─────────────────────────────────────────────────────────────────────────────
+
+SEED ConfigurationTemplate {
+  config_id:       "saas_startup"
+  name:            "SaaS Startup"
+  industry:        "saas"
+  size_tier:       "startup"
+  compliance_tags: ""
+  modules_to_add:  "subscription_billing,mrr_tracking,churn_detection"
+  description:     "For SaaS companies under 25 employees. Subscription billing, MRR dashboard, and basic churn signal detection. Minimal approval overhead — move fast."
+  usage_count:     312
+  active:          true
+}
+
+SEED ConfigurationTemplate {
+  config_id:       "saas_small"
+  name:            "SaaS Growth"
+  industry:        "saas"
+  size_tier:       "small"
+  compliance_tags: ""
+  modules_to_add:  "subscription_billing,mrr_tracking,churn_detection,expense_policy,manager_approval_tier"
+  description:     "For SaaS companies 25-100 employees. Adds expense policy and manager approval tier to the startup config. Handles Series A to B growth stage."
+  usage_count:     847
+  active:          true
+}
+
+SEED ConfigurationTemplate {
+  config_id:       "manufacturing_small"
+  name:            "Manufacturing SMB"
+  industry:        "manufacturing"
+  size_tier:       "small"
+  compliance_tags: ""
+  modules_to_add:  "bom,work_orders,inventory,reorder_automation,quality_inspection"
+  description:     "For manufacturing companies 10-50 employees. BOM, work orders, inventory management, auto-reorder, and quality inspection workflows."
+  usage_count:     523
+  active:          true
+}
+
+SEED ConfigurationTemplate {
+  config_id:       "manufacturing_medium"
+  name:            "Manufacturing Mid-Market"
+  industry:        "manufacturing"
+  size_tier:       "medium"
+  compliance_tags: ""
+  modules_to_add:  "bom,work_orders,inventory,reorder_automation,quality_inspection,multi_warehouse,po_approval_chain,director_approval_tier"
+  description:     "For manufacturing companies 50-250 employees. Adds multi-warehouse, director approval tier, and structured PO approval chain to the SMB config."
+  usage_count:     298
+  active:          true
+}
+
+SEED ConfigurationTemplate {
+  config_id:       "professional_services_small"
+  name:            "Professional Services SMB"
+  industry:        "services"
+  size_tier:       "small"
+  compliance_tags: ""
+  modules_to_add:  "project_billing,time_tracking,utilization_reporting,expense_policy"
+  description:     "For consulting and professional services firms 10-50 people. Project billing, time tracking, utilization dashboard, and expense policy."
+  usage_count:     634
+  active:          true
+}
+
+SEED ConfigurationTemplate {
+  config_id:       "professional_services_medium"
+  name:            "Professional Services Mid-Market"
+  industry:        "services"
+  size_tier:       "medium"
+  compliance_tags: ""
+  modules_to_add:  "project_billing,time_tracking,utilization_reporting,expense_policy,manager_approval_tier,director_approval_tier,revenue_recognition"
+  description:     "For consulting firms 50-250 people. Adds multi-tier approvals and revenue recognition to the SMB config. Common for firms building toward SOX readiness."
+  usage_count:     211
+  active:          true
+}
+
+SEED ConfigurationTemplate {
+  config_id:       "retail_small"
+  name:            "Retail SMB"
+  industry:        "retail"
+  size_tier:       "small"
+  compliance_tags: ""
+  modules_to_add:  "inventory,pos_integration,seasonal_workflows,supplier_management"
+  description:     "For retail businesses 10-50 employees. Inventory management, POS integration hooks, seasonal demand workflows, and supplier management."
+  usage_count:     445
+  active:          true
+}
+
+SEED ConfigurationTemplate {
+  config_id:       "healthcare_hipaa"
+  name:            "Healthcare HIPAA"
+  industry:        "healthcare"
+  size_tier:       "small"
+  compliance_tags: "hipaa"
+  modules_to_add:  "hipaa_access_controls,baa_tracking,phi_audit_logging,insurance_billing"
+  description:     "For healthcare organizations of any size. HIPAA access controls, BAA tracking for business associates, PHI audit logging, and insurance billing workflows. Mandatory for any healthcare entity."
+  usage_count:     189
+  active:          true
+}
+
+SEED ConfigurationTemplate {
+  config_id:       "government_contractor"
+  name:            "Government Contractor"
+  industry:        "general"
+  size_tier:       "small"
+  compliance_tags: "government,far,dcaa"
+  modules_to_add:  "cost_accounting,far_approval_workflows,dcaa_reporting,contract_segregation,indirect_rate_tracking"
+  description:     "For any company with federal contracts. FAR-compliant approval workflows, DCAA-auditable cost accounting, contract-level P&L segregation, and indirect rate tracking. Non-negotiable."
+  usage_count:     156
+  active:          true
+}
+
+SEED ConfigurationTemplate {
+  config_id:       "sox_overlay"
+  name:            "SOX Compliance Overlay"
+  industry:        "general"
+  size_tier:       "large"
+  compliance_tags: "sox"
+  modules_to_add:  "4eyes_journal_approval,segregated_ap_ar,immutable_audit_trail,quarterly_reconciliation,sox_control_matrix"
+  description:     "SOX compliance package applicable to any industry. 4-eyes approval on journal entries, segregated AP/AR roles, immutable audit trail, quarterly reconciliation workflows, and SOX control matrix. Overlay on existing config."
+  usage_count:     94
+  active:          true
+}
+
+SEED ConfigurationTemplate {
+  config_id:       "gdpr_overlay"
+  name:            "GDPR Compliance Overlay"
+  industry:        "general"
+  size_tier:       "small"
+  compliance_tags: "gdpr"
+  modules_to_add:  "data_residency_controls,right_to_erasure_workflow,dpa_tracker,consent_logging"
+  description:     "GDPR compliance package for any company with EU customers. Data residency controls, right-to-erasure workflows, DPA tracker for processors, and consent logging. Overlay on existing config."
+  usage_count:     273
+  active:          true
+}
+
+SEED ConfigurationTemplate {
+  config_id:       "growth_small_to_medium"
+  name:            "Growth Package: Small → Medium"
+  industry:        "general"
+  size_tier:       "medium"
+  compliance_tags: ""
+  modules_to_add:  "director_approval_tier,department_budgets,expense_policy,headcount_tracking"
+  description:     "Configuration upgrade for companies crossing 50 employees. Director approval tier for purchases over $10k, department-level budget tracking, formal expense policy, and headcount reporting. The most common configuration update we see."
+  usage_count:     1247
+  active:          true
+}
+
+SEED ConfigurationTemplate {
+  config_id:       "growth_medium_to_large"
+  name:            "Growth Package: Medium → Large"
+  industry:        "general"
+  size_tier:       "large"
+  compliance_tags: ""
+  modules_to_add:  "board_approval_tier,internal_audit_module,consolidated_reporting,sox_readiness_assessment"
+  description:     "Configuration upgrade for companies crossing 250 employees. Board approval threshold, internal audit module, consolidated multi-entity reporting, and SOX readiness assessment. Companies at this stage are usually 12-18 months from needing SOX."
+  usage_count:     412
+  active:          true
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// TESTS
+// ─────────────────────────────────────────────────────────────────────────────
+
+TEST template_library_loaded {
+  GIVEN   ConfigurationTemplate { config_id: "test_template", name: "Test", industry: "test", size_tier: "startup", modules_to_add: "core", description: "Test template", tenant_id: "test" }
+  EXPECT  create -> config_id IS NOT NULL
+  EXPECT  create -> active == true
+  EXPECT  create -> usage_count == 0
+}
+
+TEST configuration_change_logged {
+  GIVEN   ConfigurationChange { change_type: "template_applied", operator_id: "ops-001", triggered_by: "intake_flow", tenant_id: "test" }
+  EXPECT  create -> id IS NOT NULL
+  EXPECT  get_by_id -> change_type == "template_applied"
+}
+
+TEST compliance_check_create {
+  GIVEN   ComplianceCheck { framework: "sox", tenant_id: "test" }
+  EXPECT  create -> id IS NOT NULL
+  EXPECT  create -> status == "pending"
+  EXPECT  create -> gaps_found == 0
+}

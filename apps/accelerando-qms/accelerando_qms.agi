@@ -1,0 +1,1024 @@
+APP accelerando_qms {
+  TITLE "Accelerando Quality Management System"
+  DB    accelerando_qms
+  PORT  3007
+}
+
+TARGET web { RUNTIME axum  FRONTEND react  DEPLOY docker }
+AUTH   { STRATEGY jwt  EXPIRY "8h"  REFRESH true }
+TENANT { MODEL row_level  ISOLATE strict }
+
+// ISO 9001:2015 Quality Management System
+//
+// ISO 9001 is a framework. It tells you what you must have.
+// It does not tell you how to run it, and most implementations
+// treat it as a document management system with audit anxiety on top.
+//
+// This is not that.
+//
+// A real QMS is a closed loop:
+//   Nonconformances surface problems.
+//   Root cause analysis finds why.
+//   Corrective actions fix the system, not the symptom.
+//   Effectiveness checks verify the fix held.
+//   Management review turns data into decisions.
+//   Internal audits verify the system works as designed.
+//   The PI CoE turns systemic problems into improvement projects.
+//
+// The loop only works if every link is enforced.
+// A CAPA with no effectiveness check is theater.
+// An internal audit with no corrective actions is theater.
+// A management review with no decisions is theater.
+//
+// This system enforces the loop. Every CAPA gets an effectiveness check.
+// Every audit finding gets a response. Every corrective action gets a deadline.
+// The ES does not forget. The ES does not grant extensions.
+//
+// Clause references follow ISO 9001:2015 structure.
+
+// ─────────────────────────────────────────────────────────────────────────────
+// ENTITIES
+// ─────────────────────────────────────────────────────────────────────────────
+
+ENTITY QMSDocument {
+  tenant_id:            string  REQUIRED
+  document_number:      string  REQUIRED
+  title:                string  REQUIRED
+  document_type:        string  REQUIRED   // quality_manual, procedure, work_instruction, form, record, policy
+  clause_reference:     string             // ISO 9001 clause (e.g., "8.5.2")
+  owner_id:             string  REQUIRED
+  status:               string  = "draft"  // draft, in_review, approved, obsolete
+  version:              string  = "1.0"
+  effective_date:       date
+  next_review_date:     date
+  review_frequency_days: number = 365
+  distribution:         string             // JSON: who receives this document
+  review_overdue:       bool   = false
+  content_url:          string
+  TIMESTAMPS
+  CRUD create, read, list, edit
+}
+
+ENTITY DocumentRevision {
+  tenant_id:            string  REQUIRED
+  document_id:          string  REQUIRED
+  revision_number:      string  REQUIRED
+  changed_by:           string  REQUIRED
+  change_description:   string  REQUIRED
+  change_reason:        string  REQUIRED   // regulatory change, process change, corrective action, improvement
+  approved_by:          string
+  approved_at:          datetime
+  effective_date:       date
+  TIMESTAMPS
+  CRUD create, read, list
+}
+
+ENTITY NonConformance {
+  tenant_id:            string  REQUIRED
+  ncr_number:           string  REQUIRED
+  title:                string  REQUIRED
+  description:          string  REQUIRED
+  source:               string  REQUIRED   // internal_audit, customer_complaint, process_inspection, supplier, field_return, self_identified
+  detected_by:          string  REQUIRED
+  detected_at:          datetime REQUIRED
+  area:                 string  REQUIRED
+  product_part_number:  string
+  quantity_affected:    number = 0
+  severity:             string  = "major"  // minor, major, critical
+  disposition:          string  = "pending"  // pending, use_as_is, rework, scrap, return_to_supplier
+  status:               string  = "open"
+  assigned_to:          string
+  root_cause:           string
+  root_cause_method:    string             // 5why, fishbone, fault_tree, is_is_not
+  immediate_action:     string
+  capa_required:        bool   = false
+  capa_id:              string
+  pi_coe_referral:      bool   = false    // referred to PI CoE for systemic improvement
+  TIMESTAMPS
+  CRUD create, read, list, edit
+}
+
+ENTITY CorrectiveAction {
+  tenant_id:            string  REQUIRED
+  capa_number:          string  REQUIRED
+  ncr_id:               string
+  audit_finding_id:     string
+  complaint_id:         string
+  title:                string  REQUIRED
+  problem_description:  string  REQUIRED
+  root_cause:           string  REQUIRED
+  action_description:   string  REQUIRED
+  owner_id:             string  REQUIRED
+  due_date:             date    REQUIRED
+  status:               string  = "open"   // open, in_progress, implemented, effectiveness_check, closed, ineffective
+  implemented_date:     date
+  effectiveness_due:    date              // 30/60/90 days after implementation
+  effectiveness_verified: bool  = false
+  effectiveness_notes:  string
+  closed_date:          date
+  recurrence_prevented: bool   = false
+  TIMESTAMPS
+  CRUD create, read, list, edit
+}
+
+ENTITY InternalAudit {
+  tenant_id:            string  REQUIRED
+  audit_number:         string  REQUIRED
+  audit_type:           string  = "system"  // system, process, product
+  clauses_audited:      string  REQUIRED    // JSON: list of ISO 9001 clauses
+  areas_audited:        string  REQUIRED
+  lead_auditor_id:      string  REQUIRED
+  audit_team:           string
+  auditee_manager:      string  REQUIRED
+  status:               string  = "planned"
+  planned_date:         date    REQUIRED
+  actual_date:          date
+  finding_count:        number = 0
+  major_finding_count:  number = 0
+  minor_finding_count:  number = 0
+  observation_count:    number = 0
+  capa_count:           number = 0
+  all_capas_closed:     bool   = false
+  report_issued_at:     datetime
+  TIMESTAMPS
+  CRUD create, read, list, edit
+}
+
+ENTITY AuditFinding {
+  tenant_id:            string  REQUIRED
+  audit_id:             string  REQUIRED
+  finding_number:       string  REQUIRED
+  finding_type:         string  REQUIRED   // major_nc, minor_nc, observation, opportunity
+  clause_reference:     string  REQUIRED
+  description:          string  REQUIRED
+  objective_evidence:   string  REQUIRED
+  owner_id:             string  REQUIRED
+  response_due:         date    REQUIRED
+  capa_id:              string
+  status:               string  = "open"   // open, response_received, capa_open, closed
+  TIMESTAMPS
+  CRUD create, read, list, edit
+}
+
+ENTITY ManagementReview {
+  tenant_id:            string  REQUIRED
+  review_number:        string  REQUIRED
+  scheduled_date:       date    REQUIRED
+  actual_date:          date
+  status:               string  = "planned"  // planned, complete, missed
+  attendees:            string             // JSON: list of attendees with roles
+  inputs_documented:    bool   = false    // ISO 9001 requires specific inputs
+  outputs_documented:   bool   = false    // ISO 9001 requires specific outputs
+  action_count:         number = 0
+  actions_from_prior_closed: bool = false  // prior review actions addressed
+  minutes_approved_at:  datetime
+  TIMESTAMPS
+  CRUD create, read, list, edit
+}
+
+ENTITY ManagementReviewAction {
+  tenant_id:            string  REQUIRED
+  review_id:            string  REQUIRED
+  action_description:   string  REQUIRED
+  owner_id:             string  REQUIRED
+  due_date:             date    REQUIRED
+  status:               string  = "open"
+  completed_date:       date
+  TIMESTAMPS
+  CRUD create, read, list, edit
+}
+
+ENTITY CustomerComplaint {
+  tenant_id:            string  REQUIRED
+  complaint_number:     string  REQUIRED
+  customer_id:          string  REQUIRED
+  received_at:          datetime REQUIRED
+  description:          string  REQUIRED
+  product_part_number:  string
+  severity:             string  = "medium"  // low, medium, high, critical
+  status:               string  = "open"   // open, acknowledged, investigating, resolved, closed
+  acknowledged_at:      datetime
+  acknowledgment_target_hours: number = 24
+  resolution_target_days: number = 30
+  ncr_id:               string             // linked nonconformance
+  capa_id:              string             // linked corrective action
+  customer_satisfaction: string            // satisfied, neutral, dissatisfied, unknown
+  TIMESTAMPS
+  CRUD create, read, list, edit
+}
+
+ENTITY SupplierAssessment {
+  tenant_id:            string  REQUIRED
+  supplier_id:          string  REQUIRED
+  supplier_name:        string  REQUIRED
+  assessment_type:      string  = "annual"  // initial, annual, for_cause
+  assessor_id:          string  REQUIRED
+  assessment_date:      date    REQUIRED
+  approved_supplier:    bool   = false
+  quality_score:        float  = 0.0       // 0-100
+  delivery_score:       float  = 0.0
+  overall_score:        float  = 0.0
+  status:               string  = "approved"  // approved, conditional, suspended, disqualified
+  next_assessment_date: date
+  assessment_overdue:   bool   = false
+  TIMESTAMPS
+  CRUD create, read, list, edit
+}
+
+ENTITY CalibrationRecord {
+  tenant_id:            string  REQUIRED
+  equipment_id:         string  REQUIRED
+  equipment_name:       string  REQUIRED
+  equipment_type:       string  REQUIRED   // gauge, gage_block, caliper, micrometer, cmm, torque, scale, thermometer
+  location:             string  REQUIRED
+  calibration_due:      date    REQUIRED
+  last_calibrated:      date
+  calibrated_by:        string
+  calibration_cert:     string             // certificate number or URL
+  in_tolerance:         bool   = true
+  out_of_tolerance:     bool   = false
+  calibration_overdue:  bool   = false
+  affected_measurements: string           // what measurements this equipment was used for since last cal
+  TIMESTAMPS
+  CRUD create, read, list, edit
+}
+
+ENTITY QualityObjective {
+  tenant_id:            string  REQUIRED
+  objective_name:       string  REQUIRED
+  clause_reference:     string  = "6.2"
+  metric_type:          string  REQUIRED   // defect_rate, customer_satisfaction, otd, audit_findings, capa_cycle_time
+  target_value:         float   REQUIRED
+  current_value:        float   = 0.0
+  measurement_period:   string  = "monthly"
+  owner_id:             string  REQUIRED
+  status:               string  = "on_track"  // on_track, at_risk, off_track
+  TIMESTAMPS
+  CRUD create, read, list, edit
+}
+
+ENTITY RiskOpportunity {
+  tenant_id:            string  REQUIRED
+  title:                string  REQUIRED
+  type:                 string  REQUIRED   // risk, opportunity
+  clause_reference:     string  = "6.1"
+  description:          string  REQUIRED
+  likelihood:           string  = "medium"  // low, medium, high
+  impact:               string  = "medium"  // low, medium, high
+  risk_rating:          string  = "medium"  // low, medium, high, critical
+  treatment:            string             // action plan
+  owner_id:             string  REQUIRED
+  status:               string  = "open"   // open, treated, accepted, monitored
+  TIMESTAMPS
+  CRUD create, read, list, edit
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// STAGES
+// ─────────────────────────────────────────────────────────────────────────────
+
+STAGES NonConformance.status {
+  open -> assigned -> root_cause -> corrective_action -> verification -> closed
+}
+
+STAGES CorrectiveAction.status {
+  open -> in_progress -> implemented -> effectiveness_check -> closed / ineffective
+}
+
+STAGES InternalAudit.status {
+  planned -> active -> findings_issued -> corrective_actions -> closed
+}
+
+STAGES QMSDocument.status {
+  draft -> in_review -> approved -> obsolete
+}
+
+STAGES CustomerComplaint.status {
+  open -> acknowledged -> investigating -> resolved -> closed
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// PACKETS — Integration with PI CoE
+// ─────────────────────────────────────────────────────────────────────────────
+
+PACKET CAPAToPICoEPacket {
+  capa_id:              string   REQUIRED
+  ncr_id:               string
+  problem_description:  string   REQUIRED
+  root_cause:           string   REQUIRED
+  value_stream_hint:    string
+  recurrence_count:     number   = 0      // if same root cause recurred, Kaizen warranted
+  SIGNATURES required
+  TTL 90d
+}
+
+PACKET NCRFromPICoEPacket {
+  source:               string   REQUIRED
+  defect_type:          string   REQUIRED
+  value_stream_id:      string   REQUIRED
+  defect_rate:          float    REQUIRED
+  suggested_kaizen:     bool     = false
+  SIGNATURES required
+  TTL 30d
+}
+
+PACKET AuditReadinessPacket {
+  tenant_id:            string   REQUIRED
+  audit_type:           string   REQUIRED   // iso9001, customer, regulatory
+  readiness_score:      float    REQUIRED
+  open_capas:           number   REQUIRED
+  overdue_capas:        number   REQUIRED
+  open_ncrs:            number   REQUIRED
+  last_management_review: date
+  open_document_reviews: number  REQUIRED
+  SIGNATURES required
+  TTL 7d
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// CHANNELS
+// ─────────────────────────────────────────────────────────────────────────────
+
+CHANNEL capa_to_pi_coe {
+  SOURCE   "accelerando_qms"
+  DEST     "accelerando_pi_coe"
+  TYPE     CAPAToPICoEPacket
+  CAPACITY 500
+  PERSISTENT
+}
+
+CHANNEL ncr_from_pi_coe {
+  SOURCE   "accelerando_pi_coe"
+  DEST     "accelerando_qms"
+  TYPE     NCRFromPICoEPacket
+  CAPACITY 1000
+  PERSISTENT
+}
+
+CHANNEL audit_readiness_outbound {
+  SOURCE   "accelerando_qms"
+  DEST     "qms_leadership"
+  TYPE     AuditReadinessPacket
+  CAPACITY 100
+  PERSISTENT
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// MODULES
+// ─────────────────────────────────────────────────────────────────────────────
+
+MODULE DocumentControlEngine {   // ISO 9001 Clause 7.5
+
+  FACT DocumentContext {
+    documents_pending_review:     number = 0
+    documents_overdue_for_review: number = 0
+    obsolete_documents_in_use:    bool   = false
+    uncontrolled_documents_found: bool   = false
+    PERSISTENT
+  }
+
+  RULE document_review_overdue {
+    WHEN DocumentContext.documents_overdue_for_review > 0
+    THEN FLAG "document_review_overdue_schedule_review"
+    SEVERITY warning
+    PRIORITY 75
+  }
+
+  RULE obsolete_document_in_use {
+    WHEN DocumentContext.obsolete_documents_in_use == true
+    THEN FLAG "obsolete_document_in_use_withdraw_immediately"
+    SEVERITY critical
+    PRIORITY 100
+  }
+
+  RULE uncontrolled_document_detected {
+    WHEN DocumentContext.uncontrolled_documents_found == true
+    THEN FLAG "uncontrolled_document_detected_document_control_violation"
+    SEVERITY critical
+    PRIORITY 95
+  }
+
+  STATE DocumentFlow {
+    INITIAL draft
+
+    draft {
+      ON_ENTER   LogQMSEvent
+      TRANSITION WHEN DocumentContext.documents_pending_review > 0 -> in_review
+    }
+
+    in_review {
+      ON_ENTER   LogQMSEvent
+      TRANSITION WHEN DocumentContext.documents_pending_review == 0 -> approved
+    }
+
+    approved {
+      ON_ENTER   LogQMSEvent
+      TRANSITION WHEN DocumentContext.documents_overdue_for_review > 0 -> draft
+    }
+  }
+}
+
+MODULE NonConformanceEngine {   // ISO 9001 Clause 8.7 and 10.2
+
+  FACT NCRContext {
+    open_ncr_count:               number = 0
+    critical_ncrs_open:           bool   = false
+    ncrs_without_root_cause:      number = 0
+    ncrs_past_disposition_target: bool   = false
+    recurring_nonconformance:     bool   = false   // same root cause seen 2+ times
+    ncr_triggers_capa:            bool   = false
+    PERSISTENT
+  }
+
+  RULE critical_ncr_immediate_response {
+    WHEN NCRContext.critical_ncrs_open == true
+    THEN FLAG "critical_nonconformance_immediate_containment_required"
+    SEVERITY critical
+    PRIORITY 100
+  }
+
+  RULE root_cause_required {
+    WHEN NCRContext.ncrs_without_root_cause > 0
+    THEN FLAG "nonconformance_root_cause_analysis_overdue"
+    SEVERITY warning
+    PRIORITY 82
+  }
+
+  RULE recurring_nonconformance_capa {
+    WHEN NCRContext.recurring_nonconformance == true
+    THEN FLAG "recurring_nonconformance_capa_and_pi_coe_referral_required"
+    SEVERITY critical
+    PRIORITY 95
+  }
+
+  RULE capa_required_for_ncr {
+    WHEN NCRContext.ncr_triggers_capa == true
+    THEN InitiateCorrectiveAction
+    SEVERITY warning
+    PRIORITY 85
+  }
+
+  STATE NCRFlow {
+    INITIAL open
+
+    open {
+      ON_ENTER   LogQMSEvent
+      TRANSITION WHEN NCRContext.ncr_triggers_capa == true -> corrective_action
+    }
+
+    corrective_action {
+      ON_ENTER   InitiateCorrectiveAction
+      TRANSITION WHEN NCRContext.open_ncr_count == 0 -> closed
+    }
+
+    closed {
+      ON_ENTER   LogQMSEvent
+      TRANSITION WHEN NCRContext.open_ncr_count > 0 -> open
+    }
+  }
+}
+
+MODULE CorrectiveActionEngine {   // ISO 9001 Clause 10.2
+
+  FACT CAPAContext {
+    open_capa_count:              number = 0
+    overdue_capa_count:           number = 0
+    effectiveness_checks_due:     number = 0
+    effectiveness_checks_overdue: number = 0
+    ineffective_capas:            number = 0   // closed but problem recurred
+    systemic_issue_detected:      bool   = false
+    PERSISTENT
+  }
+
+  RULE capa_overdue {
+    WHEN CAPAContext.overdue_capa_count > 0
+    THEN FLAG "corrective_action_overdue_escalate"
+    SEVERITY critical
+    PRIORITY 90
+  }
+
+  RULE effectiveness_check_required {
+    WHEN CAPAContext.effectiveness_checks_due > 0
+    THEN FLAG "capa_effectiveness_check_required"
+    SEVERITY warning
+    PRIORITY 83
+  }
+
+  RULE effectiveness_check_overdue {
+    WHEN CAPAContext.effectiveness_checks_overdue > 0
+    THEN FLAG "capa_effectiveness_check_overdue_capa_at_risk"
+    SEVERITY critical
+    PRIORITY 92
+  }
+
+  RULE ineffective_capa_detected {
+    WHEN CAPAContext.ineffective_capas > 0
+    THEN FLAG "ineffective_capa_root_cause_revisit_required"
+    SEVERITY critical
+    PRIORITY 95
+  }
+
+  RULE systemic_issue_pi_coe_referral {
+    WHEN CAPAContext.systemic_issue_detected == true
+    THEN ReferToPICoE
+    SEVERITY warning
+    PRIORITY 85
+  }
+}
+
+MODULE AuditEngine {   // ISO 9001 Clause 9.2
+
+  FACT AuditContext {
+    audits_planned_this_year:     number = 0
+    audits_completed_this_year:   number = 0
+    overdue_audit_count:          number = 0
+    open_major_findings:          number = 0
+    open_minor_findings:          number = 0
+    finding_response_overdue:     bool   = false
+    all_clauses_covered_ytd:      bool   = false
+    auditor_independence_violated: bool  = false
+    PERSISTENT
+  }
+
+  SCORE audit_program_health {
+    INITIAL 100
+    MIN       0
+    MAX     100
+    DECAY     0 PER day
+    THRESHOLD healthy     AT 85 THEN FLAG "audit_program_healthy"
+    THRESHOLD at_risk     AT 65 THEN FLAG "audit_program_at_risk_review_schedule"
+    THRESHOLD deficient   AT 40 THEN FLAG "audit_program_deficient_surveillance_risk"
+  }
+
+  RULE major_finding_response_required {
+    WHEN AuditContext.open_major_findings > 0
+    THEN FLAG "major_audit_finding_capa_required"
+    SEVERITY critical
+    PRIORITY 92
+  }
+
+  RULE audit_overdue {
+    WHEN AuditContext.overdue_audit_count > 0
+    THEN FLAG "internal_audit_overdue_iso9001_clause_9.2"
+    SEVERITY critical
+    PRIORITY 90
+  }
+
+  RULE not_all_clauses_covered {
+    WHEN AuditContext.all_clauses_covered_ytd == false
+    THEN FLAG "audit_program_gap_not_all_iso_clauses_covered_this_year"
+    SEVERITY warning
+    PRIORITY 80
+  }
+
+  RULE auditor_independence {
+    WHEN AuditContext.auditor_independence_violated == true
+    THEN FLAG "auditor_independence_violation_iso9001_clause_9.2.2"
+    SEVERITY critical
+    PRIORITY 100
+  }
+
+  RULE finding_response_overdue {
+    WHEN AuditContext.finding_response_overdue == true
+    THEN FLAG "audit_finding_response_overdue"
+    SEVERITY critical
+    PRIORITY 88
+  }
+}
+
+MODULE ManagementReviewEngine {   // ISO 9001 Clause 9.3
+
+  FACT ReviewContext {
+    review_scheduled_this_period:  bool   = false
+    review_overdue:                bool   = false
+    prior_actions_closed:          bool   = false
+    required_inputs_documented:    bool   = false
+    required_outputs_documented:   bool   = false
+    review_actions_overdue:        bool   = false
+    PERSISTENT
+  }
+
+  RULE management_review_overdue {
+    WHEN ReviewContext.review_overdue == true
+    THEN FLAG "management_review_overdue_iso9001_clause_9.3"
+    SEVERITY critical
+    PRIORITY 88
+  }
+
+  RULE prior_actions_not_closed {
+    WHEN ReviewContext.prior_actions_closed == false
+    THEN FLAG "prior_management_review_actions_not_closed"
+    SEVERITY warning
+    PRIORITY 78
+  }
+
+  RULE required_inputs_missing {
+    WHEN ReviewContext.required_inputs_documented == false
+    THEN FLAG "management_review_inputs_incomplete_iso9001_9.3.2"
+    SEVERITY critical
+    PRIORITY 90
+  }
+
+  RULE required_outputs_missing {
+    WHEN ReviewContext.required_outputs_documented == false
+    THEN FLAG "management_review_outputs_incomplete_iso9001_9.3.3"
+    SEVERITY critical
+    PRIORITY 90
+  }
+}
+
+MODULE SupplierQualityEngine {   // ISO 9001 Clause 8.4
+
+  FACT SupplierContext {
+    unapproved_suppliers_in_use:   bool   = false
+    supplier_assessments_overdue:  number = 0
+    supplier_below_threshold:      bool   = false   // quality or delivery score < threshold
+    critical_supplier_suspended:   bool   = false
+    PERSISTENT
+  }
+
+  RULE unapproved_supplier {
+    WHEN SupplierContext.unapproved_suppliers_in_use == true
+    THEN FLAG "unapproved_supplier_in_use_iso9001_clause_8.4"
+    SEVERITY critical
+    PRIORITY 100
+  }
+
+  RULE supplier_assessment_overdue {
+    WHEN SupplierContext.supplier_assessments_overdue > 0
+    THEN FLAG "supplier_assessment_overdue"
+    SEVERITY warning
+    PRIORITY 78
+  }
+
+  RULE supplier_performance_below_threshold {
+    WHEN SupplierContext.supplier_below_threshold == true
+    THEN FLAG "supplier_performance_below_threshold_development_plan_required"
+    SEVERITY warning
+    PRIORITY 82
+  }
+
+  RULE critical_supplier_suspended {
+    WHEN SupplierContext.critical_supplier_suspended == true
+    THEN FLAG "critical_supplier_suspended_supply_continuity_at_risk"
+    SEVERITY critical
+    PRIORITY 95
+  }
+}
+
+MODULE CalibrationEngine {   // ISO 9001 Clause 7.1.5
+
+  FACT CalibrationContext {
+    calibration_overdue_count:     number = 0
+    out_of_tolerance_equipment:    bool   = false
+    measurements_with_expired_cal: bool   = false   // products measured with overdue equipment
+    PERSISTENT
+  }
+
+  RULE calibration_overdue {
+    WHEN CalibrationContext.calibration_overdue_count > 0
+    THEN FLAG "measurement_equipment_calibration_overdue"
+    SEVERITY critical
+    PRIORITY 92
+  }
+
+  RULE out_of_tolerance_equipment_in_use {
+    WHEN CalibrationContext.out_of_tolerance_equipment == true
+    THEN FLAG "out_of_tolerance_equipment_in_use_product_validity_at_risk"
+    SEVERITY critical
+    PRIORITY 100
+  }
+
+  RULE retroactive_measurement_review {
+    WHEN CalibrationContext.measurements_with_expired_cal == true
+    THEN FLAG "measurements_taken_with_expired_calibration_review_required"
+    SEVERITY critical
+    PRIORITY 95
+  }
+}
+
+MODULE CustomerFeedbackEngine {   // ISO 9001 Clauses 8.2.1 and 9.1.2
+
+  FACT ComplaintContext {
+    open_complaint_count:          number = 0
+    complaints_past_ack_target:    bool   = false
+    complaints_past_resolution_target: bool = false
+    critical_complaints_open:      bool   = false
+    repeat_customer_complaint:     bool   = false
+    customer_satisfaction_declining: bool = false
+    PERSISTENT
+  }
+
+  SCORE customer_satisfaction {
+    INITIAL 100
+    MIN       0
+    MAX     100
+    DECAY     0 PER day
+    THRESHOLD excellent   AT 90 THEN FLAG "customer_satisfaction_excellent"
+    THRESHOLD acceptable  AT 75 THEN FLAG "customer_satisfaction_acceptable"
+    THRESHOLD at_risk     AT 60 THEN FLAG "customer_satisfaction_at_risk_action_required"
+    THRESHOLD critical    AT 40 THEN FLAG "customer_satisfaction_critical_leadership_notify"
+  }
+
+  RULE complaint_acknowledgment_overdue {
+    WHEN ComplaintContext.complaints_past_ack_target == true
+    THEN FLAG "customer_complaint_acknowledgment_overdue"
+    SEVERITY critical
+    PRIORITY 92
+  }
+
+  RULE complaint_resolution_overdue {
+    WHEN ComplaintContext.complaints_past_resolution_target == true
+    THEN FLAG "customer_complaint_resolution_overdue"
+    SEVERITY critical
+    PRIORITY 90
+  }
+
+  RULE repeat_complaint_pattern {
+    WHEN ComplaintContext.repeat_customer_complaint == true
+    THEN FLAG "repeat_customer_complaint_systemic_issue_capa_required"
+    SEVERITY critical
+    PRIORITY 95
+  }
+
+  RULE satisfaction_declining {
+    WHEN ComplaintContext.customer_satisfaction_declining == true
+    THEN FLAG "customer_satisfaction_trend_declining_management_review_agenda_item"
+    SEVERITY warning
+    PRIORITY 83
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// REASONER — Quality Intelligence
+// ─────────────────────────────────────────────────────────────────────────────
+
+REASONER quality_intelligence_reasoner {
+  SCHEDULE "monthly"
+  INPUT    NonConformance, CorrectiveAction, AuditFinding, CustomerComplaint, QualityObjective
+  PROMPT   "Generate a monthly quality management system review summary for management review input (ISO 9001 Clause 9.3.2). Analyze: (1) Nonconformance trends — which defect types are recurring, which are new, which have been eliminated by corrective action; (2) Corrective action effectiveness — what percentage of closed CAPAs have had confirmed effectiveness; which are showing recurrence; (3) Customer complaint patterns — is there a systemic product or process issue behind multiple complaints; (4) Quality objective performance — which objectives are on track, which are at risk, what is the root cause of any off-track objective; (5) Audit findings — which ISO clauses are generating the most findings; is this a documentation problem, an implementation problem, or a measurement problem; (6) Risk and opportunity update — have any risks materialized or new risks emerged. Output as formatted management review input document, suitable for inclusion in the management review record as evidence of ISO 9001 Clause 9.3.2 compliance."
+  OUTPUT   ManagementReview
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// ACTIONS
+// ─────────────────────────────────────────────────────────────────────────────
+
+ACTION InitiateCorrectiveAction {
+  INPUT  ncr_id: string, finding_id: string, complaint_id: string, problem_description: string
+  OUTPUT capa_id: string
+  IMPL {
+    // Generate CAPA number (sequential within year)
+    // Create CorrectiveAction record
+    // Set due_date = today + capa_default_days preference
+    // Set effectiveness_due = due_date + effectiveness_check_days preference
+    // Link to source (ncr_id, finding_id, or complaint_id)
+    // Assign to area owner
+    // Notify owner and QMS manager
+    // If source is recurring NCR: set CAPAContext.systemic_issue_detected = true
+  }
+}
+
+ACTION ReferToPICoE {
+  INPUT  capa_id: string, ncr_id: string
+  OUTPUT referral_sent: bool
+  IMPL {
+    // Build CAPAToPICoEPacket with problem description and root cause
+    // Count recurrence: how many times has this root cause appeared in last 12 months
+    // If recurrence_count >= 2: systemic issue, Kaizen event recommended
+    // Emit to capa_to_pi_coe CHANNEL
+    // Set NonConformance.pi_coe_referral = true
+    // Log referral in QMS event log
+  }
+}
+
+ACTION VerifyCAPAEffectiveness {
+  INPUT  capa_id: string, verifier_id: string
+  OUTPUT effective: bool, verification_notes: string
+  IMPL {
+    // Load CAPA and linked NCR/finding/complaint
+    // Check: has the original nonconformance recurred since CAPA implementation?
+    // Check: are the control measures from the CAPA still in place?
+    // Check: have new NCRs with same root cause appeared since closure?
+    // If all checks pass: effective = true, status = "closed", recurrence_prevented = true
+    // If any check fails: effective = false, status = "ineffective"
+    //   Set CAPAContext.ineffective_capas += 1
+    //   Trigger new CAPA with reference to failed one
+  }
+}
+
+ACTION GenerateNCRReport {
+  INPUT  ncr_id: string
+  OUTPUT report_text: string
+  AI     "Generate a formal nonconformance report for the specified NCR. Include: (1) NCR identification number, date, area, severity, (2) Description of the nonconformance — what was found, where, when, by whom, how much affected, (3) Objective evidence — the specific observations, measurements, or documents that confirm the nonconformance, (4) Immediate containment action — what was done immediately to prevent nonconforming product from reaching the next step or the customer, (5) Disposition — use as-is, rework, scrap, return to supplier (with justification), (6) Root cause analysis — using the stated method (5-Why, Ishikawa, etc.) — include the full logic chain, not just the conclusion, (7) Corrective action required — yes/no, and if yes, what is the scope, (8) Signature blocks for: originator, QA review, area manager approval. ISO 9001 Clause 8.7 requires this record be maintained."
+}
+
+ACTION GenerateAuditReport {
+  INPUT  audit_id: string
+  OUTPUT report_text: string
+  AI     "Generate an internal audit report for the specified audit. Structure per ISO 19011: (1) Audit summary — scope, criteria (ISO 9001:2015 clauses audited), dates, team, (2) Methodology — document review, process observation, interviews; sampling rationale, (3) Findings — each finding with: finding number, type (major/minor/observation), clause reference, description, objective evidence (specific documents, records, or observations cited), (4) Positive observations — what is working well; audit reports that only record deficiencies miss the opportunity to acknowledge effective practices, (5) Summary and Conclusion — overall assessment of conformance for the audited clauses and areas, (6) Required actions — major NCs require CAPA within [preference] days; minor NCs require corrective action; observations require management awareness. The audit report is a legal record. It must be specific, objective, and evidence-based. 'Not doing X' is not a finding. 'Record 12345 does not contain required field Y, per procedure QP-003 Rev 4 Clause 4.2' is a finding."
+}
+
+ACTION ScheduleInternalAuditProgram {
+  INPUT  year: number, clauses_to_cover: string
+  OUTPUT audit_schedule: string
+  AI     "Generate an annual internal audit schedule that satisfies ISO 9001 Clause 9.2 requirements. Requirements: (1) all clauses of ISO 9001:2015 must be audited at least once per year (all 10 clause groups), (2) high-risk areas and processes with prior major findings must be audited more frequently, (3) auditors must be independent of the area being audited, (4) schedule must be approved by QMS management, (5) distribute evenly across the year — avoid clustering audits in the month before an external audit. For each scheduled audit: clause references, area to audit, suggested auditor (noting independence requirements), suggested duration, risk rationale for scheduling. Flag any clause coverage gaps. Output as a formatted audit schedule table suitable for management approval."
+}
+
+ACTION AssessAuditReadiness {
+  INPUT  audit_type: string
+  OUTPUT readiness_score: float, readiness_report: string
+  IMPL {
+    // Count open CAPAs and overdue CAPAs
+    // Count open NCRs by severity
+    // Check management review is current (within 12 months)
+    // Check all documents reviewed on schedule
+    // Count calibration overdue equipment
+    // Check all ISO 9001 clauses covered in audit program this year
+    // Calculate readiness_score (0-100):
+    //   No open major CAPAs: +20
+    //   No overdue CAPAs: +15
+    //   Management review current: +15
+    //   Document control current: +15
+    //   Calibration current: +10
+    //   Full clause coverage: +15
+    //   No critical NCRs open: +10
+    // Emit AuditReadinessPacket
+    // Return plain-English readiness report
+  }
+}
+
+ACTION GenerateManagementReviewPackage {
+  INPUT  review_id: string
+  OUTPUT package_text: string
+  AI     "Generate a management review input package for ISO 9001 Clause 9.3.2. Required inputs (all must be addressed): (1) Status of actions from previous reviews, (2) Changes in external and internal issues relevant to the QMS, (3) Information on QMS performance including: customer satisfaction and feedback, quality objectives achievement, process performance and conformity, nonconformances and corrective actions, monitoring and measurement results, audit results, supplier performance, (4) Adequacy of resources, (5) Effectiveness of actions to address risks and opportunities, (6) Opportunities for improvement. For each input area: provide the current data summary, trend (improving/stable/declining), and flag any areas requiring a management decision or resource allocation. The output of the review (Clause 9.3.3) must include: decisions on improvement opportunities, changes to QMS, resource needs. Draft the output decisions based on the input analysis. Make explicit recommendations — management review that doesn't produce decisions is a compliance exercise, not a management tool."
+}
+
+ACTION LogQMSEvent {
+  INPUT  event_type: string, entity_id: string, detail: string
+  OUTPUT logged: bool
+  IMPL {
+    // Append-only QMS event log
+    // Records: NCR creation, CAPA initiation, audit findings, effectiveness checks,
+    //   management reviews, document approvals, calibration records
+    // Each entry: timestamp, user, event_type, entity_id, detail, hash of prior entry
+    // This is the ISO 9001 documented information requirement (Clause 7.5)
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// WORKFLOWS
+// ─────────────────────────────────────────────────────────────────────────────
+
+WORKFLOW ncr_to_capa {
+  IDEMPOTENT false
+  STEP create_ncr         { ACTION GenerateNCRReport             ON_FAIL abort }
+  STEP containment        { ACTION LogQMSEvent                   ON_FAIL abort }
+  STEP root_cause         { ACTION LogQMSEvent                   ON_FAIL abort }
+  STEP initiate_capa      { ACTION InitiateCorrectiveAction      ON_FAIL abort }
+  STEP log                { ACTION LogQMSEvent                   ON_FAIL skip  }
+}
+
+WORKFLOW capa_effectiveness_check {
+  IDEMPOTENT false
+  STEP verify             { ACTION VerifyCAPAEffectiveness       ON_FAIL abort }
+  STEP refer_if_systemic  { ACTION ReferToPICoE                  ON_FAIL skip  }
+  STEP log                { ACTION LogQMSEvent                   ON_FAIL skip  }
+}
+
+WORKFLOW internal_audit {
+  IDEMPOTENT false
+  STEP readiness_check    { ACTION AssessAuditReadiness          ON_FAIL skip  }
+  STEP conduct_audit      { ACTION LogQMSEvent                   ON_FAIL abort }
+  STEP generate_report    { ACTION GenerateAuditReport           ON_FAIL abort }
+  STEP issue_findings     { ACTION LogQMSEvent                   ON_FAIL abort }
+  STEP initiate_capas     { ACTION InitiateCorrectiveAction      ON_FAIL skip  }
+  STEP log                { ACTION LogQMSEvent                   ON_FAIL skip  }
+}
+
+WORKFLOW management_review {
+  IDEMPOTENT false
+  STEP generate_package   { ACTION GenerateManagementReviewPackage ON_FAIL abort }
+  STEP conduct_review     { ACTION LogQMSEvent                   ON_FAIL abort }
+  STEP capture_outputs    { ACTION LogQMSEvent                   ON_FAIL abort }
+  STEP assign_actions     { ACTION LogQMSEvent                   ON_FAIL abort }
+  STEP log                { ACTION LogQMSEvent                   ON_FAIL skip  }
+}
+
+WORKFLOW handle_customer_complaint {
+  IDEMPOTENT false
+  STEP acknowledge        { ACTION LogQMSEvent                   ON_FAIL abort }
+  STEP create_ncr         { ACTION GenerateNCRReport             ON_FAIL skip  }
+  STEP root_cause         { ACTION LogQMSEvent                   ON_FAIL abort }
+  STEP initiate_capa      { ACTION InitiateCorrectiveAction      ON_FAIL skip  }
+  STEP respond_customer   { ACTION LogQMSEvent                   ON_FAIL abort }
+  STEP close_complaint    { ACTION LogQMSEvent                   ON_FAIL skip  }
+}
+
+WORKFLOW annual_audit_planning {
+  IDEMPOTENT false
+  STEP schedule           { ACTION ScheduleInternalAuditProgram  ON_FAIL abort }
+  STEP approve            { ACTION LogQMSEvent                   ON_FAIL abort }
+  STEP log                { ACTION LogQMSEvent                   ON_FAIL skip  }
+}
+
+WORKFLOW pre_audit_readiness {
+  IDEMPOTENT true
+  STEP assess             { ACTION AssessAuditReadiness          ON_FAIL abort }
+  STEP close_capas        { ACTION LogQMSEvent                   ON_FAIL skip  }
+  STEP document_review    { ACTION LogQMSEvent                   ON_FAIL skip  }
+  STEP log                { ACTION LogQMSEvent                   ON_FAIL skip  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// VIEWS
+// ─────────────────────────────────────────────────────────────────────────────
+
+VIEW QMSDashboard {
+  ENTITY   QualityObjective
+  LAYOUT   table
+  ACTIONS  read
+}
+
+VIEW NCRRegister {
+  ENTITY   NonConformance
+  LAYOUT   table
+  ACTIONS  create, read, edit
+}
+
+VIEW CAPARegister {
+  ENTITY   CorrectiveAction
+  LAYOUT   table
+  ACTIONS  create, read, edit
+}
+
+VIEW AuditCalendar {
+  ENTITY   InternalAudit
+  LAYOUT   table
+  ACTIONS  create, read, edit
+}
+
+VIEW DocumentRegister {
+  ENTITY   QMSDocument
+  LAYOUT   table
+  ACTIONS  create, read, edit
+}
+
+VIEW ComplaintRegister {
+  ENTITY   CustomerComplaint
+  LAYOUT   table
+  ACTIONS  create, read, edit
+}
+
+VIEW SupplierRegister {
+  ENTITY   SupplierAssessment
+  LAYOUT   table
+  ACTIONS  create, read, edit
+}
+
+VIEW CalibrationDue {
+  ENTITY   CalibrationRecord
+  LAYOUT   table
+  ACTIONS  create, read, edit
+}
+
+VIEW RiskRegister {
+  ENTITY   RiskOpportunity
+  LAYOUT   table
+  ACTIONS  create, read, edit
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// PREFERENCES
+// ─────────────────────────────────────────────────────────────────────────────
+
+PREFERENCE capa_default_days                    { DEFAULT 30   TYPE number }
+PREFERENCE effectiveness_check_days             { DEFAULT 90   TYPE number }
+PREFERENCE complaint_ack_target_hours           { DEFAULT 24   TYPE number }
+PREFERENCE complaint_resolution_target_days     { DEFAULT 30   TYPE number }
+PREFERENCE management_review_frequency_days     { DEFAULT 365  TYPE number }
+PREFERENCE audit_finding_response_days          { DEFAULT 10   TYPE number }
+PREFERENCE supplier_assessment_frequency_days   { DEFAULT 365  TYPE number }
+PREFERENCE document_review_frequency_days       { DEFAULT 365  TYPE number }
+PREFERENCE capa_to_pi_coe_recurrence_threshold  { DEFAULT 2    TYPE number }
+PREFERENCE calibration_warning_days             { DEFAULT 30   TYPE number }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// SEED DATA — Core ISO 9001 Required Documents
+// ─────────────────────────────────────────────────────────────────────────────
+
+SEED QMSDocument [
+  { document_number: "QM-001",  title: "Quality Manual",                          document_type: "quality_manual",    clause_reference: "4.3",  version: "1.0" },
+  { document_number: "QP-001",  title: "Document and Record Control Procedure",   document_type: "procedure",         clause_reference: "7.5",  version: "1.0" },
+  { document_number: "QP-002",  title: "Internal Audit Procedure",                document_type: "procedure",         clause_reference: "9.2",  version: "1.0" },
+  { document_number: "QP-003",  title: "Nonconformance and CAPA Procedure",       document_type: "procedure",         clause_reference: "10.2", version: "1.0" },
+  { document_number: "QP-004",  title: "Customer Complaint Handling Procedure",   document_type: "procedure",         clause_reference: "8.2.1",version: "1.0" },
+  { document_number: "QP-005",  title: "Control of Monitoring and Measuring",     document_type: "procedure",         clause_reference: "7.1.5",version: "1.0" },
+  { document_number: "QP-006",  title: "Supplier Evaluation Procedure",           document_type: "procedure",         clause_reference: "8.4",  version: "1.0" },
+  { document_number: "QP-007",  title: "Management Review Procedure",             document_type: "procedure",         clause_reference: "9.3",  version: "1.0" },
+  { document_number: "QP-008",  title: "Risk and Opportunity Management",         document_type: "procedure",         clause_reference: "6.1",  version: "1.0" },
+  { document_number: "QF-001",  title: "Nonconformance Report Form",              document_type: "form",              clause_reference: "8.7",  version: "1.0" },
+  { document_number: "QF-002",  title: "Corrective Action Request Form",          document_type: "form",              clause_reference: "10.2", version: "1.0" },
+  { document_number: "QF-003",  title: "Internal Audit Checklist",               document_type: "form",              clause_reference: "9.2",  version: "1.0" },
+  { document_number: "QF-004",  title: "Management Review Minutes Template",      document_type: "form",              clause_reference: "9.3",  version: "1.0" }
+]

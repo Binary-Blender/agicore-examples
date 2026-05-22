@@ -1,0 +1,1005 @@
+// accelerando_es.agi
+// Accelerando Expert System
+//
+// The deterministic governance layer for the Accelerando platform.
+//
+// OIE asks: "What is happening?" — AI, probabilistic, retrospective
+// ES asks:  "What should happen right now?" — rules, deterministic, instantaneous
+//
+// Every rule firing is auditable, reproducible, and explainable.
+// Every decision has a traceable cause: which rule, which fact, which value.
+// Zero LLMs involved at runtime. Regulators love this.
+//
+// The ES feeds its decisions back as telemetry to the OIE.
+// OIE then reasons over rule-firing PATTERNS — meta-intelligence:
+//   "CreditControl.BlockNewOrders fired 47 times this month — up 80% vs last month.
+//    Collections process needs structural attention."
+//
+// Six governance modules:
+//
+//   CreditControl:     AR enforcement — block orders, trigger collections, escalate legal
+//   ApprovalMatrix:    Spending authority — auto-approve through board approval by amount band
+//   SLAEnforcement:    Ticket governance — escalate before breaches, not after
+//   LeadScoring:       CRM pipeline — score, qualify, and prioritize without an LLM
+//   InventoryControl:  Stock governance — reorder triggers, stockout alerts, overstock detection
+//   FinancialControls: Cash flow and AR aging — runway alerts and collection cadence
+
+APP accelerando_es {
+  TITLE  "Accelerando Expert System"
+  DB     es.db
+  WINDOW 1400x900 frameless
+  THEME  dark
+  TRAY
+  HOTKEY "CmdOrCtrl+Shift+E"
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// AUDIT ENTITIES
+// Every rule firing is persisted. The governance story depends on this:
+// "Why was order #4821 blocked?" — lookup RuleFiring, get the fact snapshot.
+// ═══════════════════════════════════════════════════════════════════════════════
+
+ENTITY RuleFiring {
+  tenant_id:     string REQUIRED
+  module_name:   string REQUIRED
+  rule_name:     string REQUIRED
+  severity:      string REQUIRED
+  action_taken:  string REQUIRED
+  entity_id:     string
+  entity_type:   string
+  fact_snapshot: json SENSITIVE
+  acknowledged:  bool = false
+  ack_by:        string
+  ack_notes:     string
+  fired_at:      datetime REQUIRED
+  TIMESTAMPS
+  CRUD read, list, edit
+}
+
+ENTITY FactSnapshot {
+  tenant_id:    string REQUIRED
+  module_name:  string REQUIRED
+  fact_name:    string REQUIRED
+  entity_id:    string
+  entity_type:  string
+  data:         json SENSITIVE
+  evaluated_at: datetime REQUIRED
+  TIMESTAMPS
+  CRUD read, list
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// TELEMETRY INFRASTRUCTURE
+// Facts flow IN from the ERP. Decisions flow OUT to the OIE.
+// ═══════════════════════════════════════════════════════════════════════════════
+
+PACKET DecisionPacket {
+  DESCRIPTION "Expert system rule firing — deterministic, signed, admissible decision record"
+
+  PAYLOAD {
+    rule_name:    string REQUIRED
+    module_name:  string REQUIRED
+    action_taken: string REQUIRED
+    severity:     string REQUIRED
+    entity_id:    string
+    entity_type:  string
+    tenant_id:    string REQUIRED
+    fired_at:     string REQUIRED
+  }
+
+  METADATA {
+    PROVENANCE    true
+    LINEAGE       true
+    SIGNATURES    true
+    ADMISSIBILITY true
+    TTL           365
+  }
+
+  VALIDATION {
+    has_rule:   rule_name IS NOT NULL
+    has_module: module_name IS NOT NULL
+    has_tenant: tenant_id IS NOT NULL
+  }
+}
+
+PACKET FactPacket {
+  DESCRIPTION "Entity snapshot from Accelerando ERP for expert system evaluation"
+
+  PAYLOAD {
+    entity_type: string REQUIRED
+    entity_id:   string REQUIRED
+    tenant_id:   string REQUIRED
+    data:        json   REQUIRED
+    snapshot_at: string REQUIRED
+  }
+
+  METADATA {
+    PROVENANCE    true
+    LINEAGE       false
+    SIGNATURES    false
+    ADMISSIBILITY true
+    TTL           1
+  }
+
+  VALIDATION {
+    has_entity: entity_type IS NOT NULL
+    has_data:   entity_id IS NOT NULL
+  }
+}
+
+CHANNEL erp_facts_in {
+  DESCRIPTION "Inbound entity snapshots from Accelerando ERP — feeds the rule engine"
+  PROTOCOL    local
+  DIRECTION   inbound
+  PACKET      FactPacket
+  RETRY       3
+  TIMEOUT     5000
+}
+
+CHANNEL es_decisions_out {
+  DESCRIPTION "Outbound decisions to OIE — every rule firing becomes organizational intelligence"
+  PROTOCOL    local
+  DIRECTION   outbound
+  PACKET      DecisionPacket
+  ORDERING    fifo
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// MODULE: CreditControl
+//
+// Enforces AR policy. Stops bad debt before it accumulates.
+// The rule engine evaluates CustomerBalance facts every time an invoice ages
+// or a new order is placed. No LLM decides whether to extend credit.
+//
+// State machine: good → warning → blocked → collections → legal
+// Rules fire at each transition threshold. Actions are logged and audited.
+// ═══════════════════════════════════════════════════════════════════════════════
+
+MODULE CreditControl {
+  DESCRIPTION "AR enforcement — block orders, trigger collections, escalate to legal"
+
+  FACT CustomerBalance {
+    customer_id:         string
+    customer_name:       string
+    balance:             float = 0.0
+    credit_limit:        float = 10000.0
+    credit_utilization:  float = 0.0
+    days_overdue:        number = 0
+    outstanding_invoices: number = 0
+    payment_history_score: number = 100
+    PERSISTENT
+  }
+
+  STATE CreditStatus {
+    INITIAL good
+
+    good {
+      ON_ENTER clear_credit_hold
+      TRANSITION warning WHEN credit_utilization >= 80
+    }
+
+    warning {
+      ON_ENTER send_credit_warning
+      TRANSITION good WHEN credit_utilization < 80
+      TRANSITION blocked WHEN credit_utilization >= 100
+    }
+
+    blocked {
+      ON_ENTER apply_credit_hold
+      TRANSITION warning WHEN days_overdue == 0
+      TRANSITION collections WHEN days_overdue >= 60
+    }
+
+    collections {
+      ON_ENTER notify_collections_team
+      TRANSITION legal WHEN days_overdue >= 90
+    }
+
+    legal {
+      ON_ENTER notify_legal_team
+    }
+  }
+
+  RULE credit_utilization_warning {
+    WHEN     CustomerBalance.credit_utilization >= 80
+    UNLESS   CustomerBalance.credit_utilization >= 100
+    THEN     FLAG "credit_warning"
+    SEVERITY warning
+    PRIORITY 30
+  }
+
+  RULE block_new_orders {
+    WHEN     CustomerBalance.credit_utilization >= 100
+    AND      CustomerBalance.days_overdue > 30
+    THEN     FLAG "credit_block"
+    SEVERITY critical
+    PRIORITY 100
+  }
+
+  RULE payment_history_risk {
+    WHEN     CustomerBalance.payment_history_score < 60
+    AND      CustomerBalance.outstanding_invoices > 3
+    THEN     FLAG "payment_risk"
+    SEVERITY warning
+    PRIORITY 40
+  }
+
+  RULE trigger_collections {
+    WHEN     CustomerBalance.days_overdue >= 60
+    THEN     FLAG "collections_referral"
+    SEVERITY critical
+    PRIORITY 90
+  }
+
+  RULE escalate_to_legal {
+    WHEN     CustomerBalance.days_overdue >= 90
+    THEN     FLAG "legal_escalation"
+    SEVERITY critical
+    PRIORITY 95
+  }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// MODULE: ApprovalMatrix
+//
+// Spending authority by amount band. No ambiguity. No exceptions without a rule.
+// Auto-approve small purchases. Escalate large ones to the right authority.
+//
+// This is the most commonly argued-over policy in any ERP implementation.
+// In Accelerando ES: it's a FACT + four RULES. Done.
+// ═══════════════════════════════════════════════════════════════════════════════
+
+MODULE ApprovalMatrix {
+  DESCRIPTION "Spending authority — from auto-approve to board approval, by amount and category"
+
+  FACT SpendingRequest {
+    request_id:       string
+    amount:           float = 0.0
+    requester_role:   string
+    department:       string
+    category:         string
+    is_capex:         bool = false
+    is_recurring:     bool = false
+    vendor_approved:  bool = false
+    PERSISTENT
+  }
+
+  RULE auto_approve {
+    WHEN     SpendingRequest.amount <= 1000
+    AND      SpendingRequest.vendor_approved == true
+    THEN     FLAG "auto_approved"
+    SEVERITY info
+    PRIORITY 10
+  }
+
+  RULE require_manager_approval {
+    WHEN     SpendingRequest.amount > 1000
+    AND      SpendingRequest.amount <= 10000
+    THEN     FLAG "manager_approval_required"
+    SEVERITY warning
+    PRIORITY 50
+  }
+
+  RULE require_director_approval {
+    WHEN     SpendingRequest.amount > 10000
+    AND      SpendingRequest.amount <= 50000
+    THEN     FLAG "director_approval_required"
+    SEVERITY warning
+    PRIORITY 60
+  }
+
+  RULE require_board_approval {
+    WHEN     SpendingRequest.amount > 50000
+    THEN     FLAG "board_approval_required"
+    SEVERITY critical
+    PRIORITY 80
+  }
+
+  RULE capex_escalation {
+    WHEN     SpendingRequest.is_capex == true
+    AND      SpendingRequest.amount > 5000
+    THEN     FLAG "capex_finance_review"
+    SEVERITY warning
+    PRIORITY 55
+  }
+
+  RULE unapproved_vendor {
+    WHEN     SpendingRequest.vendor_approved == false
+    AND      SpendingRequest.amount > 500
+    THEN     FLAG "unapproved_vendor_block"
+    SEVERITY critical
+    PRIORITY 85
+  }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// MODULE: SLAEnforcement
+//
+// Prevents SLA breaches. Acts BEFORE the breach, not after.
+// The SLA risk score escalates with time. Rules fire at thresholds.
+// Enterprise customers get elevated priority automatically.
+//
+// Target: zero SLA breaches in production. Not "low breach rate." Zero.
+// ═══════════════════════════════════════════════════════════════════════════════
+
+MODULE SLAEnforcement {
+  DESCRIPTION "Ticket governance — escalate before breaches, not after"
+
+  FACT TicketAge {
+    ticket_id:      string
+    priority:       string
+    hours_open:     float = 0.0
+    has_assignee:   bool = false
+    customer_tier:  string
+    escalation_count: number = 0
+    PERSISTENT
+  }
+
+  SCORE sla_risk_score {
+    INITIAL 0
+    MIN     0
+    MAX     100
+    THRESHOLD at_risk    AT 40  THEN warn_ticket_owner
+    THRESHOLD escalating AT 70  THEN notify_team_lead
+    THRESHOLD breaching  AT 90  THEN page_on_call
+  }
+
+  STATE SLAStatus {
+    INITIAL healthy
+
+    healthy {
+      TRANSITION at_risk WHEN sla_risk_score >= 40
+    }
+
+    at_risk {
+      ON_ENTER warn_ticket_owner
+      TRANSITION healthy WHEN sla_risk_score < 40
+      TRANSITION escalating WHEN sla_risk_score >= 70
+    }
+
+    escalating {
+      ON_ENTER notify_team_lead
+      TRANSITION breaching WHEN sla_risk_score >= 90
+    }
+
+    breaching {
+      ON_ENTER page_on_call
+    }
+  }
+
+  RULE critical_unassigned {
+    WHEN     TicketAge.priority == "critical"
+    AND      TicketAge.hours_open > 2
+    AND      TicketAge.has_assignee == false
+    THEN     FLAG "sla_breach_imminent_critical"
+    SEVERITY critical
+    PRIORITY 100
+  }
+
+  RULE high_unassigned {
+    WHEN     TicketAge.priority == "high"
+    AND      TicketAge.hours_open > 8
+    AND      TicketAge.has_assignee == false
+    THEN     FLAG "sla_breach_imminent_high"
+    SEVERITY critical
+    PRIORITY 90
+  }
+
+  RULE normal_breach_approaching {
+    WHEN     TicketAge.priority == "normal"
+    AND      TicketAge.hours_open > 20
+    THEN     FLAG "sla_breach_approaching_normal"
+    SEVERITY warning
+    PRIORITY 50
+  }
+
+  RULE enterprise_auto_escalate {
+    WHEN     TicketAge.customer_tier == "enterprise"
+    AND      TicketAge.hours_open > 1
+    AND      TicketAge.has_assignee == false
+    THEN     FLAG "enterprise_unassigned_alert"
+    SEVERITY critical
+    PRIORITY 95
+  }
+
+  RULE repeat_escalation {
+    WHEN     TicketAge.escalation_count >= 3
+    THEN     FLAG "chronic_escalation"
+    SEVERITY warning
+    PRIORITY 60
+  }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// MODULE: LeadScoring
+//
+// CRM pipeline prioritization without an LLM.
+// A weighted SCORE aggregates signals. Rules fire at thresholds.
+// Patterns match engagement signals and increment the score.
+//
+// "Hot lead" at 80 → auto-assign to sales rep.
+// "Warm lead" at 60 → move to qualified.
+// Stale at 30 days no contact → mark cold, return to nurture.
+// ═══════════════════════════════════════════════════════════════════════════════
+
+MODULE LeadScoring {
+  DESCRIPTION "CRM pipeline — score leads, auto-qualify, prioritize enterprise opportunities"
+
+  FACT LeadSignals {
+    lead_id:             string
+    company_size_score:  number = 0
+    intent_score:        number = 0
+    fit_score:           number = 0
+    engagement_count:    number = 0
+    days_since_contact:  number = 0
+    is_enterprise:       bool = false
+    total_score:         number = 0
+    PERSISTENT
+  }
+
+  SCORE lead_score {
+    INITIAL 0
+    MIN     0
+    MAX     100
+    DECAY   5 PER day
+    THRESHOLD warm AT 40 THEN queue_for_nurture
+    THRESHOLD qualified AT 60 THEN qualify_lead
+    THRESHOLD hot AT 80 THEN assign_sales_rep
+  }
+
+  PATTERN demo_requested {
+    MATCH    "demo_request"
+    SCORE    lead_score 25
+    PRIORITY 90
+    CATEGORY "high_intent"
+  }
+
+  PATTERN pricing_page_visit {
+    MATCH    "pricing_page"
+    SCORE    lead_score 15
+    PRIORITY 70
+    CATEGORY "intent_signal"
+  }
+
+  PATTERN case_study_download {
+    MATCH    "case_study_download"
+    SCORE    lead_score 10
+    PRIORITY 60
+    CATEGORY "research_signal"
+  }
+
+  PATTERN webinar_attendance {
+    MATCH    "webinar_attendance"
+    SCORE    lead_score 12
+    PRIORITY 65
+    CATEGORY "engagement_signal"
+  }
+
+  PATTERN no_contact_signal {
+    MATCH    "no_recent_contact"
+    SCORE    lead_score -15
+    PRIORITY 50
+    CATEGORY "decay_signal"
+  }
+
+  RULE auto_qualify_high_intent {
+    WHEN     LeadSignals.intent_score >= 80
+    AND      LeadSignals.fit_score >= 70
+    THEN     FLAG "auto_qualified"
+    SEVERITY info
+    PRIORITY 75
+  }
+
+  RULE enterprise_fast_track {
+    WHEN     LeadSignals.is_enterprise == true
+    AND      LeadSignals.company_size_score >= 80
+    THEN     FLAG "enterprise_fast_track"
+    SEVERITY info
+    PRIORITY 70
+  }
+
+  RULE lead_stale {
+    WHEN     LeadSignals.days_since_contact > 30
+    THEN     FLAG "lead_stale"
+    SEVERITY warning
+    PRIORITY 40
+  }
+
+  RULE lead_disqualify {
+    WHEN     LeadSignals.fit_score < 20
+    AND      LeadSignals.intent_score < 20
+    THEN     FLAG "lead_disqualified"
+    SEVERITY info
+    PRIORITY 30
+  }
+
+  RULE high_company_low_engagement {
+    WHEN     LeadSignals.company_size_score >= 80
+    AND      LeadSignals.engagement_count == 0
+    THEN     FLAG "large_company_needs_outreach"
+    SEVERITY warning
+    PRIORITY 55
+  }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// MODULE: InventoryControl
+//
+// Stock governance. Triggers before stockouts. Flags overstock for disposition.
+// The rule engine evaluates StockLevel facts after every inventory transaction.
+//
+// State machine: healthy → low → critical → stockout | overstock
+// Zero manual intervention needed for reorder triggers.
+// ═══════════════════════════════════════════════════════════════════════════════
+
+MODULE InventoryControl {
+  DESCRIPTION "Stock governance — reorder triggers, stockout prevention, overstock detection"
+
+  FACT StockLevel {
+    product_id:        string
+    product_name:      string
+    warehouse_id:      string
+    qty_available:     number = 0
+    reorder_point:     number = 0
+    reorder_qty:       number = 0
+    lead_time_days:    number = 7
+    days_of_supply:    number = 0
+    is_critical_item:  bool = false
+    is_below_reorder:  bool = false
+    is_stockout:       bool = false
+    is_overstock:      bool = false
+    is_lead_time_risk: bool = false
+    PERSISTENT
+  }
+
+  STATE StockStatus {
+    INITIAL healthy
+
+    healthy {
+      TRANSITION low WHEN days_of_supply <= 14
+    }
+
+    low {
+      ON_ENTER trigger_reorder
+      TRANSITION healthy WHEN days_of_supply > 14
+      TRANSITION critical WHEN days_of_supply <= 7
+    }
+
+    critical {
+      ON_ENTER escalate_reorder
+      TRANSITION stockout WHEN qty_available <= 0
+    }
+
+    stockout {
+      ON_ENTER notify_operations_team
+    }
+
+    overstock {
+      ON_ENTER flag_for_disposition
+      TRANSITION healthy WHEN days_of_supply <= 90
+    }
+  }
+
+  RULE reorder_trigger {
+    WHEN     StockLevel.is_below_reorder == true
+    UNLESS   StockLevel.is_stockout == true
+    THEN     FLAG "reorder_triggered"
+    SEVERITY warning
+    PRIORITY 60
+  }
+
+  RULE critical_reorder {
+    WHEN     StockLevel.days_of_supply <= 7
+    AND      StockLevel.is_critical_item == true
+    THEN     FLAG "critical_item_reorder"
+    SEVERITY critical
+    PRIORITY 95
+  }
+
+  RULE stockout_alert {
+    WHEN     StockLevel.is_stockout == true
+    THEN     FLAG "stockout_alert"
+    SEVERITY critical
+    PRIORITY 100
+  }
+
+  RULE overstock_detected {
+    WHEN     StockLevel.is_overstock == true
+    THEN     FLAG "overstock_detected"
+    SEVERITY warning
+    PRIORITY 35
+  }
+
+  RULE lead_time_risk {
+    WHEN     StockLevel.is_lead_time_risk == true
+    AND      StockLevel.is_critical_item == true
+    THEN     FLAG "lead_time_risk"
+    SEVERITY warning
+    PRIORITY 70
+  }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// MODULE: FinancialControls
+//
+// Cash flow governance and AR aging enforcement.
+// Two fact types: ARAgingRecord (per-invoice) and CashPosition (company-wide).
+//
+// AR aging rules fire on a cadence: reminder → final notice → collections.
+// Cash flow rules monitor runway and trigger CFO alerts.
+// ═══════════════════════════════════════════════════════════════════════════════
+
+MODULE FinancialControls {
+  DESCRIPTION "Cash flow and AR aging — runway alerts, collection cadence, payment reminders"
+
+  FACT ARAgingRecord {
+    invoice_id:        string
+    customer_id:       string
+    customer_name:     string
+    days_outstanding:  number = 0
+    amount:            float = 0.0
+    customer_tier:     string
+    reminder_sent:     bool = false
+    final_notice_sent: bool = false
+    PERSISTENT
+  }
+
+  FACT CashPosition {
+    tenant_id:           string
+    cash_balance:        float = 0.0
+    projected_inflows:   float = 0.0
+    projected_outflows:  float = 0.0
+    runway_days:         number = 365
+    burn_rate_monthly:   float = 0.0
+    PERSISTENT
+  }
+
+  STATE ARStatus {
+    INITIAL current
+
+    current {
+      TRANSITION reminder_due WHEN days_outstanding >= 7
+    }
+
+    reminder_due {
+      ON_ENTER send_payment_reminder
+      TRANSITION final_notice WHEN days_outstanding >= 30
+    }
+
+    final_notice {
+      ON_ENTER send_final_notice
+      TRANSITION collections WHEN days_outstanding >= 60
+    }
+
+    collections {
+      ON_ENTER refer_to_collections
+    }
+  }
+
+  STATE CashFlowStatus {
+    INITIAL stable
+
+    stable {
+      TRANSITION watch WHEN runway_days < 180
+    }
+
+    watch {
+      ON_ENTER alert_cfo_watch
+      TRANSITION stable WHEN runway_days >= 180
+      TRANSITION warning WHEN runway_days < 90
+    }
+
+    warning {
+      ON_ENTER alert_cfo_warning
+      TRANSITION critical WHEN runway_days < 30
+    }
+
+    critical {
+      ON_ENTER alert_board
+    }
+  }
+
+  RULE payment_reminder {
+    WHEN     ARAgingRecord.days_outstanding >= 7
+    AND      ARAgingRecord.days_outstanding < 30
+    AND      ARAgingRecord.reminder_sent == false
+    THEN     FLAG "payment_reminder"
+    SEVERITY info
+    PRIORITY 20
+  }
+
+  RULE final_notice {
+    WHEN     ARAgingRecord.days_outstanding >= 30
+    AND      ARAgingRecord.days_outstanding < 60
+    AND      ARAgingRecord.final_notice_sent == false
+    THEN     FLAG "final_notice"
+    SEVERITY warning
+    PRIORITY 70
+  }
+
+  RULE collections_referral {
+    WHEN     ARAgingRecord.days_outstanding >= 60
+    THEN     FLAG "ar_collections"
+    SEVERITY critical
+    PRIORITY 85
+  }
+
+  RULE enterprise_overdue_escalate {
+    WHEN     ARAgingRecord.customer_tier == "enterprise"
+    AND      ARAgingRecord.days_outstanding >= 15
+    THEN     FLAG "enterprise_overdue"
+    SEVERITY warning
+    PRIORITY 75
+  }
+
+  RULE cash_flow_watch {
+    WHEN     CashPosition.runway_days < 180
+    AND      CashPosition.runway_days >= 90
+    THEN     FLAG "cash_flow_watch"
+    SEVERITY warning
+    PRIORITY 50
+  }
+
+  RULE cash_flow_warning {
+    WHEN     CashPosition.runway_days < 90
+    THEN     FLAG "cash_flow_warning"
+    SEVERITY critical
+    PRIORITY 80
+  }
+
+  RULE cash_flow_critical {
+    WHEN     CashPosition.runway_days < 30
+    THEN     FLAG "cash_flow_critical"
+    SEVERITY critical
+    PRIORITY 100
+  }
+
+  RULE high_burn_rate {
+    WHEN     CashPosition.burn_rate_monthly > 0
+    AND      CashPosition.runway_days < 120
+    THEN     FLAG "burn_rate_alert"
+    SEVERITY warning
+    PRIORITY 65
+  }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// ACTIONS
+// ═══════════════════════════════════════════════════════════════════════════════
+
+ACTION FireRuleEngine {
+  INPUT   tenant_id: string, module_name: string
+  OUTPUT  firings: number
+  IMPL    "evaluate all rules in the specified module against current facts, persist firings, emit DecisionPackets"
+}
+
+ACTION RefreshFacts {
+  INPUT   tenant_id: string, entity_type: string
+  OUTPUT  refreshed: number
+  IMPL    "pull current entity snapshots from ERP database, compute derived fields, update FactSnapshot records"
+}
+
+ACTION AcknowledgeAlert {
+  INPUT   firing_id: string, ack_by: string, notes: string
+  OUTPUT  acknowledged: bool
+  IMPL    "mark RuleFiring as acknowledged, record who and when, emit decision_acknowledged packet"
+}
+
+ACTION GenerateAuditReport {
+  INPUT   tenant_id: string, start_date: string, end_date: string, module_name: string
+  OUTPUT  report: string
+  AI      """
+    Generate a compliance audit report for expert system rule firings.
+    Tenant: {{tenant_id}}
+    Period: {{start_date}} to {{end_date}}
+    Module: {{module_name}}
+
+    For each rule: firing count, average frequency, peak firing times, acknowledgment rate.
+    Flag any rules that fired frequently but had low acknowledgment rates — these indicate
+    alert fatigue or process failures. Highlight any rules that fired zero times — these
+    may be misconfigured or testing gaps.
+
+    Format as a structured compliance report with an executive summary.
+  """
+}
+
+ACTION ExplainRuleFiring {
+  INPUT   firing_id: string
+  OUTPUT  explanation: string
+  AI      """
+    Explain rule firing {{firing_id}} in plain language for a business user.
+    Include: what policy was triggered, what the fact values were, what action was taken,
+    and what the business impact is if the alert is ignored.
+    No technical jargon. Max 150 words.
+  """
+}
+
+ACTION BulkAcknowledge {
+  INPUT   tenant_id: string, module_name: string, severity: string
+  OUTPUT  count: number
+  IMPL    "bulk-acknowledge all unacknowledged firings matching module and severity, return count"
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// VIEWS
+// ═══════════════════════════════════════════════════════════════════════════════
+
+VIEW AlertDashboard {
+  ENTITY  RuleFiring
+  LAYOUT  dashboard
+  FIELDS  module_name, rule_name, severity, action_taken, entity_type, acknowledged, fired_at
+  ACTIONS read, edit
+  SIDEBAR icon: AlertTriangle
+}
+
+VIEW UnacknowledgedAlerts {
+  ENTITY  RuleFiring
+  LAYOUT  kanban
+  GROUP_BY severity
+  FIELDS  module_name, rule_name, action_taken, entity_id, entity_type, fired_at
+  ACTIONS read, edit
+  SIDEBAR icon: Bell
+}
+
+VIEW AlertHistory {
+  ENTITY  RuleFiring
+  LAYOUT  table
+  FIELDS  module_name, rule_name, severity, action_taken, entity_type, acknowledged, ack_by, fired_at
+  ACTIONS read
+  SIDEBAR icon: History
+}
+
+VIEW FactBrowser {
+  ENTITY  FactSnapshot
+  LAYOUT  table
+  FIELDS  module_name, fact_name, entity_type, entity_id, evaluated_at
+  ACTIONS read
+  SIDEBAR icon: Database
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// PREFERENCES
+// ═══════════════════════════════════════════════════════════════════════════════
+
+PREFERENCE rule_engine_interval_minutes {
+  TYPE    number
+  DEFAULT 15
+  KEY     "es.rule_engine_interval"
+}
+
+PREFERENCE active_tenant {
+  TYPE    string
+  DEFAULT "default"
+  KEY     "es.active_tenant"
+}
+
+PREFERENCE alert_retention_days {
+  TYPE    number
+  DEFAULT 90
+  KEY     "es.alert_retention"
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// SEED — demo rule firings matching the OIE's insight scenarios
+//
+// OIE insight: "Support ticket escalation rate up 40% this week"
+// ES seed: SLAEnforcement firing on enterprise unassigned tickets
+//
+// OIE insight: "Invoice approval averaging 4.2 days"
+// ES seed: FinancialControls firing payment reminders on AR aging
+// ═══════════════════════════════════════════════════════════════════════════════
+
+SEED RuleFiring {
+  tenant_id    "demo"
+  module_name  "CreditControl"
+  rule_name    "block_new_orders"
+  severity     "critical"
+  action_taken "credit_block"
+  entity_type  "Customer"
+  entity_id    "acme-corp"
+  acknowledged false
+  fired_at     "2026-05-19T09:15:00Z"
+}
+
+SEED RuleFiring {
+  tenant_id    "demo"
+  module_name  "SLAEnforcement"
+  rule_name    "enterprise_auto_escalate"
+  severity     "critical"
+  action_taken "enterprise_unassigned_alert"
+  entity_type  "ServiceTicket"
+  entity_id    "ticket-8821"
+  acknowledged false
+  fired_at     "2026-05-20T08:02:00Z"
+}
+
+SEED RuleFiring {
+  tenant_id    "demo"
+  module_name  "FinancialControls"
+  rule_name    "final_notice"
+  severity     "warning"
+  action_taken "final_notice"
+  entity_type  "Invoice"
+  entity_id    "inv-4471"
+  acknowledged false
+  fired_at     "2026-05-18T14:30:00Z"
+}
+
+SEED RuleFiring {
+  tenant_id    "demo"
+  module_name  "InventoryControl"
+  rule_name    "reorder_trigger"
+  severity     "warning"
+  action_taken "reorder_triggered"
+  entity_type  "InventoryItem"
+  entity_id    "product-acc-starter"
+  acknowledged true
+  ack_by       "Jordan Mitchell"
+  ack_notes    "PO created — INV-PO-0192"
+  fired_at     "2026-05-17T11:45:00Z"
+}
+
+SEED RuleFiring {
+  tenant_id    "demo"
+  module_name  "ApprovalMatrix"
+  rule_name    "require_director_approval"
+  severity     "warning"
+  action_taken "director_approval_required"
+  entity_type  "PurchaseOrder"
+  entity_id    "po-2891"
+  acknowledged false
+  fired_at     "2026-05-20T10:30:00Z"
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// TESTS
+// ═══════════════════════════════════════════════════════════════════════════════
+
+TEST rule_firing_persistence {
+  GIVEN RuleFiring {
+    tenant_id:    "test"
+    module_name:  "CreditControl"
+    rule_name:    "block_new_orders"
+    severity:     "critical"
+    action_taken: "credit_block"
+    entity_type:  "Customer"
+    entity_id:    "customer-001"
+    acknowledged: false
+    fired_at:     "2026-05-20T00:00:00Z"
+  }
+  EXPECT create -> id IS NOT NULL
+  EXPECT get_by_id -> module_name == "CreditControl"
+  EXPECT get_by_id -> severity == "critical"
+  EXPECT get_by_id -> acknowledged == false
+}
+
+TEST alert_acknowledgment {
+  GIVEN RuleFiring {
+    tenant_id:    "test"
+    module_name:  "SLAEnforcement"
+    rule_name:    "critical_unassigned"
+    severity:     "critical"
+    action_taken: "sla_breach_imminent_critical"
+    entity_type:  "ServiceTicket"
+    entity_id:    "ticket-001"
+    acknowledged: false
+    fired_at:     "2026-05-20T00:00:00Z"
+  }
+  EXPECT create -> id IS NOT NULL
+  EXPECT get_by_id -> acknowledged == false
+  EXPECT get_by_id -> rule_name == "critical_unassigned"
+}
+
+TEST fact_snapshot_capture {
+  GIVEN FactSnapshot {
+    tenant_id:    "test"
+    module_name:  "InventoryControl"
+    fact_name:    "StockLevel"
+    entity_type:  "InventoryItem"
+    entity_id:    "product-001"
+    evaluated_at: "2026-05-20T00:00:00Z"
+  }
+  EXPECT create -> id IS NOT NULL
+  EXPECT get_by_id -> fact_name == "StockLevel"
+  EXPECT get_by_id -> module_name == "InventoryControl"
+}

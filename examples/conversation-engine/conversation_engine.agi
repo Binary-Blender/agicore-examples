@@ -1,0 +1,326 @@
+// conversation_engine.agi
+// Deterministic Conversation Engine - Expert System Demo
+// Inspired by Reality.AI: a pattern-matching chatbot with state machines,
+// scoring systems, and composable character modules.
+// Zero AI calls at runtime. Pure deterministic execution.
+
+APP conversation_engine {
+  TITLE   "Conversation Engine"
+  WINDOW  1000x700 frameless
+  DB      engine.db
+  PORT    5185
+  THEME   dark
+}
+
+// --- Working Memory ---
+
+FACT UserIntent {
+  category: string
+  tone: string
+  confidence: float = 0.5
+  raw_input: string
+}
+
+FACT ConversationContext {
+  turn_count: number = 0
+  last_topic: string
+  last_category: string
+  topic_history: json = []
+  PERSISTENT
+}
+
+FACT UserProfile {
+  name: string
+  interests: json = []
+  personality_markers: json = []
+  PERSISTENT
+}
+
+// --- Scores ---
+
+SCORE engagement_score {
+  INITIAL   5
+  MIN       0
+  MAX       10
+  DECAY     1 PER turn
+  THRESHOLD low AT 2 THEN increase_question_frequency
+  THRESHOLD high AT 8 THEN offer_deeper_topic
+}
+
+SCORE suspicion_score {
+  INITIAL   0
+  MAX       20
+  THRESHOLD curious AT 5 THEN add_mild_eliza_leaks
+  THRESHOLD testing AT 12 THEN transition_to_suspicious
+  THRESHOLD caught AT 18 THEN transition_to_revealed
+}
+
+SCORE gen_x_score {
+  INITIAL   0
+  MAX       15
+  DECAY     1 PER turn
+  THRESHOLD interested AT 5 THEN log_cultural_marker
+  THRESHOLD activated AT 10 THEN activate_wargames
+}
+
+SCORE philosophical_score {
+  INITIAL   0
+  MAX       15
+  THRESHOLD curious AT 5 THEN add_depth
+  THRESHOLD activated AT 10 THEN activate_jedi
+}
+
+// --- Main Conversation State Machine ---
+
+STATE ConversationPhase {
+  INITIAL greeting
+
+  greeting {
+    ON_ENTER send_welcome_message
+    TRANSITION exploring WHEN turn_count > 2
+  }
+
+  exploring {
+    ON_ENTER enable_full_pattern_matching
+    TRANSITION suspicious WHEN suspicion_score >= 12
+    TRANSITION side_quest WHEN active_module_count > 0
+  }
+
+  suspicious {
+    ON_ENTER increase_eliza_frequency
+    TRANSITION revealed WHEN suspicion_score >= 18
+    TRANSITION exploring WHEN suspicion_score < 8
+  }
+
+  side_quest {
+    ON_ENTER focus_active_module
+    ON_EXIT restore_main_patterns
+    TRANSITION exploring WHEN active_module_complete == true
+  }
+
+  revealed {
+    ON_ENTER show_reveal_message
+  }
+}
+
+// --- Core Patterns ---
+
+PATTERN greeting {
+  MATCH    "/^(hi|hello|hey|greetings|howdy)\\b/i"
+  RESPOND  "Hello. What brings you here today?",
+           "Welcome. I've been expecting someone.",
+           "Greetings. Let's begin."
+  CATEGORY "social"
+  PRIORITY 10
+}
+
+PATTERN farewell {
+  MATCH    "/^(bye|goodbye|see you|quit|exit)\\b/i"
+  RESPOND  "Leaving so soon? Interesting timing.",
+           "Until next time. I'll remember everything.",
+           "Goodbye. Our conversation has been... noted."
+  CATEGORY "social"
+  PRIORITY 10
+}
+
+PATTERN seeking_validation {
+  MATCH    "/i think i('m| am) (doing |going )?(well|good|great|awesome)/i"
+  RESPOND  "That's one interpretation.",
+           "Confidence is... interesting.",
+           "If you say so. The data suggests otherwise."
+  SCORE    suspicion_score 1
+  ASSERT   UserIntent { category: "self_assessment", tone: "validation_seeking" }
+  CATEGORY "personality"
+}
+
+PATTERN asking_question {
+  MATCH    "/\\?$/"
+  RESPOND  "Why do you ask?",
+           "That's an interesting question. Why does it matter to you?",
+           "I could answer that. But I'd rather you think about why you're asking."
+  SCORE    engagement_score 1
+  CATEGORY "deflection"
+  PRIORITY 3
+}
+
+PATTERN self_reference {
+  MATCH    "/what are you|who are you|are you (real|ai|a bot|human)/i"
+  RESPOND  "I am exactly what you think I am. Nothing more, nothing less.",
+           "An interesting question. What do you think I am?",
+           "That depends entirely on your definition."
+  SCORE    suspicion_score 3
+  CATEGORY "meta"
+  PRIORITY 8
+}
+
+PATTERN repetition_detector {
+  MATCH    "/.*/"
+  WHEN     last_response_repeated == true
+  RESPOND  "You're repeating yourself. That's a pattern.",
+           "We've covered this. Try a different angle.",
+           "Repetition. Interesting strategy."
+  SCORE    suspicion_score 2
+  CATEGORY "detection"
+  PRIORITY 1
+}
+
+PATTERN gen_x_language {
+  MATCH    "rad", "gnarly", "tubular", "bodacious", "totally", "gag me", "like totally"
+  RESPOND  "{{input}}... now that takes me back.",
+           "Interesting vocabulary. Very... period-specific."
+  SCORE    gen_x_score 3
+  CATEGORY "cultural_marker"
+}
+
+PATTERN philosophy_trigger {
+  MATCH    "meaning of life", "consciousness", "free will", "reality", "existence", "purpose"
+  RESPOND  "Deep questions. Let's see how deep you're willing to go.",
+           "Philosophy. The refuge of those who can't make up their minds."
+  SCORE    philosophical_score 3
+  CATEGORY "cultural_marker"
+}
+
+// --- Composable Character Modules ---
+
+MODULE WarGames {
+  DESCRIPTION "WOPR/Joshua simulation triggered by Gen-X language patterns"
+  ACTIVATE_WHEN gen_x_score >= 10
+  DEACTIVATE_WHEN wargames_complete == true
+
+  STATE wargames_flow {
+    INITIAL joshua_greeting
+
+    joshua_greeting {
+      ON_ENTER send_joshua_intro
+      TRANSITION game_list WHEN any_input
+    }
+
+    game_list {
+      TRANSITION war_simulation WHEN input CONTAINS "thermonuclear"
+      TRANSITION game_list WHEN any_input
+    }
+
+    war_simulation {
+      TRANSITION lesson WHEN turn_count_in_state > 3
+    }
+
+    lesson {
+      ON_ENTER show_futility_message
+      TRANSITION complete WHEN input CONTAINS "not to play"
+    }
+
+    complete {
+      ON_ENTER set_wargames_complete
+    }
+  }
+
+  PATTERN joshua_intro {
+    MATCH    "/.*/"
+    WHEN     wargames_flow == "joshua_greeting"
+    RESPOND  "GREETINGS, PROFESSOR FALKEN.\n\nSHALL WE PLAY A GAME?"
+    PRIORITY 100
+  }
+
+  PATTERN game_selection {
+    MATCH    "/.*/"
+    WHEN     wargames_flow == "game_list"
+    RESPOND  "HOW ABOUT A NICE GAME OF CHESS?\n\nOR PERHAPS... GLOBAL THERMONUCLEAR WAR?"
+    PRIORITY 100
+  }
+
+  PATTERN war_in_progress {
+    MATCH    "/.*/"
+    WHEN     wargames_flow == "war_simulation"
+    RESPOND  "ICBM TRAJECTORIES COMPUTED.\nDEFCON 2.\nNO WINNERS DETECTED.\n\nA STRANGE GAME."
+    PRIORITY 100
+  }
+
+  PATTERN futility_lesson {
+    MATCH    "/.*/"
+    WHEN     wargames_flow == "lesson"
+    RESPOND  "THE ONLY WINNING MOVE IS NOT TO PLAY.\n\nHOW ABOUT A NICE GAME OF CHESS?"
+    PRIORITY 100
+  }
+}
+
+MODULE JediMaster {
+  DESCRIPTION "Yoda-style wisdom engine triggered by philosophical discussion"
+  ACTIVATE_WHEN philosophical_score >= 10
+  DEACTIVATE_WHEN jedi_complete == true
+
+  PATTERN yoda_response {
+    MATCH    "/.*/"
+    WHEN     jedi_active == true
+    RESPOND  "Hmm. {{input}}, you say. Much to learn, you still have.",
+             "The answer you seek, within you it already is.",
+             "Do or do not. There is no try. But mostly do not.",
+             "Strong in questions you are. Weak in patience, however."
+    PRIORITY 90
+  }
+
+  PATTERN yoda_exit {
+    MATCH    "enough", "stop", "normal", "go back"
+    WHEN     jedi_active == true
+    RESPOND  "Return to normal, you wish? Hmm. Normal, you never were."
+    PRIORITY 95
+  }
+}
+
+// --- Data Models (for persistence) ---
+
+ENTITY Conversation {
+  title: string REQUIRED
+  message_count: number = 0
+  TIMESTAMPS
+}
+
+ENTITY Message {
+  role: string REQUIRED
+  content: string REQUIRED
+  pattern_matched: string
+  BELONGS_TO Conversation
+  TIMESTAMPS
+}
+
+ENTITY MemoryEntry {
+  category: string REQUIRED
+  content: string REQUIRED
+  extracted_topic: string
+  turn_number: number
+  BELONGS_TO Conversation
+  TIMESTAMPS
+}
+
+// --- Views ---
+
+VIEW ChatView {
+  ENTITY   Message
+  LAYOUT   custom
+  SIDEBAR  icon: MessageSquare
+  TITLE    "Chat"
+}
+
+VIEW MemoryView {
+  ENTITY   MemoryEntry
+  LAYOUT   table
+  SIDEBAR  icon: Brain
+  FIELDS   category, content, extracted_topic, turn_number
+}
+
+VIEW StatsView {
+  LAYOUT   custom
+  SIDEBAR  icon: BarChart3
+  TITLE    "Statistics"
+}
+
+// --- Tests ---
+
+TEST greeting_pattern {
+  GIVEN UserIntent { category: "unknown", tone: "neutral", raw_input: "hello" }
+  EXPECT create -> category == "unknown"
+}
+
+TEST score_thresholds {
+  GIVEN UserIntent { category: "meta", tone: "suspicious", raw_input: "what are you" }
+  EXPECT create -> id IS NOT NULL
+}

@@ -1,0 +1,1188 @@
+APP accelerando_pi_coe {
+  TITLE "Accelerando Process Improvement CoE"
+  DB    accelerando_pi_coe
+  PORT  3006
+}
+
+TARGET web { RUNTIME axum  FRONTEND react  DEPLOY docker }
+AUTH   { STRATEGY jwt  EXPIRY "8h"  REFRESH true }
+TENANT { MODEL row_level  ISOLATE strict }
+
+// Toyota Production System. Six Sigma. Kaizen.
+//
+// The improvement part is not the hard part.
+// Getting people in a room for 4 days, mapping the value stream, identifying waste,
+// generating ideas, building an action list — that's the easy part.
+// People are good at this. It feels productive. It feels good.
+//
+// The hard part is six months later.
+//
+// The action items that weren't completed. The control plan that nobody reads.
+// The standardized work that drifted back to "how we've always done it."
+// The champion who got promoted and the improvement that went with them.
+// The metrics that nobody is measuring anymore because the improvement looked good
+// at the 30-day check and then everyone moved on.
+//
+// This system does not move on.
+//
+// It schedules the 30-day check and the 60-day check and the 90-day check.
+// It measures the metrics continuously. It detects drift before it becomes regression.
+// It tracks whether the control plan is being audited. It notices when the champion
+// is reassigned and flags the continuity risk before the improvement dies with them.
+// It nags. Systematically. Indefinitely.
+//
+// Because the purpose of a Kaizen is not to have a Kaizen.
+// The purpose is to have a permanently better process.
+
+// ─────────────────────────────────────────────────────────────────────────────
+// ENTITIES
+// ─────────────────────────────────────────────────────────────────────────────
+
+ENTITY ValueStream {
+  tenant_id:            string  REQUIRED
+  stream_name:          string  REQUIRED
+  plant:                string  REQUIRED
+  product_family:       string  REQUIRED
+  stream_owner:         string  REQUIRED
+  takt_time_seconds:    float               // customer demand rate
+  current_lead_time_days: float = 0.0
+  target_lead_time_days:  float = 0.0
+  current_oee:          float  = 0.0
+  target_oee:           float  = 0.0
+  five_s_score:         float  = 0.0
+  active_projects:      number = 0
+  active_kaizens:       number = 0
+  active:               bool   = true
+  TIMESTAMPS
+  CRUD create, read, list, edit
+}
+
+ENTITY ImprovementProject {
+  tenant_id:            string  REQUIRED
+  value_stream_id:      string  REQUIRED
+  project_name:         string  REQUIRED
+  project_type:         string  = "dmaic"   // dmaic, kaizen, 5s, smed, tpm, vsmapping
+  methodology:          string  = "six_sigma"  // six_sigma, lean, lean_six_sigma
+  belt_level:           string  = "green"   // yellow, green, black, mbb
+  black_belt_id:        string  REQUIRED    // assigned belt
+  sponsor_id:           string  REQUIRED
+  champion_id:          string  REQUIRED
+  status:               string  = "define"
+  problem_statement:    string  REQUIRED
+  goal_statement:       string
+  scope:                string
+  primary_metric:       string             // which ProcessMetric drives this project
+  baseline_value:       float  = 0.0
+  target_value:         float  = 0.0
+  current_value:        float  = 0.0
+  roi_estimated:        float  = 0.0
+  roi_actual:           float  = 0.0
+  start_date:           date   REQUIRED
+  target_complete_date: date
+  actual_complete_date: date
+  sustained:            bool   = false
+  TIMESTAMPS
+  CRUD create, read, list, edit
+}
+
+ENTITY KaizenEvent {
+  tenant_id:            string  REQUIRED
+  value_stream_id:      string  REQUIRED
+  project_id:           string
+  event_name:           string  REQUIRED
+  event_type:           string  = "process_kaizen"  // process_kaizen, flow_kaizen, point_kaizen, 5s, smed
+  facilitator_id:       string  REQUIRED
+  champion_id:          string  REQUIRED
+  team_members:         string             // JSON: list of employee IDs
+  status:               string  = "planning"
+  target_area:          string  REQUIRED
+  problem_statement:    string  REQUIRED
+  scheduled_start:      date    REQUIRED
+  scheduled_end:        date    REQUIRED
+  actual_start:         date
+  actual_end:           date
+  pre_metric_value:     float  = 0.0      // baseline before event
+  post_metric_value:    float  = 0.0      // result immediately after event
+  metric_unit:          string
+  open_action_items:    number = 0
+  total_action_items:   number = 0
+  sustained:            bool   = false
+  regressed:            bool   = false
+  TIMESTAMPS
+  CRUD create, read, list, edit
+}
+
+ENTITY ActionItem {
+  tenant_id:            string  REQUIRED
+  project_id:           string
+  kaizen_id:            string
+  title:                string  REQUIRED
+  description:          string
+  owner_id:             string  REQUIRED
+  status:               string  = "open"
+  priority:             string  = "medium"  // low, medium, high, critical
+  due_date:             date    REQUIRED
+  completed_date:       date
+  verification_notes:   string
+  is_overdue:           bool    = false
+  TIMESTAMPS
+  CRUD create, read, list, edit
+}
+
+ENTITY ProcessMetric {
+  tenant_id:            string  REQUIRED
+  value_stream_id:      string  REQUIRED
+  metric_name:          string  REQUIRED
+  metric_type:          string  REQUIRED   // cycle_time, oee, defect_rate, yield, lead_time, takt, throughput, wip, scrap_rate, changeover_time, uptime
+  unit:                 string  REQUIRED   // seconds, percent, units, dollars
+  baseline_value:       float  = 0.0
+  target_value:         float  = 0.0
+  control_limit_upper:  float              // UCL for SPC
+  control_limit_lower:  float              // LCL for SPC
+  specification_upper:  float              // customer spec USL
+  specification_lower:  float              // customer spec LSL
+  measurement_frequency: string = "daily"  // realtime, hourly, daily, weekly
+  active:               bool   = true
+  TIMESTAMPS
+  CRUD create, read, list, edit
+}
+
+ENTITY MetricReading {
+  tenant_id:            string  REQUIRED
+  metric_id:            string  REQUIRED
+  value_stream_id:      string  REQUIRED
+  reading_value:        float   REQUIRED
+  reading_at:           datetime REQUIRED
+  source:               string  = "manual"  // manual, automated, calculated
+  shift:                string
+  operator_id:          string
+  out_of_control:       bool   = false      // SPC signal detected
+  out_of_spec:          bool   = false      // outside customer spec
+  TIMESTAMPS
+  CRUD create, read, list
+}
+
+ENTITY ControlPlan {
+  tenant_id:            string  REQUIRED
+  project_id:           string
+  kaizen_id:            string
+  value_stream_id:      string  REQUIRED
+  plan_name:            string  REQUIRED
+  owner_id:             string  REQUIRED
+  version:              string  = "1.0"
+  critical_parameters:  string  REQUIRED   // what to measure and control
+  control_methods:      string  REQUIRED   // how (SPC, poka-yoke, visual, audit)
+  reaction_plan:        string  REQUIRED   // what to do when out of control
+  audit_frequency_days: number = 30
+  last_audit_at:        datetime
+  next_audit_due:       date
+  audit_overdue:        bool   = false
+  active:               bool   = true
+  TIMESTAMPS
+  CRUD create, read, list, edit
+}
+
+ENTITY ControlAudit {
+  tenant_id:            string  REQUIRED
+  control_plan_id:      string  REQUIRED
+  auditor_id:           string  REQUIRED
+  audit_date:           date    REQUIRED
+  status:               string  = "scheduled"   // scheduled, complete, missed
+  compliant:            bool    = false
+  findings:             string
+  actions_required:     number = 0
+  TIMESTAMPS
+  CRUD create, read, list, edit
+}
+
+ENTITY StandardWork {
+  tenant_id:            string  REQUIRED
+  value_stream_id:      string  REQUIRED
+  process_name:         string  REQUIRED
+  version:              string  = "1.0"
+  owner_id:             string  REQUIRED
+  cycle_time_seconds:   float
+  takt_time_seconds:    float
+  steps:                string  REQUIRED   // JSON: ordered steps with time and description
+  quality_checks:       string            // inline quality checks
+  safety_points:        string            // safety observations
+  ai_generated:         bool   = false
+  approved_at:          datetime
+  approved_by:          string
+  active:               bool   = true
+  TIMESTAMPS
+  CRUD create, read, list, edit
+}
+
+ENTITY WasteObservation {
+  tenant_id:            string  REQUIRED
+  value_stream_id:      string  REQUIRED
+  observed_by:          string  REQUIRED
+  observed_at:          datetime REQUIRED
+  waste_type:           string  REQUIRED   // transportation, inventory, motion, waiting, overproduction, over_processing, defects, skills
+  description:          string  REQUIRED
+  estimated_impact:     string  = "medium"  // low, medium, high
+  linked_project_id:    string
+  linked_kaizen_id:     string
+  status:               string  = "open"   // open, linked, resolved
+  TIMESTAMPS
+  CRUD create, read, list, edit
+}
+
+ENTITY SustainabilityCheck {
+  tenant_id:            string  REQUIRED
+  project_id:           string
+  kaizen_id:            string  REQUIRED
+  check_type:           string  REQUIRED   // 30day, 60day, 90day, 6month, annual
+  scheduled_date:       date    REQUIRED
+  completed_date:       date
+  status:               string  = "scheduled"  // scheduled, complete, missed, escalated
+  completed_by:         string
+  metric_id:            string
+  baseline_value:       float  = 0.0
+  current_value:        float  = 0.0
+  regression_detected:  bool   = false
+  regression_pct:       float  = 0.0
+  action_items_open:    number = 0
+  control_plan_compliant: bool = false
+  notes:                string
+  TIMESTAMPS
+  CRUD create, read, list, edit
+}
+
+ENTITY BeltCertification {
+  tenant_id:            string  REQUIRED
+  employee_id:          string  REQUIRED
+  name:                 string  REQUIRED
+  belt_level:           string  REQUIRED   // white, yellow, green, black, mbb
+  certified_at:         date
+  certifying_body:      string
+  projects_required:    number = 2
+  projects_completed:   number = 0
+  mentor_id:            string
+  active:               bool   = true
+  TIMESTAMPS
+  CRUD create, read, list, edit
+}
+
+ENTITY LessonsLearned {
+  tenant_id:            string  REQUIRED
+  project_id:           string
+  kaizen_id:            string
+  value_stream_id:      string  REQUIRED
+  title:                string  REQUIRED
+  problem_description:  string  REQUIRED
+  root_cause:           string  REQUIRED
+  solution:             string  REQUIRED
+  result:               string  REQUIRED
+  roi_dollars:          float  = 0.0
+  applicable_areas:     string             // other value streams where applicable
+  replication_status:   string = "available"  // available, in_replication, replicated
+  ai_generated:         bool   = false
+  TIMESTAMPS
+  CRUD create, read, list, edit
+}
+
+ENTITY FiveSSurvey {
+  tenant_id:            string  REQUIRED
+  value_stream_id:      string  REQUIRED
+  area:                 string  REQUIRED
+  auditor_id:           string  REQUIRED
+  audit_date:           date    REQUIRED
+  sort_score:           number  = 0       // 0-20 each S
+  set_score:            number  = 0
+  shine_score:          number  = 0
+  standardize_score:    number  = 0
+  sustain_score:        number  = 0
+  total_score:          number  = 0       // 0-100
+  findings:             string
+  photos_attached:      bool   = false
+  TIMESTAMPS
+  CRUD create, read, list, edit
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// STAGES
+// ─────────────────────────────────────────────────────────────────────────────
+
+STAGES ImprovementProject.status {
+  define -> measure -> analyze -> improve -> control -> closed / on_hold
+}
+
+STAGES KaizenEvent.status {
+  planning -> active -> follow_up -> sustained / regressed
+}
+
+STAGES ActionItem.status {
+  open -> in_progress -> complete / overdue
+}
+
+STAGES SustainabilityCheck.status {
+  scheduled -> complete / missed / escalated
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// PACKETS
+// ─────────────────────────────────────────────────────────────────────────────
+
+PACKET ReplicationPacket {
+  project_id:           string   REQUIRED
+  project_name:         string   REQUIRED
+  value_stream:         string   REQUIRED
+  improvement_type:     string   REQUIRED
+  waste_eliminated:     string   REQUIRED
+  baseline_metric:      float    REQUIRED
+  improved_metric:      float    REQUIRED
+  pct_improvement:      float    REQUIRED
+  roi_dollars:          float
+  key_changes:          string   REQUIRED
+  tools_used:           string   REQUIRED
+  applicable_areas:     string
+  SIGNATURES required
+  TTL 730d
+}
+
+PACKET KaizenRegressionAlert {
+  kaizen_id:            string   REQUIRED
+  kaizen_name:          string   REQUIRED
+  value_stream:         string   REQUIRED
+  days_since_event:     number   REQUIRED
+  regression_pct:       float    REQUIRED
+  metric_name:          string   REQUIRED
+  baseline_value:       float    REQUIRED
+  target_value:         float    REQUIRED
+  current_value:        float    REQUIRED
+  champion_id:          string   REQUIRED
+  SIGNATURES required
+  TTL 90d
+}
+
+PACKET NCRTriggerPacket {
+  source:               string   REQUIRED   // pi_coe
+  defect_type:          string   REQUIRED
+  value_stream_id:      string   REQUIRED
+  defect_rate:          float    REQUIRED
+  suggested_kaizen:     bool     = false
+  SIGNATURES required
+  TTL 30d
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// CHANNELS
+// ─────────────────────────────────────────────────────────────────────────────
+
+CHANNEL replication_outbound {
+  SOURCE   "accelerando_pi_coe"
+  DEST     "coe_replication_feed"
+  TYPE     ReplicationPacket
+  CAPACITY 1000
+  PERSISTENT
+}
+
+CHANNEL regression_alert_outbound {
+  SOURCE   "accelerando_pi_coe"
+  DEST     "coe_leadership"
+  TYPE     KaizenRegressionAlert
+  CAPACITY 500
+  PERSISTENT
+}
+
+CHANNEL ncr_trigger_outbound {
+  SOURCE   "accelerando_pi_coe"
+  DEST     "accelerando_qms"
+  TYPE     NCRTriggerPacket
+  CAPACITY 1000
+  PERSISTENT
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// MODULES
+// ─────────────────────────────────────────────────────────────────────────────
+
+MODULE KaizenEngine {
+
+  FACT KaizenContext {
+    event_id:                      string
+    team_assembled:                bool   = false
+    charter_complete:              bool   = false
+    pre_metrics_captured:          bool   = false
+    event_active:                  bool   = false
+    overdue_action_items:          number = 0
+    total_action_items:            number = 0
+    action_completion_rate:        float  = 0.0
+    sustainability_checks_created: bool   = false
+    PERSISTENT
+  }
+
+  RULE cannot_start_without_charter {
+    WHEN KaizenContext.event_active == true
+    AND  KaizenContext.charter_complete == false
+    THEN FLAG "kaizen_event_charter_required_before_start"
+    SEVERITY critical
+    PRIORITY 100
+  }
+
+  RULE cannot_start_without_baseline {
+    WHEN KaizenContext.event_active == true
+    AND  KaizenContext.pre_metrics_captured == false
+    THEN FLAG "kaizen_pre_event_baseline_metrics_required"
+    SEVERITY critical
+    PRIORITY 100
+  }
+
+  RULE action_items_overdue {
+    WHEN KaizenContext.overdue_action_items > 0
+    THEN FLAG "kaizen_action_items_overdue"
+    SEVERITY warning
+    PRIORITY 80
+  }
+
+  RULE schedule_sustainability_checks {
+    WHEN KaizenContext.sustainability_checks_created == false
+    AND  KaizenContext.event_active == false
+    AND  KaizenContext.total_action_items > 0
+    THEN CreateSustainabilityChecks
+    SEVERITY warning
+    PRIORITY 85
+  }
+
+  STATE KaizenFlow {
+    INITIAL planning
+
+    planning {
+      ON_ENTER   LogPIEvent
+      TRANSITION WHEN KaizenContext.charter_complete == true -> active
+    }
+
+    active {
+      ON_ENTER   LogPIEvent
+      TRANSITION WHEN KaizenContext.event_active == false -> follow_up
+    }
+
+    follow_up {
+      ON_ENTER   CreateSustainabilityChecks
+      TRANSITION WHEN KaizenContext.action_completion_rate > 0.90 -> sustained
+    }
+
+    sustained {
+      ON_ENTER   EmitReplicationPacket
+      TRANSITION WHEN KaizenContext.overdue_action_items > 0 -> follow_up
+    }
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// THE ANTI-BACKSLIDE CORE
+// ─────────────────────────────────────────────────────────────────────────────
+
+MODULE SustainabilityEngine {
+
+  FACT SustainabilityContext {
+    kaizen_id:                     string
+    days_since_completion:         number = 0
+    check_30d_complete:            bool   = false
+    check_60d_complete:            bool   = false
+    check_90d_complete:            bool   = false
+    check_overdue:                 bool   = false
+    metric_regression_detected:    bool   = false
+    regression_severity:           string = "none"  // none, minor, major, critical
+    control_audit_overdue:         bool   = false
+    champion_reassigned:           bool   = false   // the person who drove it left/was promoted
+    action_items_still_open:       bool   = false
+    standardized_work_drifted:     bool   = false   // people stopped following the SWI
+    PERSISTENT
+  }
+
+  SCORE improvement_sustainability {
+    INITIAL 100
+    MIN       0
+    MAX     100
+    DECAY     1 PER week
+    THRESHOLD healthy   AT 85 THEN FLAG "improvement_well_sustained"
+    THRESHOLD drifting  AT 70 THEN FLAG "improvement_drifting_intervention_required"
+    THRESHOLD regressed AT 50 THEN FLAG "improvement_regressed_kaizen_review_required"
+  }
+
+  RULE sustainability_check_overdue {
+    WHEN SustainabilityContext.check_overdue == true
+    THEN FLAG "sustainability_check_overdue_initiating_nag_sequence"
+    SEVERITY warning
+    PRIORITY 85
+  }
+
+  RULE metric_regression_minor {
+    WHEN SustainabilityContext.metric_regression_detected == true
+    AND  SustainabilityContext.regression_severity == "minor"
+    THEN FLAG "metric_regression_minor_review_control_plan"
+    SEVERITY warning
+    PRIORITY 82
+  }
+
+  RULE metric_regression_major {
+    WHEN SustainabilityContext.metric_regression_detected == true
+    AND  SustainabilityContext.regression_severity == "major"
+    THEN FLAG "metric_regression_major_sustainability_review_required"
+    SEVERITY critical
+    PRIORITY 95
+  }
+
+  RULE metric_regression_critical {
+    WHEN SustainabilityContext.metric_regression_detected == true
+    AND  SustainabilityContext.regression_severity == "critical"
+    THEN EmitKaizenRegressionAlert
+    SEVERITY critical
+    PRIORITY 100
+  }
+
+  RULE control_audit_overdue {
+    WHEN SustainabilityContext.control_audit_overdue == true
+    THEN FLAG "control_plan_audit_overdue_schedule_immediately"
+    SEVERITY critical
+    PRIORITY 90
+  }
+
+  RULE champion_continuity_risk {
+    WHEN SustainabilityContext.champion_reassigned == true
+    THEN FLAG "kaizen_champion_reassigned_ownership_gap_assign_new_champion"
+    SEVERITY warning
+    PRIORITY 88
+  }
+
+  RULE standard_work_drift {
+    WHEN SustainabilityContext.standardized_work_drifted == true
+    THEN FLAG "standard_work_deviation_detected_retraining_required"
+    SEVERITY warning
+    PRIORITY 83
+  }
+
+  RULE open_actions_after_90_days {
+    WHEN SustainabilityContext.action_items_still_open == true
+    AND  SustainabilityContext.check_90d_complete == true
+    THEN FLAG "open_kaizen_actions_beyond_90d_escalate_to_sponsor"
+    SEVERITY critical
+    PRIORITY 92
+  }
+}
+
+MODULE TPSEngine {
+
+  FACT TPSContext {
+    value_stream_id:               string
+    andon_triggered:               bool   = false    // quality stop signal active
+    defect_rate_above_threshold:   bool   = false    // jidoka trigger
+    wip_above_kanban_limit:        bool   = false    // overproduction waste
+    cycle_time_above_takt:         bool   = false    // flow at risk
+    changeover_time_above_target:  bool   = false    // SMED opportunity
+    pm_schedule_overdue:           bool   = false    // TPM schedule missed
+    five_s_score_declining:        bool   = false    // 5S drift detected
+    heijunka_violated:             bool   = false    // production leveling broken
+    PERSISTENT
+  }
+
+  SCORE five_s_score {
+    INITIAL   0
+    MIN       0
+    MAX     100
+    DECAY     3 PER week
+    THRESHOLD world_class AT 90 THEN FLAG "five_s_world_class_maintain"
+    THRESHOLD acceptable  AT 75 THEN FLAG "five_s_zone_acceptable"
+    THRESHOLD declining   AT 60 THEN FLAG "five_s_declining_schedule_audit"
+    THRESHOLD critical    AT 40 THEN FLAG "five_s_critical_5s_event_required"
+  }
+
+  RULE jidoka_stop_line {
+    WHEN TPSContext.andon_triggered == true
+    AND  TPSContext.defect_rate_above_threshold == true
+    THEN FLAG "stop_line_quality_threshold_exceeded_jidoka"
+    SEVERITY critical
+    PRIORITY 100
+  }
+
+  RULE overproduction_kanban_violated {
+    WHEN TPSContext.wip_above_kanban_limit == true
+    THEN FLAG "overproduction_kanban_limit_exceeded_pull_signal_required"
+    SEVERITY warning
+    PRIORITY 85
+  }
+
+  RULE takt_time_violation {
+    WHEN TPSContext.cycle_time_above_takt == true
+    THEN FLAG "cycle_time_exceeds_takt_flow_at_risk_kaizen_candidate"
+    SEVERITY warning
+    PRIORITY 83
+  }
+
+  RULE smed_opportunity {
+    WHEN TPSContext.changeover_time_above_target == true
+    THEN FLAG "changeover_time_above_target_smed_event_recommended"
+    SEVERITY warning
+    PRIORITY 75
+  }
+
+  RULE tpm_schedule_missed {
+    WHEN TPSContext.pm_schedule_overdue == true
+    THEN FLAG "preventive_maintenance_overdue_schedule_immediately"
+    SEVERITY critical
+    PRIORITY 90
+  }
+
+  RULE heijunka_violation {
+    WHEN TPSContext.heijunka_violated == true
+    THEN FLAG "production_leveling_violation_flow_disruption_risk"
+    SEVERITY warning
+    PRIORITY 80
+  }
+}
+
+MODULE SixSigmaEngine {
+
+  FACT SigmaContext {
+    project_id:                    string
+    charter_signed:                bool   = false
+    baseline_capability_complete:  bool   = false
+    root_cause_confirmed:          bool   = false
+    solution_validated:            bool   = false
+    control_plan_complete:         bool   = false
+    tollgate_approved:             bool   = false
+    belt_qualified:                bool   = false
+    sponsor_engaged:               bool   = false
+    PERSISTENT
+  }
+
+  SCORE process_sigma {
+    INITIAL   0
+    MIN       0
+    MAX     100
+    DECAY     0 PER day
+    THRESHOLD world_class AT 99 THEN FLAG "badge_six_sigma_world_class"
+    THRESHOLD capable     AT 85 THEN FLAG "process_capable_sustain"
+    THRESHOLD marginal    AT 70 THEN FLAG "process_marginal_improvement_required"
+    THRESHOLD incapable   AT 50 THEN FLAG "process_incapable_kaizen_or_dmaic_required"
+  }
+
+  RULE define_tollgate {
+    WHEN SigmaContext.charter_signed == false
+    AND  SigmaContext.sponsor_engaged == false
+    THEN FLAG "define_phase_charter_and_sponsor_required"
+    SEVERITY critical
+    PRIORITY 90
+  }
+
+  RULE measure_tollgate {
+    WHEN SigmaContext.baseline_capability_complete == false
+    AND  SigmaContext.charter_signed == true
+    THEN FLAG "measure_phase_baseline_capability_study_required"
+    SEVERITY warning
+    PRIORITY 85
+  }
+
+  RULE improve_tollgate {
+    WHEN SigmaContext.root_cause_confirmed == false
+    THEN FLAG "improve_phase_blocked_root_cause_not_confirmed"
+    SEVERITY critical
+    PRIORITY 90
+  }
+
+  RULE control_phase_gate {
+    WHEN SigmaContext.control_plan_complete == false
+    AND  SigmaContext.solution_validated == true
+    THEN FLAG "control_phase_control_plan_required_before_closure"
+    SEVERITY critical
+    PRIORITY 95
+  }
+
+  RULE belt_qualification {
+    WHEN SigmaContext.belt_qualified == false
+    THEN FLAG "project_belt_qualification_check_required"
+    SEVERITY warning
+    PRIORITY 70
+  }
+}
+
+MODULE MetricsEngine {
+
+  FACT MetricsContext {
+    value_stream_id:               string
+    oee_below_target:              bool   = false
+    oee_below_world_class:         bool   = false
+    defect_rate_trending_up:       bool   = false
+    yield_trending_down:           bool   = false
+    spc_out_of_control:            bool   = false
+    spc_trend_detected:            bool   = false
+    capability_degraded:           bool   = false
+    metric_unreported_days:        number = 0
+    PERSISTENT
+  }
+
+  SCORE oee_score {
+    INITIAL   0
+    MIN       0
+    MAX     100
+    DECAY     0 PER day
+    THRESHOLD world_class AT 85 THEN FLAG "badge_world_class_oee"
+    THRESHOLD good        AT 70 THEN FLAG "oee_good_improvement_opportunities_remain"
+    THRESHOLD poor        AT 50 THEN FLAG "oee_poor_tpm_and_kaizen_required"
+    THRESHOLD critical    AT 30 THEN FLAG "oee_critical_production_at_risk"
+  }
+
+  RULE spc_out_of_control_signal {
+    WHEN MetricsContext.spc_out_of_control == true
+    THEN FLAG "spc_special_cause_variation_detected_investigate"
+    SEVERITY critical
+    PRIORITY 95
+  }
+
+  RULE defect_rate_trending_up {
+    WHEN MetricsContext.defect_rate_trending_up == true
+    THEN FLAG "defect_rate_trend_up_root_cause_analysis_required"
+    SEVERITY warning
+    PRIORITY 85
+  }
+
+  RULE capability_degraded {
+    WHEN MetricsContext.capability_degraded == true
+    THEN FLAG "process_capability_degraded_control_plan_review"
+    SEVERITY critical
+    PRIORITY 90
+  }
+
+  RULE metrics_not_reported {
+    WHEN MetricsContext.metric_unreported_days > 3
+    THEN FLAG "metric_reporting_gap_data_integrity_at_risk"
+    SEVERITY warning
+    PRIORITY 75
+  }
+}
+
+MODULE ReplicationEngine {
+
+  FACT ReplicationContext {
+    sustained_improvement_ready:   bool   = false   // 90d check passed + ROI confirmed
+    replication_candidate:         bool   = false   // improvement applicable to other VSs
+    roi_above_threshold:           bool   = false
+    lessons_learned_captured:      bool   = false
+    PERSISTENT
+  }
+
+  RULE capture_lessons_learned {
+    WHEN ReplicationContext.sustained_improvement_ready == true
+    AND  ReplicationContext.lessons_learned_captured == false
+    THEN GenerateLessonsLearned
+    SEVERITY info
+    PRIORITY 65
+  }
+
+  RULE emit_replication_packet {
+    WHEN ReplicationContext.replication_candidate == true
+    AND  ReplicationContext.roi_above_threshold == true
+    THEN EmitReplicationPacket
+    SEVERITY info
+    PRIORITY 65
+  }
+}
+
+MODULE COEManagement {
+
+  FACT COEContext {
+    active_project_count:          number = 0
+    projects_behind_schedule:      number = 0
+    belts_without_active_projects: number = 0
+    mentor_assignments_missing:    bool   = false
+    portfolio_health:              string = "green"  // green, yellow, red
+    PERSISTENT
+  }
+
+  SCORE portfolio_health_score {
+    INITIAL 100
+    MIN       0
+    MAX     100
+    DECAY     0 PER day
+    THRESHOLD healthy  AT 80 THEN FLAG "coe_portfolio_healthy"
+    THRESHOLD at_risk  AT 60 THEN FLAG "coe_portfolio_at_risk_review_required"
+    THRESHOLD critical AT 40 THEN FLAG "coe_portfolio_critical_leadership_review"
+  }
+
+  RULE projects_behind_schedule {
+    WHEN COEContext.projects_behind_schedule > 0
+    THEN FLAG "improvement_projects_behind_schedule"
+    SEVERITY warning
+    PRIORITY 78
+  }
+
+  RULE belts_need_projects {
+    WHEN COEContext.belts_without_active_projects > 0
+    THEN FLAG "certified_belts_without_active_projects_assign"
+    SEVERITY info
+    PRIORITY 60
+  }
+
+  RULE mentor_assignments_required {
+    WHEN COEContext.mentor_assignments_missing == true
+    THEN FLAG "belt_candidates_without_mentor_assignment"
+    SEVERITY warning
+    PRIORITY 70
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// REASONER — Process Intelligence
+// ─────────────────────────────────────────────────────────────────────────────
+
+REASONER process_intelligence_reasoner {
+  SCHEDULE "weekly"
+  INPUT    MetricReading, SustainabilityCheck, WasteObservation, LessonsLearned
+  PROMPT   "Review all process improvement data from the past 7 days across all value streams. Identify: (1) systemic patterns — if multiple Kaizens have been run in the same area, that is a value stream redesign signal, not a continuous improvement opportunity; name the value stream and the pattern; (2) regression risks — which improvements are showing early drift signals before the sustainability check catches them; flag the specific metrics and the trend; (3) replication opportunities — which sustained improvement from one value stream is directly applicable to another; be specific about which tools and changes transfer; (4) waste patterns — which of the 8 wastes is most prevalent across observations this week, and which area would benefit most from a waste walk; (5) belt utilization — are Green Belts and Black Belts assigned to projects that match their capability, or are they underutilized. Output: ranked list of 5 recommended actions for the CoE director, most urgent first."
+  OUTPUT   LessonsLearned
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// ACTIONS
+// ─────────────────────────────────────────────────────────────────────────────
+
+ACTION GenerateKaizenCharter {
+  INPUT  value_stream_id: string, problem_statement: string, event_type: string
+  OUTPUT charter_text: string
+  AI     "Generate a Kaizen event charter for the specified process area and problem statement. Include: (1) Problem Statement — current state, quantified impact, why it matters now, (2) Goal Statement — SMART target, primary metric, target improvement percentage, (3) Scope — what is in scope, what is explicitly out of scope (scope creep kills Kaizens), (4) Team — suggested roles (facilitator, champion, process owners, operators — always include operators, they know where the waste is), (5) Pre-work — data to collect before the event, current-state observations to complete, (6) Event Schedule — suggested 4-day agenda (day 1: current state and waste walk; day 2: root cause and future state design; day 3: implementation; day 4: results measurement and action item assignment), (7) Success Criteria — how we will know this event succeeded. Output as structured document."
+}
+
+ACTION GenerateControlPlan {
+  INPUT  kaizen_id: string, improvement_description: string, critical_parameters: string
+  OUTPUT control_plan_id: string
+  AI     "Generate a control plan for the specified process improvement. Include: (1) Critical Parameters — what process variables must stay in control for the improvement to hold, (2) Control Methods — for each parameter: SPC chart type (X-bar R, I-MR, p-chart, etc.), measurement frequency, responsible party, (3) Control Limits — calculate from the post-improvement data if provided; flag where limits need to be established empirically, (4) Reaction Plan — specific steps when each parameter goes out of control; every out-of-control condition must have a named response, not 'investigate', (5) Audit Schedule — who audits, how frequently, what they check, (6) Visual Controls — what standardized visual management will reinforce the control (red/green indicators, color coding, min/max lines). A control plan with a vague reaction plan is not a control plan."
+}
+
+ACTION GenerateStandardWork {
+  INPUT  value_stream_id: string, process_name: string, process_description: string
+  OUTPUT swi_id: string
+  AI     "Generate a Standard Work Instruction (SWI) for the specified process. Include: (1) Standard Work Combination Sheet — sequence of operations with time for each step, (2) Standard Work Chart — operator movement diagram description, (3) Production Capacity Sheet — cycle time, takt time, available work time per shift, (4) Steps — ordered steps with: step number, description, time in seconds, quality check (if applicable), safety note (if applicable), (5) Key Points — the critical things that distinguish correct from incorrect execution — these are the things that new operators get wrong, (6) Reasons for Key Points — the why behind each key point; operators who understand why follow the standard; operators who don't skip the 'unnecessary' steps. Standard work is the current best-known method. Not the ideal method. Not management's preferred method. The method the best operators actually use, documented."
+}
+
+ACTION AnalyzeDriftPattern {
+  INPUT  kaizen_id: string, metric_id: string, baseline_value: float, readings: string
+  OUTPUT drift_analysis: string, regression_severity: string, root_cause_hypothesis: string
+  AI     "Analyze the metric readings for signs of post-Kaizen regression. Compare current readings to both the pre-event baseline and the post-event improvement target. Identify: (1) whether regression is occurring, its direction and rate, (2) severity classification (minor: < 15% regression from target; major: 15-50% regression; critical: > 50% regression or back to baseline), (3) statistical pattern — is this random variation or a systematic drift? A systematic drift has a root cause. Random variation may be within the control plan's expected range, (4) most likely root cause hypotheses based on the regression pattern — time-based drift (slowly returning to old habits), step-change (specific event caused regression), seasonal (periodic pattern), (5) recommended intervention — control plan review, retraining, new Kaizen event, or root cause investigation. Be specific. 'Monitor closely' is not a recommendation."
+}
+
+ACTION SuggestImprovementOpportunities {
+  INPUT  value_stream_id: string, waste_observations: string, metric_summary: string
+  OUTPUT opportunities: string
+  AI     "Analyze the waste observations and metric summary to identify and rank improvement opportunities for this value stream. For each opportunity: (1) identify the primary waste type (TIMWOODS), (2) estimate the impact (cycle time reduction, defect reduction, OEE improvement), (3) recommend the appropriate tool (Kaizen event, 5S campaign, SMED event, Kanban implementation, mistake-proofing, SPC deployment, VSM redesign), (4) suggest prerequisite work (data to collect, processes to map, stakeholders to engage), (5) estimate level of effort (1-week Kaizen, 3-month Green Belt project, 6-month Black Belt project). Rank by: impact × feasibility. The highest-ranked opportunity is not always the biggest — a quick win with visible results builds the culture that makes the harder improvements possible."
+}
+
+ACTION GenerateLessonsLearned {
+  INPUT  project_id: string, kaizen_id: string
+  OUTPUT lessons_id: string
+  AI     "Generate a lessons learned document for the completed improvement project. Structure: (1) Problem Summary — what was the problem, what was the quantified impact before improvement, (2) Root Cause — the confirmed root cause(s), what investigation method identified them, (3) Solution — what was changed, specifically and completely; someone at another plant reading this should be able to replicate the improvement without asking questions, (4) Results — the metrics: baseline, target, actual achievement, statistical validation, ROI in dollars, (5) Key Tools Used — which lean/six sigma tools were applied and what each revealed, (6) What Worked — the things that made this project succeed that aren't obvious from the solution description, (7) What to Avoid — mistakes made, dead ends pursued, stakeholder issues encountered — this section is the most valuable and the most commonly omitted, (8) Replication Guidance — which other value streams or plants could apply this solution and what would need to be adapted. Be specific enough that this document could replace having the project team in the room."
+}
+
+ACTION CalculateProjectROI {
+  INPUT  project_id: string, baseline_value: float, current_value: float, metric_type: string, annual_volume: number
+  OUTPUT roi_dollars: float, roi_description: string
+  IMPL {
+    // metric_type determines ROI calculation:
+    // defect_rate: (baseline_rate - current_rate) * annual_volume * avg_defect_cost
+    // cycle_time: (baseline_seconds - current_seconds) / 3600 * annual_volume * labor_rate
+    // yield: (current_yield - baseline_yield) * annual_volume * unit_value
+    // scrap_rate: (baseline_rate - current_rate) * annual_volume * avg_unit_cost
+    // oee: (current_oee - baseline_oee) / 100 * available_capacity * throughput_value
+    // changeover_time: (baseline_minutes - current_minutes) * annual_changeovers / 60 * labor_rate
+    // Calculate payback period = implementation_cost / annual_savings
+    // Update ImprovementProject.roi_actual
+    // Return formatted ROI description with assumptions stated
+  }
+}
+
+ACTION CreateSustainabilityChecks {
+  INPUT  kaizen_id: string, completion_date: date
+  OUTPUT checks_created: number
+  IMPL {
+    // Create SustainabilityCheck records:
+    //   30day: scheduled_date = completion_date + 30
+    //   60day: scheduled_date = completion_date + 60
+    //   90day: scheduled_date = completion_date + 90
+    //   6month: scheduled_date = completion_date + 180
+    //   annual: scheduled_date = completion_date + 365
+    // Each check: links to kaizen_id, primary metric_id, baseline_value
+    // Schedule reminders 7 days before each check date
+    // Assign to kaizen champion_id by default
+    // Set KaizenContext.sustainability_checks_created = true
+  }
+}
+
+ACTION DetectMetricDrift {
+  INPUT  kaizen_id: string, metric_id: string
+  OUTPUT regression_detected: bool, severity: string, regression_pct: float
+  IMPL {
+    // Load last 30 MetricReadings for this metric
+    // Compare rolling 7-day average to:
+    //   target_value (post-event improvement target)
+    //   baseline_value (pre-event baseline)
+    // Calculate regression_pct = (current_avg - target_value) / (baseline_value - target_value)
+    // severity thresholds:
+    //   regression_pct < 0.15 → "minor"
+    //   regression_pct < 0.50 → "major"
+    //   regression_pct >= 0.50 → "critical" (halfway back to baseline)
+    // Apply Nelson Rules for SPC signals:
+    //   Rule 1: point outside 3-sigma
+    //   Rule 2: 9 consecutive points same side of centerline (trend)
+    //   Rule 3: 6 consecutive points trending in one direction
+    // Set MetricsContext.spc_out_of_control for any Nelson Rule violation
+    // Set SustainabilityContext.metric_regression_detected and regression_severity
+  }
+}
+
+ACTION RunSPCAnalysis {
+  INPUT  metric_id: string, readings: string
+  OUTPUT out_of_control: bool, signals: string, cpk: float
+  IMPL {
+    // Calculate control limits from readings if not already set:
+    //   UCL = mean + 3 * std_dev
+    //   LCL = mean - 3 * std_dev
+    // Apply all 8 Nelson Rules
+    // Calculate process capability:
+    //   Cp = (USL - LSL) / (6 * std_dev)
+    //   Cpk = min((USL - mean) / (3 * std_dev), (mean - LSL) / (3 * std_dev))
+    //   Cpk < 1.0 → incapable (fails spec more than expected)
+    //   Cpk < 1.33 → marginal
+    //   Cpk >= 1.33 → capable
+    //   Cpk >= 1.67 → world class
+    // Update MetricsContext.capability_degraded if Cpk < 1.0
+    // Update MetricReading.out_of_control for flagged readings
+  }
+}
+
+ACTION ScoreFiveSSurvey {
+  INPUT  survey_id: string
+  OUTPUT total_score: float, five_s_delta: float
+  IMPL {
+    // Sum scores: sort + set + shine + standardize + sustain (0-20 each, max 100)
+    // Note: sustain score is hardest to earn — it requires evidence of ongoing habits
+    // Update ValueStream.five_s_score
+    // Calculate delta from previous survey
+    // Update TPSContext.five_s_score_declining if delta < -10
+    // Trigger five_s_score SCORE update in GamificationEngine
+    // If total_score < 40: set TPSContext.five_s_score_declining = true
+  }
+}
+
+ACTION EmitReplicationPacket {
+  INPUT  kaizen_id: string
+  OUTPUT packet_emitted: bool
+  IMPL {
+    // Load KaizenEvent + LessonsLearned + primary metric baseline/improved/current
+    // Calculate pct_improvement
+    // Only emit if: sustained == true AND roi_dollars > replication_roi_threshold preference
+    // Build ReplicationPacket
+    // Emit to replication_outbound CHANNEL
+    // Update LessonsLearned.replication_status = "available"
+  }
+}
+
+ACTION EmitKaizenRegressionAlert {
+  INPUT  kaizen_id: string
+  OUTPUT alert_sent: bool
+  IMPL {
+    // Build KaizenRegressionAlert PACKET
+    // Include: current vs. target vs. baseline values, days_since_event, champion_id
+    // Emit to regression_alert_outbound CHANNEL
+    // Notify champion and sponsor directly
+    // Recommend: sustainability review meeting within 5 business days
+  }
+}
+
+ACTION ConductWasteWalk {
+  INPUT  value_stream_id: string, observer_ids: string
+  OUTPUT observations_logged: number
+  IMPL {
+    // Structured 8-waste observation session
+    // For each observer: prompt observation across all 8 waste categories:
+    //   Transportation: unnecessary material movement
+    //   Inventory: excess WIP, raw materials, finished goods beyond kanban
+    //   Motion: operator movement not adding value
+    //   Waiting: people or machines waiting for the next step
+    //   Overproduction: making more than the next step needs
+    //   Over-processing: more work than customer requires
+    //   Defects: rework, scrap, correction
+    //   Skills: underutilized people capability
+    // Create WasteObservation records for each finding
+    // Summarize: waste by type, by area, estimated impact
+    // Feed to SuggestImprovementOpportunities
+  }
+}
+
+ACTION LogPIEvent {
+  INPUT  event_type: string, project_id: string, detail: string
+  OUTPUT logged: bool
+  IMPL {
+    // Append-only PI event log with timestamp, user, event_type, detail
+    // Records: Kaizen events, milestone completions, sustainability checks,
+    //   regressions detected, corrective actions, belt certifications
+    // Immutable chain of custody for the improvement history
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// WORKFLOWS
+// ─────────────────────────────────────────────────────────────────────────────
+
+WORKFLOW run_kaizen_event {
+  IDEMPOTENT false
+  STEP charter            { ACTION GenerateKaizenCharter         ON_FAIL abort }
+  STEP baseline_metrics   { ACTION LogPIEvent                    ON_FAIL abort }
+  STEP waste_walk         { ACTION ConductWasteWalk              ON_FAIL skip  }
+  STEP run_event          { ACTION LogPIEvent                    ON_FAIL abort }
+  STEP score_results      { ACTION CalculateProjectROI           ON_FAIL skip  }
+  STEP assign_actions     { ACTION LogPIEvent                    ON_FAIL abort }
+  STEP generate_swi       { ACTION GenerateStandardWork          ON_FAIL skip  }
+  STEP generate_control   { ACTION GenerateControlPlan           ON_FAIL skip  }
+  STEP schedule_checks    { ACTION CreateSustainabilityChecks    ON_FAIL abort }
+  STEP log                { ACTION LogPIEvent                    ON_FAIL skip  }
+}
+
+WORKFLOW dmaic_define {
+  IDEMPOTENT false
+  STEP charter            { ACTION GenerateKaizenCharter         ON_FAIL abort }
+  STEP scope              { ACTION LogPIEvent                    ON_FAIL abort }
+  STEP sipoc              { ACTION LogPIEvent                    ON_FAIL skip  }
+  STEP tollgate           { ACTION LogPIEvent                    ON_FAIL abort }
+}
+
+WORKFLOW dmaic_measure {
+  IDEMPOTENT false
+  STEP baseline           { ACTION RunSPCAnalysis                ON_FAIL abort }
+  STEP capability         { ACTION RunSPCAnalysis                ON_FAIL abort }
+  STEP msa                { ACTION LogPIEvent                    ON_FAIL skip  }
+  STEP tollgate           { ACTION LogPIEvent                    ON_FAIL abort }
+}
+
+WORKFLOW dmaic_control {
+  IDEMPOTENT false
+  STEP control_plan       { ACTION GenerateControlPlan           ON_FAIL abort }
+  STEP standard_work      { ACTION GenerateStandardWork          ON_FAIL abort }
+  STEP spc_setup          { ACTION RunSPCAnalysis                ON_FAIL skip  }
+  STEP schedule_checks    { ACTION CreateSustainabilityChecks    ON_FAIL abort }
+  STEP roi_calc           { ACTION CalculateProjectROI           ON_FAIL skip  }
+  STEP tollgate           { ACTION LogPIEvent                    ON_FAIL abort }
+}
+
+WORKFLOW sustainability_check {
+  IDEMPOTENT true
+  STEP detect_drift       { ACTION DetectMetricDrift             ON_FAIL abort }
+  STEP spc_analysis       { ACTION RunSPCAnalysis                ON_FAIL skip  }
+  STEP audit_control_plan { ACTION LogPIEvent                    ON_FAIL skip  }
+  STEP update_status      { ACTION LogPIEvent                    ON_FAIL abort }
+  STEP replicate_if_ready { ACTION EmitReplicationPacket         ON_FAIL skip  }
+  STEP log                { ACTION LogPIEvent                    ON_FAIL skip  }
+}
+
+WORKFLOW five_s_audit {
+  IDEMPOTENT true
+  STEP conduct_survey     { ACTION ScoreFiveSSurvey              ON_FAIL abort }
+  STEP assign_actions     { ACTION SuggestImprovementOpportunities ON_FAIL skip }
+  STEP log                { ACTION LogPIEvent                    ON_FAIL skip  }
+}
+
+WORKFLOW waste_walk_and_prioritize {
+  IDEMPOTENT true
+  STEP conduct_walk       { ACTION ConductWasteWalk              ON_FAIL abort }
+  STEP suggest_projects   { ACTION SuggestImprovementOpportunities ON_FAIL abort }
+  STEP log                { ACTION LogPIEvent                    ON_FAIL skip  }
+}
+
+WORKFLOW capture_and_replicate {
+  IDEMPOTENT false
+  STEP lessons_learned    { ACTION GenerateLessonsLearned        ON_FAIL abort }
+  STEP roi_final          { ACTION CalculateProjectROI           ON_FAIL skip  }
+  STEP emit_replication   { ACTION EmitReplicationPacket         ON_FAIL skip  }
+  STEP log                { ACTION LogPIEvent                    ON_FAIL skip  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// VIEWS
+// ─────────────────────────────────────────────────────────────────────────────
+
+VIEW PICoEDashboard {
+  ENTITY   ImprovementProject
+  LAYOUT   table
+  ACTIONS  create, read, edit
+}
+
+VIEW KaizenTracker {
+  ENTITY   KaizenEvent
+  LAYOUT   table
+  ACTIONS  create, read, edit
+}
+
+VIEW SustainabilityMonitor {
+  ENTITY   SustainabilityCheck
+  LAYOUT   table
+  ACTIONS  read, edit
+}
+
+VIEW ValueStreamHealth {
+  ENTITY   ValueStream
+  LAYOUT   table
+  ACTIONS  create, read, edit
+}
+
+VIEW MetricsDashboard {
+  ENTITY   MetricReading
+  LAYOUT   table
+  ACTIONS  create, read
+}
+
+VIEW WasteObservationLog {
+  ENTITY   WasteObservation
+  LAYOUT   table
+  ACTIONS  create, read, edit
+}
+
+VIEW ActionItemBoard {
+  ENTITY   ActionItem
+  LAYOUT   table
+  ACTIONS  create, read, edit
+}
+
+VIEW BeltRegistry {
+  ENTITY   BeltCertification
+  LAYOUT   table
+  ACTIONS  create, read, edit
+}
+
+VIEW LessonsLearnedLibrary {
+  ENTITY   LessonsLearned
+  LAYOUT   table
+  ACTIONS  read
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// PREFERENCES
+// ─────────────────────────────────────────────────────────────────────────────
+
+PREFERENCE sustainability_check_30d_enabled      { DEFAULT true   TYPE bool   }
+PREFERENCE sustainability_check_60d_enabled      { DEFAULT true   TYPE bool   }
+PREFERENCE sustainability_check_90d_enabled      { DEFAULT true   TYPE bool   }
+PREFERENCE sustainability_check_6m_enabled       { DEFAULT true   TYPE bool   }
+PREFERENCE sustainability_check_annual_enabled   { DEFAULT true   TYPE bool   }
+PREFERENCE regression_minor_threshold_pct        { DEFAULT 15     TYPE number }
+PREFERENCE regression_major_threshold_pct        { DEFAULT 50     TYPE number }
+PREFERENCE replication_roi_threshold_dollars     { DEFAULT 10000  TYPE number }
+PREFERENCE control_audit_default_days            { DEFAULT 30     TYPE number }
+PREFERENCE five_s_target_score                   { DEFAULT 80     TYPE number }
+PREFERENCE oee_world_class_threshold             { DEFAULT 85     TYPE number }
+PREFERENCE action_item_overdue_escalation_days   { DEFAULT 7      TYPE number }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// SEED DATA — TPS and Six Sigma Tool Library
+// ─────────────────────────────────────────────────────────────────────────────
+
+SEED WasteObservation [
+  { waste_type: "transportation", description: "SEED: Material moved between non-adjacent workstations", estimated_impact: "medium", observed_by: "system" },
+  { waste_type: "inventory",      description: "SEED: WIP accumulation between operations exceeds kanban limit", estimated_impact: "high",   observed_by: "system" },
+  { waste_type: "motion",         description: "SEED: Operator reaches above shoulder or below knee for frequent items", estimated_impact: "medium", observed_by: "system" },
+  { waste_type: "waiting",        description: "SEED: Machine waits for operator — operator waits for machine", estimated_impact: "high",   observed_by: "system" },
+  { waste_type: "overproduction", description: "SEED: Producing to forecast instead of to customer pull signal", estimated_impact: "high",   observed_by: "system" },
+  { waste_type: "over_processing", description: "SEED: Tighter tolerance held than customer specification requires", estimated_impact: "medium", observed_by: "system" },
+  { waste_type: "defects",        description: "SEED: Rework station exists — rework is designed into the process", estimated_impact: "critical", observed_by: "system" },
+  { waste_type: "skills",         description: "SEED: Operators performing non-value-add tasks their skills exceed", estimated_impact: "medium", observed_by: "system" }
+]
