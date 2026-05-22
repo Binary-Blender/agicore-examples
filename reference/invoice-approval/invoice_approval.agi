@@ -159,3 +159,38 @@ TEST expedite_premium_vendor {
 
   EXPECT create -> id IS NOT NULL
 }
+
+
+// ─── ACTIONS ─────────────────────────────────────────────────────────────
+// Stubs referenced by the InvoiceReview workflow. Real impls would
+// replace each with concrete logic.
+
+ACTION validate_invoice_data {
+  INPUT   invoice_id: string
+  OUTPUT  valid: bool
+  AI      "Validate the invoice's structural integrity. Return whether the invoice is well-formed."
+}
+
+ACTION run_rule_engine {
+  INPUT   invoice_id: string
+  OUTPUT  decision: string
+  AI      "Apply approval rules to the invoice and return the routing decision."
+}
+
+ACTION route_approval {
+  INPUT   invoice_id: string, decision: string
+  OUTPUT  routed_to: string
+  AI      "Route the approval to the appropriate approver based on amount and decision."
+}
+
+ACTION create_approval_log {
+  INPUT   invoice_id: string, decision: string, routed_to: string
+  OUTPUT  log_id: string
+  AI      "Persist the approval decision to the audit log."
+}
+
+ACTION send_notification {
+  INPUT   invoice_id: string, recipient: string
+  OUTPUT  sent: bool
+  AI      "Notify the recipient that the invoice requires attention."
+}
