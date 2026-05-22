@@ -942,4 +942,3 @@ ACTION RevokeProxyAccess {
     DESCRIPTION "Require NIST IAL2 identity verification before full clinical portal access"
   }
 
-}

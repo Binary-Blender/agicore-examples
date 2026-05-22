@@ -1196,4 +1196,3 @@ ACTION GenerateReferralLetter {
     DESCRIPTION "Hours after result received before unacknowledged result triggers flag"
   }
 
-}
