@@ -1,11 +1,15 @@
 APP accelerando_radiology {
+  TITLE "Accelerando Radiology"
+  DB    accelerando_radiology
   VERSION "1.0.0"
   PORT 3010
   DESCRIPTION "Radiology Information System — DICOM Modality Worklist, structured reporting, critical findings communication, peer review, and dose tracking"
 
-  // ── ENTITIES ──────────────────────────────────────────────────────────────
+}
 
-  ENTITY ImagingOrder {
+// ── ENTITIES ──────────────────────────────────────────────────────────────
+
+ENTITY ImagingOrder {
     FIELDS {
       id:              string   REQUIRED
       patient_id:      string   REQUIRED
@@ -40,7 +44,7 @@ APP accelerando_radiology {
     CRUD [create, read, list, edit]
   }
 
-  ENTITY Study {
+ENTITY Study {
     FIELDS {
       id:              string   REQUIRED
       order_id:        string   REQUIRED
@@ -67,7 +71,7 @@ APP accelerando_radiology {
     CRUD [create, read, list, edit]
   }
 
-  ENTITY RadiologyReport {
+ENTITY RadiologyReport {
     FIELDS {
       id:              string   REQUIRED
       study_id:        string   REQUIRED
@@ -96,7 +100,7 @@ APP accelerando_radiology {
     CRUD [create, read, list, edit]
   }
 
-  ENTITY CriticalFinding {
+ENTITY CriticalFinding {
     FIELDS {
       id:              string   REQUIRED
       report_id:       string   REQUIRED
@@ -119,7 +123,7 @@ APP accelerando_radiology {
     CRUD [create, read, list, edit]
   }
 
-  ENTITY PeerReview {
+ENTITY PeerReview {
     FIELDS {
       id:              string   REQUIRED
       study_id:        string   REQUIRED
@@ -144,7 +148,7 @@ APP accelerando_radiology {
     CRUD [create, read, list, edit]
   }
 
-  ENTITY DoseRecord {
+ENTITY DoseRecord {
     FIELDS {
       id:              string   REQUIRED
       study_id:        string   REQUIRED
@@ -168,7 +172,7 @@ APP accelerando_radiology {
     CRUD [create, read, list]
   }
 
-  ENTITY Modality {
+ENTITY Modality {
     FIELDS {
       id:              string   REQUIRED
       name:            string   REQUIRED   // "CT-1", "MRI-3T-A", "US-1"
@@ -185,7 +189,7 @@ APP accelerando_radiology {
     CRUD [create, read, list, edit]
   }
 
-  ENTITY ImagingProtocol {
+ENTITY ImagingProtocol {
     FIELDS {
       id:              string   REQUIRED
       procedure_code:  string   REQUIRED
@@ -205,9 +209,9 @@ APP accelerando_radiology {
     CRUD [create, read, list, edit]
   }
 
-  // ── PACKETS ───────────────────────────────────────────────────────────────
+// ── PACKETS ───────────────────────────────────────────────────────────────
 
-  PACKET ModalityWorklistPacket {
+PACKET ModalityWorklistPacket {
     accession_number:    string  REQUIRED
     patient_id:          string  REQUIRED
     patient_name:        string  REQUIRED
@@ -221,7 +225,7 @@ APP accelerando_radiology {
     SIGNATURE "accelerando_radiology"
   }
 
-  PACKET CriticalFindingAlertPacket {
+PACKET CriticalFindingAlertPacket {
     critical_finding_id: string  REQUIRED
     patient_id:          string  REQUIRED
     study_id:            string  REQUIRED
@@ -234,7 +238,7 @@ APP accelerando_radiology {
     SIGNATURE "accelerando_radiology"
   }
 
-  PACKET FinalReportPacket {
+PACKET FinalReportPacket {
     report_id:           string  REQUIRED
     study_id:            string  REQUIRED
     order_id:            string  REQUIRED
@@ -245,7 +249,7 @@ APP accelerando_radiology {
     SIGNATURE "accelerando_radiology"
   }
 
-  PACKET DoseAlertPacket {
+PACKET DoseAlertPacket {
     dose_record_id:      string  REQUIRED
     patient_id:          string  REQUIRED
     study_id:            string  REQUIRED
@@ -256,35 +260,35 @@ APP accelerando_radiology {
     SIGNATURE "accelerando_radiology"
   }
 
-  // ── CHANNELS ──────────────────────────────────────────────────────────────
+// ── CHANNELS ──────────────────────────────────────────────────────────────
 
-  CHANNEL worklist_outbound {
+CHANNEL worklist_outbound {
     PACKET ModalityWorklistPacket
     CONSUMERS ["dicom_worklist_gateway"]
     DELIVERY at_least_once
   }
 
-  CHANNEL critical_finding_outbound {
+CHANNEL critical_finding_outbound {
     PACKET CriticalFindingAlertPacket
     CONSUMERS ["accelerando_clinical", "accelerando_patient_portal"]
     DELIVERY exactly_once
   }
 
-  CHANNEL final_report_outbound {
+CHANNEL final_report_outbound {
     PACKET FinalReportPacket
     CONSUMERS ["accelerando_clinical", "accelerando_patient_portal"]
     DELIVERY at_least_once
   }
 
-  CHANNEL dose_alert_outbound {
+CHANNEL dose_alert_outbound {
     PACKET DoseAlertPacket
     CONSUMERS ["accelerando_es"]
     DELIVERY at_least_once
   }
 
-  // ── MODULES ───────────────────────────────────────────────────────────────
+// ── MODULES ───────────────────────────────────────────────────────────────
 
-  MODULE RISEngine {
+MODULE RISEngine {
 
     FACT RISContext {
       stat_order_not_started_60m:   boolean
@@ -340,7 +344,7 @@ APP accelerando_radiology {
 
   }
 
-  MODULE ReportingEngine {
+MODULE ReportingEngine {
 
     FACT ReportingContext {
       critical_finding_not_communicated_60m: boolean
@@ -380,7 +384,7 @@ APP accelerando_radiology {
 
   }
 
-  MODULE PeerReviewEngine {
+MODULE PeerReviewEngine {
 
     FACT PeerReviewContext {
       peer_review_overdue:                 boolean
@@ -438,7 +442,7 @@ APP accelerando_radiology {
 
   }
 
-  MODULE DoseEngine {
+MODULE DoseEngine {
 
     FACT DoseContext {
       exceeds_drl_study:         boolean
@@ -488,7 +492,7 @@ APP accelerando_radiology {
 
   }
 
-  MODULE ProtocolEngine {
+MODULE ProtocolEngine {
 
     FACT ProtocolContext {
       no_protocol_for_procedure:   boolean
@@ -519,9 +523,9 @@ APP accelerando_radiology {
 
   }
 
-  // ── REASONER ──────────────────────────────────────────────────────────────
+// ── REASONER ──────────────────────────────────────────────────────────────
 
-  REASONER radiology_quality_reasoner {
+REASONER radiology_quality_reasoner {
     SCHEDULE "weekly"
     DESCRIPTION "Analyzes report turnaround times, critical finding communication compliance, peer review concordance trends, and dose optimization opportunities"
     INPUT {
@@ -538,9 +542,9 @@ APP accelerando_radiology {
     }
   }
 
-  // ── WORKFLOWS ─────────────────────────────────────────────────────────────
+// ── WORKFLOWS ─────────────────────────────────────────────────────────────
 
-  WORKFLOW schedule_imaging {
+WORKFLOW schedule_imaging {
     IDEMPOTENT false
     STEPS {
       STEP check_contrast_screening {
@@ -562,7 +566,7 @@ APP accelerando_radiology {
     }
   }
 
-  WORKFLOW complete_study {
+WORKFLOW complete_study {
     IDEMPOTENT false
     STEPS {
       STEP record_study {
@@ -584,7 +588,7 @@ APP accelerando_radiology {
     }
   }
 
-  WORKFLOW sign_report {
+WORKFLOW sign_report {
     IDEMPOTENT false
     STEPS {
       STEP validate_report {
@@ -610,7 +614,7 @@ APP accelerando_radiology {
     }
   }
 
-  WORKFLOW peer_review_assignment {
+WORKFLOW peer_review_assignment {
     IDEMPOTENT false
     STEPS {
       STEP select_studies {
@@ -624,7 +628,7 @@ APP accelerando_radiology {
     }
   }
 
-  WORKFLOW communicate_critical_finding {
+WORKFLOW communicate_critical_finding {
     IDEMPOTENT false
     STEPS {
       STEP log_critical {
@@ -642,9 +646,9 @@ APP accelerando_radiology {
     }
   }
 
-  // ── ACTIONS ───────────────────────────────────────────────────────────────
+// ── ACTIONS ───────────────────────────────────────────────────────────────
 
-  ACTION CheckContrastScreening {
+ACTION CheckContrastScreening {
     DESCRIPTION "Evaluates contrast allergy history and renal function before IV contrast is administered"
     INPUT {
       patient_id:        string  REQUIRED
@@ -659,7 +663,7 @@ APP accelerando_radiology {
     }
   }
 
-  ACTION SelectImagingProtocol {
+ACTION SelectImagingProtocol {
     DESCRIPTION "AI selects the appropriate imaging protocol given clinical indication and patient characteristics"
     MODEL "claude-sonnet-4-6"
     INPUT {
@@ -678,7 +682,7 @@ APP accelerando_radiology {
     }
   }
 
-  ACTION AssignModalitySlot {
+ACTION AssignModalitySlot {
     DESCRIPTION "Finds and reserves an available time slot on the appropriate modality"
     INPUT {
       modality:         string  REQUIRED
@@ -694,7 +698,7 @@ APP accelerando_radiology {
     }
   }
 
-  ACTION EmitModalityWorklist {
+ACTION EmitModalityWorklist {
     DESCRIPTION "Sends ModalityWorklistPacket to DICOM gateway for modality pickup"
     INPUT {
       order_id: string REQUIRED
@@ -704,7 +708,7 @@ APP accelerando_radiology {
     }
   }
 
-  ACTION RecordStudyCompletion {
+ACTION RecordStudyCompletion {
     DESCRIPTION "Records DICOM study metadata after image acquisition is complete"
     INPUT {
       order_id:              string  REQUIRED
@@ -718,7 +722,7 @@ APP accelerando_radiology {
     }
   }
 
-  ACTION RecordDoseMetrics {
+ACTION RecordDoseMetrics {
     DESCRIPTION "Records dose metrics from DICOM Radiation Dose Structured Report"
     INPUT {
       study_id:         string  REQUIRED
@@ -734,7 +738,7 @@ APP accelerando_radiology {
     }
   }
 
-  ACTION EvaluateDoseAgainstDRL {
+ACTION EvaluateDoseAgainstDRL {
     DESCRIPTION "Compares study dose to ACR Diagnostic Reference Levels and emits alert if exceeded"
     INPUT {
       dose_record_id: string  REQUIRED
@@ -746,7 +750,7 @@ APP accelerando_radiology {
     }
   }
 
-  ACTION AssignRadiologist {
+ACTION AssignRadiologist {
     DESCRIPTION "Assigns study to next available radiologist using specialty-based routing and workload balancing"
     INPUT {
       study_id:  string  REQUIRED
@@ -759,7 +763,7 @@ APP accelerando_radiology {
     }
   }
 
-  ACTION ValidateReportCompleteness {
+ACTION ValidateReportCompleteness {
     DESCRIPTION "Confirms findings and impression sections are populated before signing"
     INPUT {
       report_id: string REQUIRED
@@ -770,7 +774,7 @@ APP accelerando_radiology {
     }
   }
 
-  ACTION IdentifyCriticalFindings {
+ACTION IdentifyCriticalFindings {
     DESCRIPTION "AI scans report text for critical findings requiring immediate communication per ACR guidelines"
     MODEL "claude-sonnet-4-6"
     INPUT {
@@ -787,7 +791,7 @@ APP accelerando_radiology {
     }
   }
 
-  ACTION SignRadiologyReport {
+ACTION SignRadiologyReport {
     DESCRIPTION "Applies radiologist signature, timestamps the report, and marks it final"
     INPUT {
       report_id:      string  REQUIRED
@@ -800,7 +804,7 @@ APP accelerando_radiology {
     }
   }
 
-  ACTION CreateCriticalFindingRecord {
+ACTION CreateCriticalFindingRecord {
     DESCRIPTION "Creates CriticalFinding entity and sets the 60-minute communication deadline"
     INPUT {
       report_id:           string  REQUIRED
@@ -816,7 +820,7 @@ APP accelerando_radiology {
     }
   }
 
-  ACTION EmitCriticalFindingAlert {
+ACTION EmitCriticalFindingAlert {
     DESCRIPTION "Emits CriticalFindingAlertPacket to clinical and patient portal channels"
     INPUT {
       critical_finding_id: string REQUIRED
@@ -826,7 +830,7 @@ APP accelerando_radiology {
     }
   }
 
-  ACTION MonitorCriticalFindingAcknowledgement {
+ACTION MonitorCriticalFindingAcknowledgement {
     DESCRIPTION "Checks whether ordering provider has acknowledged the critical finding within 60 minutes"
     INPUT {
       critical_finding_id: string REQUIRED
@@ -838,7 +842,7 @@ APP accelerando_radiology {
     }
   }
 
-  ACTION CommunicateCriticalFinding {
+ACTION CommunicateCriticalFinding {
     DESCRIPTION "Records the communication event for an acknowledged critical finding"
     INPUT {
       critical_finding_id:  string  REQUIRED
@@ -851,7 +855,7 @@ APP accelerando_radiology {
     }
   }
 
-  ACTION EmitFinalReportPacket {
+ACTION EmitFinalReportPacket {
     DESCRIPTION "Emits FinalReportPacket to clinical and patient portal channels"
     INPUT {
       report_id: string REQUIRED
@@ -861,7 +865,7 @@ APP accelerando_radiology {
     }
   }
 
-  ACTION SelectStudiesForPeerReview {
+ACTION SelectStudiesForPeerReview {
     DESCRIPTION "Randomly selects 5% of signed studies per radiologist for peer review, per ACR RADPEER"
     INPUT {
       radiologist_id:     string  REQUIRED
@@ -872,7 +876,7 @@ APP accelerando_radiology {
     }
   }
 
-  ACTION AssignPeerReviewers {
+ACTION AssignPeerReviewers {
     DESCRIPTION "Assigns peer reviewers to selected studies, enforcing independence"
     INPUT {
       study_ids:              string  REQUIRED  // JSON array
@@ -883,7 +887,7 @@ APP accelerando_radiology {
     }
   }
 
-  ACTION GenerateRadiologyReport {
+ACTION GenerateRadiologyReport {
     DESCRIPTION "AI drafts structured radiology report from study metadata and prior reports — radiologist reviews before signing"
     MODEL "claude-sonnet-4-6"
     INPUT {
@@ -901,7 +905,7 @@ APP accelerando_radiology {
     }
   }
 
-  ACTION GeneratePeerReviewReport {
+ACTION GeneratePeerReviewReport {
     DESCRIPTION "AI generates structured peer review summary from reviewer score and discrepancy notes"
     MODEL "claude-haiku-4-5-20251001"
     INPUT {
@@ -917,7 +921,7 @@ APP accelerando_radiology {
     }
   }
 
-  // ── PREFERENCES ───────────────────────────────────────────────────────────
+// ── PREFERENCES ───────────────────────────────────────────────────────────
 
   PREFERENCE critical_finding_communication_minutes {
     DEFAULT 60

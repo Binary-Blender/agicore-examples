@@ -1,11 +1,15 @@
 APP accelerando_population_health {
+  TITLE "Accelerando Population Health"
+  DB    accelerando_population_health
   VERSION "1.0.0"
   PORT 3012
   DESCRIPTION "Population health management — care gap detection, disease registries, HEDIS/MIPS quality measures, risk stratification, and proactive outreach coordination"
 
-  // ── ENTITIES ──────────────────────────────────────────────────────────────
+}
 
-  ENTITY PopulationCohort {
+// ── ENTITIES ──────────────────────────────────────────────────────────────
+
+ENTITY PopulationCohort {
     FIELDS {
       id:              string   REQUIRED
       name:            string   REQUIRED   // "Diabetes Registry", "Hypertension Panel", "Wellness Due"
@@ -20,7 +24,7 @@ APP accelerando_population_health {
     CRUD [create, read, list, edit]
   }
 
-  ENTITY CareGap {
+ENTITY CareGap {
     FIELDS {
       id:              string   REQUIRED
       patient_id:      string   REQUIRED
@@ -44,7 +48,7 @@ APP accelerando_population_health {
     CRUD [create, read, list, edit]
   }
 
-  ENTITY DiseaseRegistry {
+ENTITY DiseaseRegistry {
     FIELDS {
       id:              string   REQUIRED
       patient_id:      string   REQUIRED
@@ -71,7 +75,7 @@ APP accelerando_population_health {
     CRUD [create, read, list, edit]
   }
 
-  ENTITY QualityMeasure {
+ENTITY QualityMeasure {
     FIELDS {
       id:              string   REQUIRED
       measure_id:      string   REQUIRED   // "HEDIS CDC-HbA1c Control", "MIPS IA_PM_16"
@@ -93,7 +97,7 @@ APP accelerando_population_health {
     CRUD [create, read, list, edit]
   }
 
-  ENTITY RiskScore {
+ENTITY RiskScore {
     FIELDS {
       id:              string   REQUIRED
       patient_id:      string   REQUIRED
@@ -114,7 +118,7 @@ APP accelerando_population_health {
     CRUD [create, read, list]
   }
 
-  ENTITY OutreachCampaign {
+ENTITY OutreachCampaign {
     FIELDS {
       id:              string   REQUIRED
       name:            string   REQUIRED
@@ -140,7 +144,7 @@ APP accelerando_population_health {
     CRUD [create, read, list, edit]
   }
 
-  ENTITY CareManagementEnrollment {
+ENTITY CareManagementEnrollment {
     FIELDS {
       id:              string   REQUIRED
       patient_id:      string   REQUIRED
@@ -169,7 +173,7 @@ APP accelerando_population_health {
     CRUD [create, read, list, edit]
   }
 
-  ENTITY HCCCode {
+ENTITY HCCCode {
     FIELDS {
       id:              string   REQUIRED
       patient_id:      string   REQUIRED
@@ -188,9 +192,9 @@ APP accelerando_population_health {
     CRUD [create, read, list, edit]
   }
 
-  // ── PACKETS ───────────────────────────────────────────────────────────────
+// ── PACKETS ───────────────────────────────────────────────────────────────
 
-  PACKET CareGapOpenedPacket {
+PACKET CareGapOpenedPacket {
     care_gap_id:     string  REQUIRED
     patient_id:      string  REQUIRED
     measure_name:    string  REQUIRED
@@ -199,7 +203,7 @@ APP accelerando_population_health {
     SIGNATURE "accelerando_population_health"
   }
 
-  PACKET HighRiskPatientPacket {
+PACKET HighRiskPatientPacket {
     patient_id:        string  REQUIRED
     risk_tier:         string  REQUIRED
     ed_risk_pct:       number  REQUIRED
@@ -208,7 +212,7 @@ APP accelerando_population_health {
     SIGNATURE "accelerando_population_health"
   }
 
-  PACKET QualityMeasureReportPacket {
+PACKET QualityMeasureReportPacket {
     measure_id:         string  REQUIRED
     measure_name:       string  REQUIRED
     reporting_year:     number  REQUIRED
@@ -219,7 +223,7 @@ APP accelerando_population_health {
     SIGNATURE "accelerando_population_health"
   }
 
-  PACKET HCCRecapturePacket {
+PACKET HCCRecapturePacket {
     patient_id:         string  REQUIRED
     hcc_codes_due:      string  REQUIRED  // JSON array
     total_raf_at_risk:  number  REQUIRED
@@ -227,35 +231,35 @@ APP accelerando_population_health {
     SIGNATURE "accelerando_population_health"
   }
 
-  // ── CHANNELS ──────────────────────────────────────────────────────────────
+// ── CHANNELS ──────────────────────────────────────────────────────────────
 
-  CHANNEL care_gap_outbound {
+CHANNEL care_gap_outbound {
     PACKET CareGapOpenedPacket
     CONSUMERS ["accelerando_clinical", "accelerando_patient_portal"]
     DELIVERY at_least_once
   }
 
-  CHANNEL high_risk_outbound {
+CHANNEL high_risk_outbound {
     PACKET HighRiskPatientPacket
     CONSUMERS ["accelerando_clinical", "accelerando_es"]
     DELIVERY at_least_once
   }
 
-  CHANNEL quality_measure_outbound {
+CHANNEL quality_measure_outbound {
     PACKET QualityMeasureReportPacket
     CONSUMERS ["accelerando_es"]
     DELIVERY at_least_once
   }
 
-  CHANNEL hcc_recapture_outbound {
+CHANNEL hcc_recapture_outbound {
     PACKET HCCRecapturePacket
     CONSUMERS ["accelerando_clinical"]
     DELIVERY at_least_once
   }
 
-  // ── MODULES ───────────────────────────────────────────────────────────────
+// ── MODULES ───────────────────────────────────────────────────────────────
 
-  MODULE CareGapEngine {
+MODULE CareGapEngine {
 
     FACT CareGapContext {
       critical_gap_overdue:         boolean
@@ -301,7 +305,7 @@ APP accelerando_population_health {
 
   }
 
-  MODULE RiskEngine {
+MODULE RiskEngine {
 
     FACT RiskContext {
       high_risk_no_care_manager:      boolean
@@ -352,7 +356,7 @@ APP accelerando_population_health {
 
   }
 
-  MODULE QualityMeasureEngine {
+MODULE QualityMeasureEngine {
 
     FACT QualityContext {
       measure_below_target:           boolean
@@ -392,7 +396,7 @@ APP accelerando_population_health {
 
   }
 
-  MODULE DiseaseRegistryEngine {
+MODULE DiseaseRegistryEngine {
 
     FACT RegistryContext {
       diabetes_uncontrolled:      boolean
@@ -433,9 +437,9 @@ APP accelerando_population_health {
 
   }
 
-  // ── REASONER ──────────────────────────────────────────────────────────────
+// ── REASONER ──────────────────────────────────────────────────────────────
 
-  REASONER population_intelligence_reasoner {
+REASONER population_intelligence_reasoner {
     SCHEDULE "weekly"
     DESCRIPTION "Analyzes population-level trends in care gap closure, disease registry control rates, risk tier distribution, and quality measure performance to generate actionable improvement recommendations"
     INPUT {
@@ -454,9 +458,9 @@ APP accelerando_population_health {
     }
   }
 
-  // ── WORKFLOWS ─────────────────────────────────────────────────────────────
+// ── WORKFLOWS ─────────────────────────────────────────────────────────────
 
-  WORKFLOW identify_care_gaps {
+WORKFLOW identify_care_gaps {
     IDEMPOTENT true
     STEPS {
       STEP run_hedis_logic {
@@ -474,7 +478,7 @@ APP accelerando_population_health {
     }
   }
 
-  WORKFLOW stratify_risk {
+WORKFLOW stratify_risk {
     IDEMPOTENT true
     STEPS {
       STEP compute_risk_scores {
@@ -496,7 +500,7 @@ APP accelerando_population_health {
     }
   }
 
-  WORKFLOW compute_quality_measures {
+WORKFLOW compute_quality_measures {
     IDEMPOTENT true
     STEPS {
       STEP calculate_measures {
@@ -514,7 +518,7 @@ APP accelerando_population_health {
     }
   }
 
-  WORKFLOW outreach_campaign {
+WORKFLOW outreach_campaign {
     IDEMPOTENT false
     STEPS {
       STEP identify_targets {
@@ -536,7 +540,7 @@ APP accelerando_population_health {
     }
   }
 
-  WORKFLOW enroll_care_management {
+WORKFLOW enroll_care_management {
     IDEMPOTENT false
     STEPS {
       STEP assess_eligibility {
@@ -558,7 +562,7 @@ APP accelerando_population_health {
     }
   }
 
-  WORKFLOW hcc_recapture {
+WORKFLOW hcc_recapture {
     IDEMPOTENT true
     STEPS {
       STEP identify_recapture_due {
@@ -572,9 +576,9 @@ APP accelerando_population_health {
     }
   }
 
-  // ── ACTIONS ───────────────────────────────────────────────────────────────
+// ── ACTIONS ───────────────────────────────────────────────────────────────
 
-  ACTION RunHEDISCareGapLogic {
+ACTION RunHEDISCareGapLogic {
     DESCRIPTION "Runs HEDIS measure logic against patient records to identify open care gaps; returns gap records for creation"
     INPUT {
       cohort_id:       string  REQUIRED
@@ -587,7 +591,7 @@ APP accelerando_population_health {
     }
   }
 
-  ACTION ScoreCareGapPriority {
+ACTION ScoreCareGapPriority {
     DESCRIPTION "Assigns priority_score (1-10) to each care gap based on clinical urgency, patient risk tier, and measure performance impact"
     INPUT {
       care_gap_ids:  string  REQUIRED  // JSON array
@@ -597,7 +601,7 @@ APP accelerando_population_health {
     }
   }
 
-  ACTION EmitNewCareGaps {
+ACTION EmitNewCareGaps {
     DESCRIPTION "Emits CareGapOpenedPacket for each newly identified care gap"
     INPUT {
       care_gap_ids:  string  REQUIRED
@@ -607,7 +611,7 @@ APP accelerando_population_health {
     }
   }
 
-  ACTION StratifyRiskPanel {
+ACTION StratifyRiskPanel {
     DESCRIPTION "Computes RAF, Charlson, ED utilization risk, and avoidable admit risk for a patient panel"
     INPUT {
       cohort_id:    string  REQUIRED
@@ -618,7 +622,7 @@ APP accelerando_population_health {
     }
   }
 
-  ACTION AssignRiskTiers {
+ACTION AssignRiskTiers {
     DESCRIPTION "Assigns risk tier (low/moderate/high/rising_risk) based on computed scores"
     INPUT {
       cohort_id: string  REQUIRED
@@ -628,7 +632,7 @@ APP accelerando_population_health {
     }
   }
 
-  ACTION EnrollHighRiskPatients {
+ACTION EnrollHighRiskPatients {
     DESCRIPTION "Identifies high-risk patients not yet in care management and initiates enrollment workflow"
     INPUT {
       cohort_id: string  REQUIRED
@@ -638,7 +642,7 @@ APP accelerando_population_health {
     }
   }
 
-  ACTION EmitHighRiskAlerts {
+ACTION EmitHighRiskAlerts {
     DESCRIPTION "Emits HighRiskPatientPacket for each newly identified high-risk patient"
     INPUT {
       patient_ids: string  REQUIRED  // JSON array of newly high-risk patients
@@ -648,7 +652,7 @@ APP accelerando_population_health {
     }
   }
 
-  ACTION CalculateQualityMeasures {
+ACTION CalculateQualityMeasures {
     DESCRIPTION "Recalculates numerator, denominator, and performance rate for all active quality measures"
     INPUT {
       reporting_year: number  REQUIRED
@@ -659,7 +663,7 @@ APP accelerando_population_health {
     }
   }
 
-  ACTION IdentifyMeasureGaps {
+ACTION IdentifyMeasureGaps {
     DESCRIPTION "From recalculated measures, identifies specific patients who are in denominators but not numerators"
     INPUT {
       measure_id:      string  REQUIRED
@@ -670,7 +674,7 @@ APP accelerando_population_health {
     }
   }
 
-  ACTION EmitQualityMeasureReport {
+ACTION EmitQualityMeasureReport {
     DESCRIPTION "Emits QualityMeasureReportPacket for governance and leadership dashboards"
     INPUT {
       measure_ids:    string  REQUIRED
@@ -681,7 +685,7 @@ APP accelerando_population_health {
     }
   }
 
-  ACTION IdentifyOutreachTargets {
+ACTION IdentifyOutreachTargets {
     DESCRIPTION "Selects patients from cohort for outreach based on open care gaps, risk tier, and prior outreach response"
     INPUT {
       campaign_id:    string  REQUIRED
@@ -692,7 +696,7 @@ APP accelerando_population_health {
     }
   }
 
-  ACTION GenerateOutreachMessages {
+ACTION GenerateOutreachMessages {
     DESCRIPTION "AI generates personalized outreach messages per patient, care gap, and channel"
     MODEL "claude-haiku-4-5-20251001"
     INPUT {
@@ -708,7 +712,7 @@ APP accelerando_population_health {
     }
   }
 
-  ACTION ExecuteOutreachCampaign {
+ACTION ExecuteOutreachCampaign {
     DESCRIPTION "Dispatches personalized outreach messages via the configured channels"
     INPUT {
       campaign_id:    string  REQUIRED
@@ -720,7 +724,7 @@ APP accelerando_population_health {
     }
   }
 
-  ACTION RecordOutreachActivity {
+ACTION RecordOutreachActivity {
     DESCRIPTION "Updates care gap outreach_count, last_outreach, and campaign metrics"
     INPUT {
       campaign_id:      string  REQUIRED
@@ -732,7 +736,7 @@ APP accelerando_population_health {
     }
   }
 
-  ACTION AssessCareManagementEligibility {
+ACTION AssessCareManagementEligibility {
     DESCRIPTION "Evaluates patient against care management enrollment criteria: risk tier, complexity, condition count"
     INPUT {
       patient_id:  string  REQUIRED
@@ -745,7 +749,7 @@ APP accelerando_population_health {
     }
   }
 
-  ACTION CreateCareManagementEnrollment {
+ACTION CreateCareManagementEnrollment {
     DESCRIPTION "Creates CareManagementEnrollment entity and notifies the assigned care manager"
     INPUT {
       patient_id:        string  REQUIRED
@@ -757,7 +761,7 @@ APP accelerando_population_health {
     }
   }
 
-  ACTION AssignCareManager {
+ACTION AssignCareManager {
     DESCRIPTION "Routes enrollment to the appropriate care manager based on caseload and patient conditions"
     INPUT {
       enrollment_id: string  REQUIRED
@@ -769,7 +773,7 @@ APP accelerando_population_health {
     }
   }
 
-  ACTION ScheduleFirstContact {
+ACTION ScheduleFirstContact {
     DESCRIPTION "Schedules initial care management contact within 48 hours of enrollment"
     INPUT {
       enrollment_id:  string  REQUIRED
@@ -780,7 +784,7 @@ APP accelerando_population_health {
     }
   }
 
-  ACTION IdentifyHCCRecaptureDue {
+ACTION IdentifyHCCRecaptureDue {
     DESCRIPTION "Finds HCC codes from prior years that require recapture in the current plan year"
     INPUT {
       cohort_id:      string  REQUIRED
@@ -791,7 +795,7 @@ APP accelerando_population_health {
     }
   }
 
-  ACTION EmitHCCRecapturePackets {
+ACTION EmitHCCRecapturePackets {
     DESCRIPTION "Emits HCCRecapturePacket to clinical for provider action at next encounter"
     INPUT {
       recapture_records: string  REQUIRED
@@ -801,7 +805,7 @@ APP accelerando_population_health {
     }
   }
 
-  ACTION GeneratePopulationReport {
+ACTION GeneratePopulationReport {
     DESCRIPTION "AI generates executive population health report: risk distribution, quality performance, care gap trends, and care management outcomes"
     MODEL "claude-sonnet-4-6"
     INPUT {
@@ -818,7 +822,7 @@ APP accelerando_population_health {
     }
   }
 
-  ACTION CloseCareGap {
+ACTION CloseCareGap {
     DESCRIPTION "Records care gap closure with reason and closing encounter"
     INPUT {
       care_gap_id:         string  REQUIRED
@@ -830,7 +834,7 @@ APP accelerando_population_health {
     }
   }
 
-  // ── PREFERENCES ───────────────────────────────────────────────────────────
+// ── PREFERENCES ───────────────────────────────────────────────────────────
 
   PREFERENCE care_gap_outreach_interval_days {
     DEFAULT 30
@@ -868,9 +872,9 @@ APP accelerando_population_health {
     DESCRIPTION "Maximum patients per care manager before triggering capacity alert"
   }
 
-  // ── SEED DATA ─────────────────────────────────────────────────────────────
+// ── SEED DATA ─────────────────────────────────────────────────────────────
 
-  SEED QualityMeasure {
+SEED QualityMeasure {
     RECORDS [
       { id: "qm-001", measure_id: "HEDIS-CBC-HbA1c-Control", measure_name: "Comprehensive Diabetes Care — HbA1c Control <8%", measure_type: "HEDIS", reporting_year: 2026, denominator_count: 0, numerator_count: 0, performance_rate: 0, target_rate: 70, benchmark_75th: 72, benchmark_90th: 82, last_calculated: "2026-01-01", reporting_deadline: "2026-06-30" }
       { id: "qm-002", measure_id: "HEDIS-COL", measure_name: "Colorectal Cancer Screening", measure_type: "HEDIS", reporting_year: 2026, denominator_count: 0, numerator_count: 0, performance_rate: 0, target_rate: 68, benchmark_75th: 70, benchmark_90th: 76, last_calculated: "2026-01-01", reporting_deadline: "2026-06-30" }
@@ -881,7 +885,7 @@ APP accelerando_population_health {
     ]
   }
 
-  SEED PopulationCohort {
+SEED PopulationCohort {
     RECORDS [
       { id: "coh-001", name: "Diabetes Registry", description: "Patients with Type 1 or Type 2 Diabetes", cohort_type: "disease_registry", filter_criteria: "{\"icd10_prefix\":[\"E10\",\"E11\",\"E13\"]}", patient_count: 0, last_updated: "2026-01-01", active: true }
       { id: "coh-002", name: "Hypertension Registry", description: "Patients with essential hypertension", cohort_type: "disease_registry", filter_criteria: "{\"icd10_prefix\":[\"I10\",\"I11\",\"I12\",\"I13\"]}", patient_count: 0, last_updated: "2026-01-01", active: true }

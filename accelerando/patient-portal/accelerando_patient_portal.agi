@@ -1,11 +1,15 @@
 APP accelerando_patient_portal {
+  TITLE "Accelerando Patient Portal"
+  DB    accelerando_patient_portal
   VERSION "1.0.0"
   PORT 3013
   DESCRIPTION "Patient self-service portal — secure messaging, result delivery with safety controls, appointment self-scheduling, refill requests, health summaries, and consent management"
 
-  // ── ENTITIES ──────────────────────────────────────────────────────────────
+}
 
-  ENTITY PortalAccount {
+// ── ENTITIES ──────────────────────────────────────────────────────────────
+
+ENTITY PortalAccount {
     FIELDS {
       id:              string   REQUIRED
       patient_id:      string   REQUIRED
@@ -37,7 +41,7 @@ APP accelerando_patient_portal {
     CRUD [create, read, list, edit]
   }
 
-  ENTITY SecureMessage {
+ENTITY SecureMessage {
     FIELDS {
       id:              string   REQUIRED
       patient_id:      string   REQUIRED
@@ -66,7 +70,7 @@ APP accelerando_patient_portal {
     CRUD [create, read, list, edit]
   }
 
-  ENTITY ResultRelease {
+ENTITY ResultRelease {
     FIELDS {
       id:              string   REQUIRED
       result_id:       string   REQUIRED
@@ -91,7 +95,7 @@ APP accelerando_patient_portal {
     CRUD [create, read, list, edit]
   }
 
-  ENTITY AppointmentRequest {
+ENTITY AppointmentRequest {
     FIELDS {
       id:              string   REQUIRED
       patient_id:      string   REQUIRED
@@ -113,7 +117,7 @@ APP accelerando_patient_portal {
     CRUD [create, read, list, edit]
   }
 
-  ENTITY RefillRequest {
+ENTITY RefillRequest {
     FIELDS {
       id:              string   REQUIRED
       patient_id:      string   REQUIRED
@@ -135,7 +139,7 @@ APP accelerando_patient_portal {
     CRUD [create, read, list, edit]
   }
 
-  ENTITY HealthSummary {
+ENTITY HealthSummary {
     FIELDS {
       id:              string   REQUIRED
       patient_id:      string   REQUIRED
@@ -160,7 +164,7 @@ APP accelerando_patient_portal {
     CRUD [create, read, list]
   }
 
-  ENTITY ConsentRecord {
+ENTITY ConsentRecord {
     FIELDS {
       id:              string   REQUIRED
       patient_id:      string   REQUIRED
@@ -181,7 +185,7 @@ APP accelerando_patient_portal {
     CRUD [create, read, list]
   }
 
-  ENTITY HealthGoal {
+ENTITY HealthGoal {
     FIELDS {
       id:              string   REQUIRED
       patient_id:      string   REQUIRED
@@ -201,9 +205,9 @@ APP accelerando_patient_portal {
     CRUD [create, read, list, edit]
   }
 
-  // ── PACKETS ───────────────────────────────────────────────────────────────
+// ── PACKETS ───────────────────────────────────────────────────────────────
 
-  PACKET PortalMessagePacket {
+PACKET PortalMessagePacket {
     message_id:      string  REQUIRED
     patient_id:      string  REQUIRED
     to_provider_id:  string  REQUIRED
@@ -212,7 +216,7 @@ APP accelerando_patient_portal {
     SIGNATURE "accelerando_patient_portal"
   }
 
-  PACKET RefillRequestPacket {
+PACKET RefillRequestPacket {
     refill_request_id: string REQUIRED
     patient_id:        string REQUIRED
     medication_id:     string REQUIRED
@@ -221,7 +225,7 @@ APP accelerando_patient_portal {
     SIGNATURE "accelerando_patient_portal"
   }
 
-  PACKET AppointmentRequestPacket {
+PACKET AppointmentRequestPacket {
     appt_request_id:    string REQUIRED
     patient_id:         string REQUIRED
     appointment_type_id: string REQUIRED
@@ -231,7 +235,7 @@ APP accelerando_patient_portal {
     SIGNATURE "accelerando_patient_portal"
   }
 
-  PACKET ResultViewedPacket {
+PACKET ResultViewedPacket {
     result_release_id: string REQUIRED
     patient_id:        string REQUIRED
     result_id:         string REQUIRED
@@ -239,35 +243,35 @@ APP accelerando_patient_portal {
     SIGNATURE "accelerando_patient_portal"
   }
 
-  // ── CHANNELS ──────────────────────────────────────────────────────────────
+// ── CHANNELS ──────────────────────────────────────────────────────────────
 
-  CHANNEL portal_message_outbound {
+CHANNEL portal_message_outbound {
     PACKET PortalMessagePacket
     CONSUMERS ["accelerando_clinical"]
     DELIVERY at_least_once
   }
 
-  CHANNEL refill_request_outbound {
+CHANNEL refill_request_outbound {
     PACKET RefillRequestPacket
     CONSUMERS ["accelerando_pharmacy"]
     DELIVERY exactly_once
   }
 
-  CHANNEL appt_request_outbound {
+CHANNEL appt_request_outbound {
     PACKET AppointmentRequestPacket
     CONSUMERS ["accelerando_scheduling"]
     DELIVERY at_least_once
   }
 
-  CHANNEL result_viewed_outbound {
+CHANNEL result_viewed_outbound {
     PACKET ResultViewedPacket
     CONSUMERS ["accelerando_clinical"]
     DELIVERY at_least_once
   }
 
-  // ── MODULES ───────────────────────────────────────────────────────────────
+// ── MODULES ───────────────────────────────────────────────────────────────
 
-  MODULE ResultsEngine {
+MODULE ResultsEngine {
 
     FACT ResultsContext {
       critical_result_auto_release_attempted: boolean
@@ -314,7 +318,7 @@ APP accelerando_patient_portal {
 
   }
 
-  MODULE MessagingEngine {
+MODULE MessagingEngine {
 
     FACT MessagingContext {
       message_unresponded_2_business_days: boolean
@@ -346,7 +350,7 @@ APP accelerando_patient_portal {
 
   }
 
-  MODULE AccessEngine {
+MODULE AccessEngine {
 
     FACT AccessContext {
       account_not_identity_verified:   boolean
@@ -394,7 +398,7 @@ APP accelerando_patient_portal {
 
   }
 
-  MODULE RefillEngine {
+MODULE RefillEngine {
 
     FACT RefillPortalContext {
       refill_for_controlled_via_portal: boolean
@@ -418,9 +422,9 @@ APP accelerando_patient_portal {
 
   }
 
-  // ── REASONER ──────────────────────────────────────────────────────────────
+// ── REASONER ──────────────────────────────────────────────────────────────
 
-  REASONER portal_engagement_reasoner {
+REASONER portal_engagement_reasoner {
     SCHEDULE "weekly"
     DESCRIPTION "Analyzes portal adoption, message volume patterns, result viewing rates, and patient engagement to identify barriers to care and self-management opportunities"
     INPUT {
@@ -438,9 +442,9 @@ APP accelerando_patient_portal {
     }
   }
 
-  // ── WORKFLOWS ─────────────────────────────────────────────────────────────
+// ── WORKFLOWS ─────────────────────────────────────────────────────────────
 
-  WORKFLOW enroll_patient {
+WORKFLOW enroll_patient {
     IDEMPOTENT false
     STEPS {
       STEP create_account {
@@ -462,7 +466,7 @@ APP accelerando_patient_portal {
     }
   }
 
-  WORKFLOW send_message {
+WORKFLOW send_message {
     IDEMPOTENT false
     STEPS {
       STEP validate_account {
@@ -484,7 +488,7 @@ APP accelerando_patient_portal {
     }
   }
 
-  WORKFLOW release_result {
+WORKFLOW release_result {
     IDEMPOTENT false
     STEPS {
       STEP check_release_eligibility {
@@ -502,7 +506,7 @@ APP accelerando_patient_portal {
     }
   }
 
-  WORKFLOW submit_refill_request {
+WORKFLOW submit_refill_request {
     IDEMPOTENT false
     STEPS {
       STEP validate_request {
@@ -520,7 +524,7 @@ APP accelerando_patient_portal {
     }
   }
 
-  WORKFLOW self_schedule_appointment {
+WORKFLOW self_schedule_appointment {
     IDEMPOTENT false
     STEPS {
       STEP validate_eligibility {
@@ -538,7 +542,7 @@ APP accelerando_patient_portal {
     }
   }
 
-  WORKFLOW generate_health_summary {
+WORKFLOW generate_health_summary {
     IDEMPOTENT false
     STEPS {
       STEP compile_data {
@@ -556,7 +560,7 @@ APP accelerando_patient_portal {
     }
   }
 
-  WORKFLOW manage_proxy_access {
+WORKFLOW manage_proxy_access {
     IDEMPOTENT false
     STEPS {
       STEP validate_proxy_relationship {
@@ -574,9 +578,9 @@ APP accelerando_patient_portal {
     }
   }
 
-  // ── ACTIONS ───────────────────────────────────────────────────────────────
+// ── ACTIONS ───────────────────────────────────────────────────────────────
 
-  ACTION CreatePortalAccount {
+ACTION CreatePortalAccount {
     DESCRIPTION "Creates portal account and links to patient record"
     INPUT {
       patient_id:   string  REQUIRED
@@ -590,7 +594,7 @@ APP accelerando_patient_portal {
     }
   }
 
-  ACTION InitiateIdentityVerification {
+ACTION InitiateIdentityVerification {
     DESCRIPTION "Initiates NIST IAL2 identity proofing workflow via preferred method"
     INPUT {
       account_id:          string  REQUIRED
@@ -602,7 +606,7 @@ APP accelerando_patient_portal {
     }
   }
 
-  ACTION SendWelcomeMessage {
+ACTION SendWelcomeMessage {
     DESCRIPTION "Sends welcome email/SMS with portal setup instructions and identity verification link"
     INPUT {
       account_id: string  REQUIRED
@@ -613,7 +617,7 @@ APP accelerando_patient_portal {
     }
   }
 
-  ACTION RecordPortalConsent {
+ACTION RecordPortalConsent {
     DESCRIPTION "Records patient's consent to portal Terms of Service and Privacy Notice"
     INPUT {
       patient_id:      string  REQUIRED
@@ -626,7 +630,7 @@ APP accelerando_patient_portal {
     }
   }
 
-  ACTION ValidatePortalAccountAccess {
+ACTION ValidatePortalAccountAccess {
     DESCRIPTION "Confirms account is active, not locked, identity verified, and MFA cleared"
     INPUT {
       account_id: string  REQUIRED
@@ -637,7 +641,7 @@ APP accelerando_patient_portal {
     }
   }
 
-  ACTION CreateSecureMessage {
+ACTION CreateSecureMessage {
     DESCRIPTION "Creates SecureMessage record and attaches to patient thread"
     INPUT {
       patient_id:      string  REQUIRED
@@ -655,7 +659,7 @@ APP accelerando_patient_portal {
     }
   }
 
-  ACTION RouteMessageToProvider {
+ACTION RouteMessageToProvider {
     DESCRIPTION "Routes message to correct inbox based on subject categorization and care team"
     INPUT {
       message_id:  string  REQUIRED
@@ -667,7 +671,7 @@ APP accelerando_patient_portal {
     }
   }
 
-  ACTION NotifyProviderOfMessage {
+ACTION NotifyProviderOfMessage {
     DESCRIPTION "Sends in-app and email notification to provider of new portal message"
     INPUT {
       message_id:  string  REQUIRED
@@ -678,7 +682,7 @@ APP accelerando_patient_portal {
     }
   }
 
-  ACTION CheckResultReleaseEligibility {
+ACTION CheckResultReleaseEligibility {
     DESCRIPTION "Determines whether a result can be released to the patient portal based on result type, abnormality, and provider review status"
     INPUT {
       result_id:    string  REQUIRED
@@ -692,7 +696,7 @@ APP accelerando_patient_portal {
     }
   }
 
-  ACTION CreateResultReleaseRecord {
+ACTION CreateResultReleaseRecord {
     DESCRIPTION "Creates ResultRelease record and sets the result as available in patient view"
     INPUT {
       result_id:        string  REQUIRED
@@ -705,7 +709,7 @@ APP accelerando_patient_portal {
     }
   }
 
-  ACTION NotifyPatientOfResult {
+ACTION NotifyPatientOfResult {
     DESCRIPTION "Sends result available notification via patient's preferred channel"
     INPUT {
       result_release_id: string  REQUIRED
@@ -716,7 +720,7 @@ APP accelerando_patient_portal {
     }
   }
 
-  ACTION ValidateRefillRequest {
+ACTION ValidateRefillRequest {
     DESCRIPTION "Validates refill request: medication active, not controlled, pharmacy on file"
     INPUT {
       patient_id:       string  REQUIRED
@@ -729,7 +733,7 @@ APP accelerando_patient_portal {
     }
   }
 
-  ACTION CreatePortalRefillRequest {
+ACTION CreatePortalRefillRequest {
     DESCRIPTION "Creates RefillRequest record in pending_review status"
     INPUT {
       patient_id:      string  REQUIRED
@@ -743,7 +747,7 @@ APP accelerando_patient_portal {
     }
   }
 
-  ACTION EmitRefillRequestPacket {
+ACTION EmitRefillRequestPacket {
     DESCRIPTION "Emits RefillRequestPacket to pharmacy and clinical channels"
     INPUT {
       refill_request_id: string REQUIRED
@@ -753,7 +757,7 @@ APP accelerando_patient_portal {
     }
   }
 
-  ACTION ValidateSelfScheduleEligibility {
+ACTION ValidateSelfScheduleEligibility {
     DESCRIPTION "Confirms patient is eligible to self-schedule: identity verified, no holds, appointment type allows self-schedule"
     INPUT {
       patient_id:          string  REQUIRED
@@ -765,7 +769,7 @@ APP accelerando_patient_portal {
     }
   }
 
-  ACTION CreateAppointmentRequest {
+ACTION CreateAppointmentRequest {
     DESCRIPTION "Creates AppointmentRequest record for scheduling staff processing"
     INPUT {
       patient_id:          string  REQUIRED
@@ -781,7 +785,7 @@ APP accelerando_patient_portal {
     }
   }
 
-  ACTION EmitAppointmentRequestPacket {
+ACTION EmitAppointmentRequestPacket {
     DESCRIPTION "Emits AppointmentRequestPacket to scheduling channel"
     INPUT {
       request_id: string REQUIRED
@@ -791,7 +795,7 @@ APP accelerando_patient_portal {
     }
   }
 
-  ACTION CompileHealthSummaryData {
+ACTION CompileHealthSummaryData {
     DESCRIPTION "Assembles problems, medications, allergies, immunizations, and recent results for health summary generation"
     INPUT {
       patient_id:  string  REQUIRED
@@ -802,7 +806,7 @@ APP accelerando_patient_portal {
     }
   }
 
-  ACTION GeneratePatientHealthSummary {
+ACTION GeneratePatientHealthSummary {
     DESCRIPTION "AI generates a patient-readable health summary in plain language from structured clinical data"
     MODEL "claude-sonnet-4-6"
     INPUT {
@@ -817,7 +821,7 @@ APP accelerando_patient_portal {
     }
   }
 
-  ACTION DeliverHealthSummary {
+ACTION DeliverHealthSummary {
     DESCRIPTION "Makes health summary available in portal and optionally emails a PDF"
     INPUT {
       summary_id:  string  REQUIRED
@@ -828,7 +832,7 @@ APP accelerando_patient_portal {
     }
   }
 
-  ACTION ValidateProxyRelationship {
+ACTION ValidateProxyRelationship {
     DESCRIPTION "Confirms proxy relationship is valid, documented, and appropriate under applicable law"
     INPUT {
       patient_id:           string  REQUIRED
@@ -843,7 +847,7 @@ APP accelerando_patient_portal {
     }
   }
 
-  ACTION CreateProxyPortalAccount {
+ACTION CreateProxyPortalAccount {
     DESCRIPTION "Creates proxy portal account linked to the patient they represent"
     INPUT {
       patient_id:           string  REQUIRED
@@ -858,7 +862,7 @@ APP accelerando_patient_portal {
     }
   }
 
-  ACTION RecordProxyConsentGrant {
+ACTION RecordProxyConsentGrant {
     DESCRIPTION "Records patient's documented consent granting proxy portal access"
     INPUT {
       patient_id:       string  REQUIRED
@@ -870,7 +874,7 @@ APP accelerando_patient_portal {
     }
   }
 
-  ACTION RevokeProxyAccess {
+ACTION RevokeProxyAccess {
     DESCRIPTION "Revokes proxy portal access and records the revocation with reason"
     INPUT {
       proxy_account_id: string  REQUIRED
@@ -882,7 +886,7 @@ APP accelerando_patient_portal {
     }
   }
 
-  // ── PREFERENCES ───────────────────────────────────────────────────────────
+// ── PREFERENCES ───────────────────────────────────────────────────────────
 
   PREFERENCE message_response_sla_business_days {
     DEFAULT 2

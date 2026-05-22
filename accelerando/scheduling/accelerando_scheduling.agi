@@ -1,11 +1,15 @@
 APP accelerando_scheduling {
+  TITLE "Accelerando Scheduling"
+  DB    accelerando_scheduling
   VERSION "1.0.0"
   PORT 3008
   DESCRIPTION "Patient scheduling engine — provider templates, appointment booking, waitlist management, recall campaigns, and resource coordination"
 
-  // ── ENTITIES ──────────────────────────────────────────────────────────────
+}
 
-  ENTITY Provider {
+// ── ENTITIES ──────────────────────────────────────────────────────────────
+
+ENTITY Provider {
     FIELDS {
       id:              string   REQUIRED
       npi:             string   REQUIRED
@@ -22,7 +26,7 @@ APP accelerando_scheduling {
     CRUD [create, read, list, edit]
   }
 
-  ENTITY ScheduleTemplate {
+ENTITY ScheduleTemplate {
     FIELDS {
       id:              string   REQUIRED
       provider_id:     string   REQUIRED
@@ -38,7 +42,7 @@ APP accelerando_scheduling {
     CRUD [create, read, list, edit]
   }
 
-  ENTITY AppointmentType {
+ENTITY AppointmentType {
     FIELDS {
       id:              string   REQUIRED
       name:            string   REQUIRED  // "New Patient", "Follow-Up", "Annual Wellness", "Urgent"
@@ -51,7 +55,7 @@ APP accelerando_scheduling {
     CRUD [create, read, list, edit]
   }
 
-  ENTITY Appointment {
+ENTITY Appointment {
     FIELDS {
       id:              string   REQUIRED
       patient_id:      string   REQUIRED
@@ -81,7 +85,7 @@ APP accelerando_scheduling {
     CRUD [create, read, list, edit]
   }
 
-  ENTITY WaitlistEntry {
+ENTITY WaitlistEntry {
     FIELDS {
       id:              string   REQUIRED
       patient_id:      string   REQUIRED
@@ -102,7 +106,7 @@ APP accelerando_scheduling {
     CRUD [create, read, list, edit]
   }
 
-  ENTITY RecallTask {
+ENTITY RecallTask {
     FIELDS {
       id:              string   REQUIRED
       patient_id:      string   REQUIRED
@@ -123,7 +127,7 @@ APP accelerando_scheduling {
     CRUD [create, read, list, edit]
   }
 
-  ENTITY Room {
+ENTITY Room {
     FIELDS {
       id:              string   REQUIRED
       name:            string   REQUIRED  // "Exam Room 1", "Procedure Suite A"
@@ -136,7 +140,7 @@ APP accelerando_scheduling {
     CRUD [create, read, list, edit]
   }
 
-  ENTITY ScheduleException {
+ENTITY ScheduleException {
     FIELDS {
       id:              string   REQUIRED
       provider_id:     string   REQUIRED
@@ -149,7 +153,7 @@ APP accelerando_scheduling {
     CRUD [create, read, list, edit]
   }
 
-  ENTITY NoShowRecord {
+ENTITY NoShowRecord {
     FIELDS {
       id:              string   REQUIRED
       patient_id:      string   REQUIRED
@@ -163,9 +167,9 @@ APP accelerando_scheduling {
     CRUD [create, read, list]
   }
 
-  // ── PACKETS ───────────────────────────────────────────────────────────────
+// ── PACKETS ───────────────────────────────────────────────────────────────
 
-  PACKET AppointmentConfirmedPacket {
+PACKET AppointmentConfirmedPacket {
     appointment_id:    string   REQUIRED
     patient_id:        string   REQUIRED
     provider_id:       string   REQUIRED
@@ -176,7 +180,7 @@ APP accelerando_scheduling {
     SIGNATURE "accelerando_scheduling"
   }
 
-  PACKET AppointmentCancelledPacket {
+PACKET AppointmentCancelledPacket {
     appointment_id:    string   REQUIRED
     patient_id:        string   REQUIRED
     provider_id:       string   REQUIRED
@@ -185,7 +189,7 @@ APP accelerando_scheduling {
     SIGNATURE "accelerando_scheduling"
   }
 
-  PACKET RecallDuePacket {
+PACKET RecallDuePacket {
     recall_task_id:    string   REQUIRED
     patient_id:        string   REQUIRED
     provider_id:       string   REQUIRED
@@ -195,7 +199,7 @@ APP accelerando_scheduling {
     SIGNATURE "accelerando_scheduling"
   }
 
-  PACKET NoShowAlertPacket {
+PACKET NoShowAlertPacket {
     appointment_id:    string   REQUIRED
     patient_id:        string   REQUIRED
     provider_id:       string   REQUIRED
@@ -204,35 +208,35 @@ APP accelerando_scheduling {
     SIGNATURE "accelerando_scheduling"
   }
 
-  // ── CHANNELS ──────────────────────────────────────────────────────────────
+// ── CHANNELS ──────────────────────────────────────────────────────────────
 
-  CHANNEL appointment_confirmed_outbound {
+CHANNEL appointment_confirmed_outbound {
     PACKET AppointmentConfirmedPacket
     CONSUMERS ["accelerando_clinical", "accelerando_billing", "accelerando_patient_portal"]
     DELIVERY at_least_once
   }
 
-  CHANNEL appointment_cancelled_outbound {
+CHANNEL appointment_cancelled_outbound {
     PACKET AppointmentCancelledPacket
     CONSUMERS ["accelerando_clinical", "accelerando_billing", "accelerando_patient_portal"]
     DELIVERY at_least_once
   }
 
-  CHANNEL recall_due_outbound {
+CHANNEL recall_due_outbound {
     PACKET RecallDuePacket
     CONSUMERS ["accelerando_patient_portal"]
     DELIVERY at_least_once
   }
 
-  CHANNEL no_show_alert_outbound {
+CHANNEL no_show_alert_outbound {
     PACKET NoShowAlertPacket
     CONSUMERS ["accelerando_clinical", "accelerando_population_health"]
     DELIVERY at_least_once
   }
 
-  // ── MODULES ───────────────────────────────────────────────────────────────
+// ── MODULES ───────────────────────────────────────────────────────────────
 
-  MODULE SchedulingEngine {
+MODULE SchedulingEngine {
 
     FACT SchedulingContext {
       double_booking_detected:    boolean
@@ -287,7 +291,7 @@ APP accelerando_scheduling {
 
   }
 
-  MODULE RecallEngine {
+MODULE RecallEngine {
 
     FACT RecallContext {
       overdue_recalls_exist:       boolean
@@ -328,7 +332,7 @@ APP accelerando_scheduling {
 
   }
 
-  MODULE WaitlistEngine {
+MODULE WaitlistEngine {
 
     FACT WaitlistContext {
       cancellation_slot_available:  boolean
@@ -360,7 +364,7 @@ APP accelerando_scheduling {
 
   }
 
-  MODULE NoShowEngine {
+MODULE NoShowEngine {
 
     FACT NoShowContext {
       patient_no_show_rate_high:   boolean
@@ -395,9 +399,9 @@ APP accelerando_scheduling {
 
   }
 
-  // ── WORKFLOWS ─────────────────────────────────────────────────────────────
+// ── WORKFLOWS ─────────────────────────────────────────────────────────────
 
-  WORKFLOW book_appointment {
+WORKFLOW book_appointment {
     IDEMPOTENT false
     STEPS {
       STEP check_availability {
@@ -427,7 +431,7 @@ APP accelerando_scheduling {
     }
   }
 
-  WORKFLOW cancel_appointment {
+WORKFLOW cancel_appointment {
     IDEMPOTENT true
     STEPS {
       STEP mark_cancelled {
@@ -445,7 +449,7 @@ APP accelerando_scheduling {
     }
   }
 
-  WORKFLOW reschedule_appointment {
+WORKFLOW reschedule_appointment {
     IDEMPOTENT false
     STEPS {
       STEP cancel_original {
@@ -467,7 +471,7 @@ APP accelerando_scheduling {
     }
   }
 
-  WORKFLOW recall_outreach {
+WORKFLOW recall_outreach {
     IDEMPOTENT false
     STEPS {
       STEP identify_overdue {
@@ -489,7 +493,7 @@ APP accelerando_scheduling {
     }
   }
 
-  WORKFLOW process_no_show {
+WORKFLOW process_no_show {
     IDEMPOTENT true
     STEPS {
       STEP mark_no_show {
@@ -515,7 +519,7 @@ APP accelerando_scheduling {
     }
   }
 
-  WORKFLOW waitlist_fill {
+WORKFLOW waitlist_fill {
     IDEMPOTENT false
     STEPS {
       STEP find_candidates {
@@ -533,9 +537,9 @@ APP accelerando_scheduling {
     }
   }
 
-  // ── ACTIONS ───────────────────────────────────────────────────────────────
+// ── ACTIONS ───────────────────────────────────────────────────────────────
 
-  ACTION FindAvailableSlots {
+ACTION FindAvailableSlots {
     DESCRIPTION "Returns open slots for a provider on requested dates, honoring template, exceptions, and existing appointments"
     INPUT {
       provider_id:        string   REQUIRED
@@ -549,7 +553,7 @@ APP accelerando_scheduling {
     }
   }
 
-  ACTION ValidateSlot {
+ACTION ValidateSlot {
     DESCRIPTION "Confirms slot is free — detects double booking before write"
     INPUT {
       provider_id:     string   REQUIRED
@@ -563,7 +567,7 @@ APP accelerando_scheduling {
     }
   }
 
-  ACTION CheckResourceAvailability {
+ACTION CheckResourceAvailability {
     DESCRIPTION "Validates room and equipment are not double-booked"
     INPUT {
       room_id:         string
@@ -578,7 +582,7 @@ APP accelerando_scheduling {
     }
   }
 
-  ACTION CreateAppointmentRecord {
+ACTION CreateAppointmentRecord {
     DESCRIPTION "Writes the appointment record and updates provider slot utilization"
     INPUT {
       patient_id:          string   REQUIRED
@@ -597,7 +601,7 @@ APP accelerando_scheduling {
     }
   }
 
-  ACTION ScheduleReminders {
+ACTION ScheduleReminders {
     DESCRIPTION "Queues 24h and 2h appointment reminders via patient preferred channel"
     INPUT {
       appointment_id: string REQUIRED
@@ -608,7 +612,7 @@ APP accelerando_scheduling {
     }
   }
 
-  ACTION EmitConfirmationPacket {
+ACTION EmitConfirmationPacket {
     DESCRIPTION "Emits AppointmentConfirmedPacket to downstream consumers"
     INPUT {
       appointment_id: string REQUIRED
@@ -618,7 +622,7 @@ APP accelerando_scheduling {
     }
   }
 
-  ACTION CancelAppointmentRecord {
+ACTION CancelAppointmentRecord {
     DESCRIPTION "Marks appointment cancelled with reason and cancelling party"
     INPUT {
       appointment_id:   string REQUIRED
@@ -630,7 +634,7 @@ APP accelerando_scheduling {
     }
   }
 
-  ACTION EmitCancellationPacket {
+ACTION EmitCancellationPacket {
     DESCRIPTION "Emits AppointmentCancelledPacket to downstream consumers"
     INPUT {
       appointment_id: string REQUIRED
@@ -640,7 +644,7 @@ APP accelerando_scheduling {
     }
   }
 
-  ACTION NotifyWaitlist {
+ACTION NotifyWaitlist {
     DESCRIPTION "Finds waitlist patients whose criteria match the newly cancelled slot and sends offers"
     INPUT {
       provider_id:         string REQUIRED
@@ -653,7 +657,7 @@ APP accelerando_scheduling {
     }
   }
 
-  ACTION FindWaitlistCandidates {
+ACTION FindWaitlistCandidates {
     DESCRIPTION "Queries waitlist by priority score for a given provider and date range"
     INPUT {
       provider_id:    string  REQUIRED
@@ -666,7 +670,7 @@ APP accelerando_scheduling {
     }
   }
 
-  ACTION NotifyWaitlistPatients {
+ACTION NotifyWaitlistPatients {
     DESCRIPTION "Sends slot-available notifications to waitlist candidates via preferred channel"
     INPUT {
       candidate_ids:  string  REQUIRED
@@ -679,7 +683,7 @@ APP accelerando_scheduling {
     }
   }
 
-  ACTION HoldSlotForWaitlist {
+ACTION HoldSlotForWaitlist {
     DESCRIPTION "Temporarily holds slot while first-responding patient confirms"
     INPUT {
       provider_id:      string  REQUIRED
@@ -692,7 +696,7 @@ APP accelerando_scheduling {
     }
   }
 
-  ACTION FindOverdueRecalls {
+ACTION FindOverdueRecalls {
     DESCRIPTION "Returns recall tasks past due_date with fewer than 3 outreach attempts"
     INPUT {
       department:   string
@@ -703,7 +707,7 @@ APP accelerando_scheduling {
     }
   }
 
-  ACTION GenerateRecallMessages {
+ACTION GenerateRecallMessages {
     DESCRIPTION "AI generates personalized recall outreach message per patient and reason"
     MODEL "claude-haiku-4-5-20251001"
     INPUT {
@@ -719,7 +723,7 @@ APP accelerando_scheduling {
     }
   }
 
-  ACTION SendOutreach {
+ACTION SendOutreach {
     DESCRIPTION "Dispatches recall message via sms, email, or portal based on patient preference"
     INPUT {
       recall_task_id:  string REQUIRED
@@ -733,7 +737,7 @@ APP accelerando_scheduling {
     }
   }
 
-  ACTION RecordOutreachAttempt {
+ACTION RecordOutreachAttempt {
     DESCRIPTION "Increments outreach_attempts and records last_outreach_date on recall task"
     INPUT {
       recall_task_id: string  REQUIRED
@@ -745,7 +749,7 @@ APP accelerando_scheduling {
     }
   }
 
-  ACTION MarkAppointmentNoShow {
+ACTION MarkAppointmentNoShow {
     DESCRIPTION "Sets appointment status to no_show and records timestamp"
     INPUT {
       appointment_id: string REQUIRED
@@ -755,7 +759,7 @@ APP accelerando_scheduling {
     }
   }
 
-  ACTION CreateNoShowRecord {
+ACTION CreateNoShowRecord {
     DESCRIPTION "Creates NoShowRecord for tracking and analytics"
     INPUT {
       patient_id:      string  REQUIRED
@@ -767,7 +771,7 @@ APP accelerando_scheduling {
     }
   }
 
-  ACTION UpdatePatientReliabilityScore {
+ACTION UpdatePatientReliabilityScore {
     DESCRIPTION "Adjusts patient_reliability_score based on cumulative no-show history"
     INPUT {
       patient_id:       string  REQUIRED
@@ -779,7 +783,7 @@ APP accelerando_scheduling {
     }
   }
 
-  ACTION OfferReschedule {
+ACTION OfferReschedule {
     DESCRIPTION "Sends patient a reschedule prompt with next available slots"
     INPUT {
       patient_id:          string REQUIRED
@@ -791,7 +795,7 @@ APP accelerando_scheduling {
     }
   }
 
-  ACTION EmitNoShowAlert {
+ACTION EmitNoShowAlert {
     DESCRIPTION "Emits NoShowAlertPacket to clinical and population health"
     INPUT {
       appointment_id:    string REQUIRED
@@ -803,7 +807,7 @@ APP accelerando_scheduling {
     }
   }
 
-  ACTION OptimizeScheduleTemplate {
+ACTION OptimizeScheduleTemplate {
     DESCRIPTION "AI analyzes historical utilization and no-show patterns to recommend template adjustments"
     MODEL "claude-sonnet-4-6"
     INPUT {
@@ -817,7 +821,7 @@ APP accelerando_scheduling {
     }
   }
 
-  ACTION AssessScheduleHealth {
+ACTION AssessScheduleHealth {
     DESCRIPTION "Computes utilization rate, no-show rate, and wait time metrics for a provider or department"
     INPUT {
       provider_id:  string
@@ -833,7 +837,7 @@ APP accelerando_scheduling {
     }
   }
 
-  // ── PREFERENCES ───────────────────────────────────────────────────────────
+// ── PREFERENCES ───────────────────────────────────────────────────────────
 
   PREFERENCE reminder_24h_hours_before {
     DEFAULT 24
@@ -871,9 +875,9 @@ APP accelerando_scheduling {
     DESCRIPTION "Number of no-shows within 12 months that triggers chronic-no-show protocol"
   }
 
-  // ── SEED DATA ─────────────────────────────────────────────────────────────
+// ── SEED DATA ─────────────────────────────────────────────────────────────
 
-  SEED AppointmentType {
+SEED AppointmentType {
     RECORDS [
       { id: "apt-001", name: "New Patient", duration_minutes: 60, color_hex: "#2ECC71", requires_referral: false, telehealth_eligible: true, instructions: "Please arrive 15 minutes early to complete new patient paperwork." }
       { id: "apt-002", name: "Follow-Up", duration_minutes: 20, color_hex: "#4A90E2", requires_referral: false, telehealth_eligible: true, instructions: "Bring your medication list and any lab results since your last visit." }
