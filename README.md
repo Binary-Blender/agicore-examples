@@ -22,14 +22,15 @@ Each example in this repository replaces one of these fragile patterns with a cl
 
 ## Repository layout
 
-The repo is organized into four buckets by intent:
+The repo is organized into five buckets by intent:
 
 ```
 agicore-examples/
 ├── patterns/      # Focused single-pattern demos (one declaration cluster each)
 ├── accelerando/   # The Accelerando enterprise suite (18 vertical apps)
 ├── reference/     # Broader reference apps showing fuller Agicore use
-└── showcase/      # Polished production-shape apps that don't track platform releases
+├── showcase/      # Polished production-shape apps that don't track platform releases
+└── skills/        # Packaged consulting expertise for deploying these apps
 ```
 
 ### `patterns/` — Focused pattern demos
@@ -70,6 +71,17 @@ Apps that are real products, not stubs. They evolve on their own cadence rather 
 | Folder | Name | What it is |
 |---|---|---|
 | `showcase/novasyn-mba` | NovaSyn MBA | Small-entrepreneur expert system app (1,227 lines, 41 declaration types — RULE, SKILL, WORKFLOW, EVENT). Second production reference application alongside NovaSyn Chat (which stays in the main agicore repo as the canary). |
+
+### `skills/` — Consulting skill docs
+
+Packaged consulting expertise for advising real companies on deploying the apps in this repo. Each skill doc is a single Markdown file you attach to any AI assistant to turn it into a competent practitioner in the domain.
+
+| File | Tier | What it teaches |
+|---|---|---|
+| [`skills/accelerando.manufacturing.baby.skill.md`](skills/accelerando.manufacturing.baby.skill.md) | Baby (~8.3k tokens) | Advising mid-sized discrete manufacturers (100–300 employees) on Accelerando ERP deployment. Catalog of 12 Enterprise apps, "Acme Machining" 18-month walkthrough, 10 anti-patterns from real ERP failures, 5 rubric self-checks. For small open-source models. |
+| [`skills/accelerando.manufacturing.super.skill.md`](skills/accelerando.manufacturing.super.skill.md) | Super (~25k tokens) | Same domain, broader scope (50–500 employees). 5 industry archetypes (greenfield, ERP replacement, multi-plant, M&A, customer rescue), per-app deployment guidance, KPI framework, change-management playbook, 20 anti-patterns, 10 rubric self-checks. For frontier models. |
+
+Skill docs follow the [Skill Doc format spec](https://github.com/Binary-Blender/agicore/blob/main/skills/SKILL_FORMAT.md) (v1.1+) maintained in the Agicore framework repo. See [`skills/README.md`](skills/README.md) for usage instructions and a primer on the format.
 
 ### What lives where
 
