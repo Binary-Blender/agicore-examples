@@ -946,6 +946,89 @@ SEED KnowledgeEntry {
   tenant_id: "acme"
 }
 
+// ═══════════════════════════════════════════════════════════════════════════════
+// CROSS-ACCELERANDO SPINE — Chatbot adoption
+//
+// Chatbot already emits EscalationPacket on escalation_out. That matches the
+// canonical escalation_spine in interchange — OIE and ES already consume it.
+// Spine additions: the four-contract pattern (SKILLDOC + MUTATION_POLICY +
+// REASONERs) so chatbot mutations earn their way to production.
+// ═══════════════════════════════════════════════════════════════════════════════
+
+SKILLDOC chatbot_de_escalation_taste {
+  DESCRIPTION  "Chatbot judgment — frustration-signal thresholds for escalation, knowledge-base fallback ordering, refusal stance on out-of-scope requests, tone calibration across customer segments"
+  VERSION      "1.0.0"
+  DOMAIN       "customer_service"
+  CONTENT      "skilldocs/chatbot_de_escalation_taste.md"
+  KEYWORDS     chatbot, escalation, knowledge_base, refusal, tone, frustration
+  PRIORITY     20
+
+  GOVERNANCE {
+    SIGNED_BY      AccelerandoAuthority
+    REQUIRE        operator
+    EXECUTE_ONLY   chatbot_node
+    DISALLOW       export, redistribute
+    AUDIT          all_actions
+  }
+
+  COMPRESSION {
+    SEMANTIC_DENSITY     0.85
+    INTENT_PRESERVATION  0.95
+    TOKEN_EFFICIENCY     0.70
+  }
+}
+
+MUTATION_POLICY chatbot_policy {
+  TARGETS [escalation_out]
+
+  TIER 1 rule_tuning {
+    SCOPE              [RULES_modify, SCORE_THRESHOLD]
+    AUTO_DEPLOY        true
+    REGRESSION_SUITE   24h_recent_workflows
+    NBVE_WINDOW        24h
+  }
+
+  TIER 3 structural {
+    SCOPE                [WORKFLOW_modify, WORKFLOW_add_step]
+    AUTO_DEPLOY          false
+    APPROVAL_AUTHORITY   [chatbot_lead, customer_service_lead]
+  }
+
+  TIER 5 governance {
+    SCOPE                [MUTATION_POLICY_modify]
+    AUTO_DEPLOY          false
+    APPROVAL_AUTHORITY   ORDERED [cfo, cto, board_chair]
+  }
+
+  ANDON_RESPONDER       chatbot_andon_handler
+  IMPROVEMENT_REASONER  chatbot_weekly_kaizen
+  LEDGER                AccelerandoBus
+}
+
+REASONER chatbot_andon_handler {
+  DESCRIPTION  "Chatbot reactive responder — diagnose escalation false positives, knowledge-base gaps, out-of-scope refusal drift"
+  INPUT        { CHANNEL escalation_out  WINDOW "1d" }
+  USES         chatbot_de_escalation_taste
+  TIER         2
+  OUTPUT       { PACKET EscalationPacket  CHANNEL escalation_out }
+  SCHEDULE     on_demand
+}
+
+REASONER chatbot_weekly_kaizen {
+  DESCRIPTION  "Weekly review of chatbot patterns — proposes knowledge-base updates, surfaces emerging customer-intent categories, scores escalation-trigger calibration"
+  INPUT        { CHANNEL escalation_out  WINDOW "7d" }
+  USES         chatbot_de_escalation_taste
+  TIER         2
+  OUTPUT       { PACKET EscalationPacket  CHANNEL escalation_out }
+  SCHEDULE     weekly
+
+  GOVERNANCE {
+    SIGNED_BY  AccelerandoAuthority
+    REQUIRE    operator
+    AUDIT      all_actions
+  }
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // TESTS
 // ─────────────────────────────────────────────────────────────────────────────

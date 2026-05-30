@@ -670,6 +670,283 @@ REASONER clinical_intelligence_reasoner {
     }
   }
 
+// ═══════════════════════════════════════════════════════════════════════════════
+// CROSS-ACCELERANDO SPINE — Clinical as packet emitter and consumer
+//
+// Clinical's local PACKETs above (NewEncounterPacket, PrescriptionPacket,
+// ReferralPacket, CriticalResultPacket, CCDPacket) remain in service for
+// existing producers. The canonical EMR-stack PACKETs declared in
+// accelerando_interchange.agi are used here for cross-module consumption:
+//
+//   CONSUMES on  appointment_confirmed_spine → pre-populate encounter
+//                pdmp_high_risk_spine        → flag patient chart
+//                final_report_spine          → file to chart + provider inbox
+//                critical_finding_spine      → exactly_once page provider
+//                care_gap_spine              → display at encounter open
+//                hcc_recapture_spine         → prompt documentation
+//                dispense_confirmation_spine → reconcile med list
+//
+// The wire that makes "result on the radiologist's monitor at 3:08 PM" become
+// "provider's pager at 3:09 PM" deterministic at the DSL level.
+// ═══════════════════════════════════════════════════════════════════════════════
+
+ACTION PrePopulateEncounterFromAppointment {
+  INPUT   appointment_payload: json, tenant_id: string
+  OUTPUT  encounter_id: string, prepopulated: bool
+  IMPL    "read AppointmentConfirmedPacket, locate or create encounter shell, pre-populate provider/patient/type, return encounter_id ready for arrival check-in"
+}
+
+ACTION FlagChartFromPDMP {
+  INPUT   pdmp_payload: json, tenant_id: string
+  OUTPUT  alert_id: string, flagged: bool
+  IMPL    "read PDMPHighRiskPacket, create ClinicalAlert at appropriate severity, attach to patient chart, notify ordering providers per chart subscription"
+}
+
+ACTION FileFinalReportToChart {
+  INPUT   report_payload: json, tenant_id: string
+  OUTPUT  filed: bool, result_id: string
+  IMPL    "read FinalReportPacket, create or update Result entity, attach to encounter via order_id linkage, queue for provider inbox"
+}
+
+ACTION PageProviderOnCriticalFinding {
+  INPUT   alert_payload: json, tenant_id: string
+  OUTPUT  paged: bool, acknowledged_by: string
+  IMPL    "read CriticalFindingAlertPacket, page ordering_provider with appropriate urgency, start Joint-Commission timed-acknowledgement clock, escalate per skilldoc-defined policy if unacknowledged within window"
+}
+
+ACTION SurfaceCareGapsAtEncounter {
+  INPUT   gap_payload: json, tenant_id: string
+  OUTPUT  surfaced: bool, gap_ids: string
+  IMPL    "read CareGapAlertPacket, attach to patient chart for next-encounter banner display, do not auto-act"
+}
+
+ACTION PromptHCCDocumentation {
+  INPUT   hcc_payload: json, tenant_id: string
+  OUTPUT  prompted: bool, prompt_id: string
+  IMPL    "read HCCRecapturePacket, surface documentation prompt to provider at chart-open, supply ICD-10 candidates from payload, do not auto-code"
+}
+
+ACTION ReconcileMedListOnDispense {
+  INPUT   dispense_payload: json, tenant_id: string
+  OUTPUT  reconciled: bool, medication_id: string
+  IMPL    "read DispenseConfirmationPacket, locate matching Medication, mark dispensed, update med-list reconciliation status"
+}
+
+WORKFLOW on_appointment_confirmed_inbound {
+  IDEMPOTENT true
+  STEPS {
+    STEP prepopulate { ACTION PrePopulateEncounterFromAppointment  ON_FAIL stop }
+  }
+}
+
+WORKFLOW on_pdmp_high_risk_inbound {
+  IDEMPOTENT true
+  STEPS {
+    STEP flag_chart { ACTION FlagChartFromPDMP  ON_FAIL stop }
+  }
+}
+
+WORKFLOW on_final_report_inbound {
+  IDEMPOTENT true
+  STEPS {
+    STEP file_report { ACTION FileFinalReportToChart  ON_FAIL retry }
+  }
+}
+
+WORKFLOW on_critical_finding_inbound {
+  IDEMPOTENT true
+  STEPS {
+    STEP page_provider { ACTION PageProviderOnCriticalFinding  ON_FAIL retry }
+  }
+}
+
+WORKFLOW on_care_gap_inbound {
+  IDEMPOTENT true
+  STEPS {
+    STEP surface_gap { ACTION SurfaceCareGapsAtEncounter  ON_FAIL skip }
+  }
+}
+
+WORKFLOW on_hcc_recapture_inbound {
+  IDEMPOTENT true
+  STEPS {
+    STEP prompt_doc { ACTION PromptHCCDocumentation  ON_FAIL skip }
+  }
+}
+
+WORKFLOW on_dispense_confirmation_inbound {
+  IDEMPOTENT true
+  STEPS {
+    STEP reconcile { ACTION ReconcileMedListOnDispense  ON_FAIL stop }
+  }
+}
+
+TRIGGER clinical_consume_appointment_confirmed {
+  DESCRIPTION "When Scheduling confirms an appointment, pre-populate the encounter shell"
+  WHEN {
+    CHANNEL  appointment_confirmed_spine
+    PACKET   AppointmentConfirmedPacket
+  }
+  FIRES        WORKFLOW on_appointment_confirmed_inbound
+  IDEMPOTENT   true
+}
+
+TRIGGER clinical_consume_pdmp_high_risk {
+  DESCRIPTION "When Pharmacy surfaces a PDMP high-risk finding, flag the chart"
+  WHEN {
+    CHANNEL  pdmp_high_risk_spine
+    PACKET   PDMPHighRiskPacket
+  }
+  FIRES        WORKFLOW on_pdmp_high_risk_inbound
+  IDEMPOTENT   true
+}
+
+TRIGGER clinical_consume_final_report {
+  DESCRIPTION "When Radiology finalizes a report, file it to the chart and route to provider inbox"
+  WHEN {
+    CHANNEL  final_report_spine
+    PACKET   FinalReportPacket
+  }
+  FIRES        WORKFLOW on_final_report_inbound
+  IDEMPOTENT   true
+}
+
+TRIGGER clinical_consume_critical_finding {
+  DESCRIPTION "When Radiology or Pharmacy flags a critical finding, page the ordering provider immediately"
+  WHEN {
+    CHANNEL  critical_finding_spine
+    PACKET   CriticalFindingAlertPacket
+  }
+  FIRES        WORKFLOW on_critical_finding_inbound
+  RATE_LIMIT   "100/min"
+  IDEMPOTENT   true
+}
+
+TRIGGER clinical_consume_care_gap {
+  DESCRIPTION "When Population Health detects a care gap, queue it for encounter-open display"
+  WHEN {
+    CHANNEL  care_gap_spine
+    PACKET   CareGapAlertPacket
+  }
+  FIRES        WORKFLOW on_care_gap_inbound
+  DEBOUNCE     "5s"
+  IDEMPOTENT   true
+}
+
+TRIGGER clinical_consume_hcc_recapture {
+  DESCRIPTION "When Population Health surfaces an HCC recapture opportunity, prompt documentation at next chart-open"
+  WHEN {
+    CHANNEL  hcc_recapture_spine
+    PACKET   HCCRecapturePacket
+  }
+  FIRES        WORKFLOW on_hcc_recapture_inbound
+  IDEMPOTENT   true
+}
+
+TRIGGER clinical_consume_dispense_confirmation {
+  DESCRIPTION "When Pharmacy dispenses, reconcile the med list automatically"
+  WHEN {
+    CHANNEL  dispense_confirmation_spine
+    PACKET   DispenseConfirmationPacket
+  }
+  FIRES        WORKFLOW on_dispense_confirmation_inbound
+  IDEMPOTENT   true
+}
+
+// ─── Clinical taste — the load-bearing judgment surface ──────────────────────
+//
+// What constitutes "complete enough" documentation at note-sign? When does a
+// CDS alert fire vs stay silent? How aggressive is the critical-finding
+// re-page cadence? What is the HCC documentation prompt threshold? These are
+// the questions a senior attending answers without thinking; the SKILLDOC
+// makes that judgment portable across the rest of the practice and across
+// every AI-proposed mutation to the clinical rule set.
+
+SKILLDOC clinical_documentation_taste {
+  DESCRIPTION  "Clinical documentation discipline — completeness thresholds, CDS firing rules, critical-finding escalation cadence, HCC documentation prompts, controlled-substance handling stance"
+  VERSION      "1.0.0"
+  DOMAIN       "clinical"
+  CONTENT      "skilldocs/clinical_documentation_taste.md"
+  KEYWORDS     clinical, documentation, cds, critical_finding, hcc, controlled_substance, medical_necessity
+  PRIORITY     30
+
+  GOVERNANCE {
+    SIGNED_BY      AccelerandoAuthority
+    REQUIRE        operator, clinical_certified
+    EXECUTE_ONLY   clinical_node
+    DISALLOW       export, redistribute, log_external, modify
+    AUDIT          all_actions
+  }
+
+  COMPRESSION {
+    SEMANTIC_DENSITY     0.90
+    INTENT_PRESERVATION  0.98
+    TOKEN_EFFICIENCY     0.65
+  }
+}
+
+// ─── Clinical mutation policy ────────────────────────────────────────────────
+//
+// Healthcare context bumps the bar a notch. Even TIER 1 keeps NBVE 48h
+// (clinical-significant defects can take longer to surface than DSO drift).
+// TIER 3 requires medical-director sign-off in addition to the operational
+// leads. TIER 5 still ORDERED [cfo, cto, board_chair] but practical TIER 5
+// changes in clinical also require a separate ethics-board review.
+
+MUTATION_POLICY clinical_policy {
+  TARGETS [open_encounter, record_vitals, order_medication, sign_note, generate_ccd, acknowledge_result,
+           on_appointment_confirmed_inbound, on_pdmp_high_risk_inbound, on_final_report_inbound,
+           on_critical_finding_inbound, on_care_gap_inbound, on_hcc_recapture_inbound,
+           on_dispense_confirmation_inbound]
+
+  TIER 1 rule_tuning {
+    SCOPE              [RULES_modify, SCORE_THRESHOLD]
+    AUTO_DEPLOY        true
+    REGRESSION_SUITE   24h_recent_workflows
+    NBVE_WINDOW        48h
+  }
+
+  TIER 3 structural {
+    SCOPE                [WORKFLOW_modify, WORKFLOW_add_step]
+    AUTO_DEPLOY          false
+    APPROVAL_AUTHORITY   [clinical_lead, medical_director, compliance_lead]
+  }
+
+  TIER 5 governance {
+    SCOPE                [MUTATION_POLICY_modify]
+    AUTO_DEPLOY          false
+    APPROVAL_AUTHORITY   ORDERED [cmo, cfo, cto, board_chair]
+  }
+
+  ANDON_RESPONDER       clinical_andon_handler
+  IMPROVEMENT_REASONER  clinical_weekly_kaizen
+  LEDGER                AccelerandoBus
+}
+
+REASONER clinical_andon_handler {
+  DESCRIPTION  "Clinical reactive responder — diagnose CDS misfires, critical-finding routing failures, missed care-gap surfaces. Proposes tier-tagged mutations"
+  INPUT        { CHANNEL critical_finding_spine, care_gap_spine, hcc_recapture_spine  WINDOW "1d" }
+  USES         clinical_documentation_taste
+  TIER         3
+  OUTPUT       { PACKET IntelligenceOpportunityPacket  CHANNEL intelligence_opportunity_spine }
+  SCHEDULE     on_demand
+}
+
+REASONER clinical_weekly_kaizen {
+  DESCRIPTION  "Weekly review of CDS firing patterns, critical-finding acknowledgement times, HCC capture rate, controlled-substance prescribing patterns"
+  INPUT        { CHANNEL critical_finding_spine, care_gap_spine, hcc_recapture_spine, pdmp_high_risk_spine, dispense_confirmation_spine  WINDOW "7d" }
+  USES         clinical_documentation_taste
+  TIER         3
+  OUTPUT       { PACKET IntelligenceOpportunityPacket  CHANNEL intelligence_opportunity_spine }
+  SCHEDULE     weekly
+
+  GOVERNANCE {
+    SIGNED_BY  AccelerandoAuthority
+    REQUIRE    operator, clinical_certified
+    AUDIT      all_actions
+  }
+}
+
 // ── WORKFLOWS ─────────────────────────────────────────────────────────────
 
 WORKFLOW open_encounter {

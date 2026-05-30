@@ -519,6 +519,138 @@ REASONER pharmacy_safety_reasoner {
     }
   }
 
+// ═══════════════════════════════════════════════════════════════════════════════
+// CROSS-ACCELERANDO SPINE — Pharmacy as packet emitter and consumer
+//
+// Local PACKETs above (PrescriptionReceivedPacket, PriorAuthRequestPacket,
+// DispenseConfirmationPacket, PDMPHighRiskPacket) remain in service.
+// Spine additions: refill_request_inbound canonical packet, the TRIGGER
+// catalog, the operator-taste SKILLDOC, the MUTATION_POLICY, an Andon REASONER.
+//
+// Pharmacy on the spine:
+//   CONSUMES on  prescription_inbound        → existing (from Clinical)
+//                refill_request_inbound      → new (from Patient Portal)
+//   EMITS on    dispense_confirm_outbound    → existing
+//                pdmp_high_risk_outbound     → existing
+//                prior_auth_outbound         → existing
+// ═══════════════════════════════════════════════════════════════════════════════
+
+PACKET RefillRequestPacket {
+    request_id:       string   REQUIRED
+    patient_id:       string   REQUIRED
+    prescription_id:  string   REQUIRED
+    requested_at:     string   REQUIRED
+    preferred_pickup: string
+    notes:            string
+    SIGNATURE "accelerando_patient_portal"
+  }
+
+CHANNEL refill_request_inbound {
+    PACKET RefillRequestPacket
+    CONSUMERS ["accelerando_pharmacy"]
+    DELIVERY at_least_once
+  }
+
+ACTION HandleRefillRequestFromPortal {
+  INPUT   request_payload: json, tenant_id: string
+  OUTPUT  routed: bool, refill_id: string
+  IMPL    "read RefillRequestPacket, locate prescription, validate active + within_days_supply + not_controlled_substance_unless_authorized, route into normal process_refill workflow"
+}
+
+WORKFLOW on_refill_request_inbound {
+  IDEMPOTENT true
+  STEPS {
+    STEP handle { ACTION HandleRefillRequestFromPortal  ON_FAIL stop }
+  }
+}
+
+TRIGGER pharmacy_consume_prescription {
+  DESCRIPTION "When Clinical emits a prescription on the spine, run the receive_prescription pipeline (idempotent on prescription_id)"
+  WHEN {
+    CHANNEL  prescription_inbound
+    PACKET   PrescriptionReceivedPacket
+  }
+  FIRES        WORKFLOW receive_prescription
+  IDEMPOTENT   true
+}
+
+TRIGGER pharmacy_consume_refill_request {
+  DESCRIPTION "When Patient Portal submits a refill request, run the refill handler"
+  WHEN {
+    CHANNEL  refill_request_inbound
+    PACKET   RefillRequestPacket
+  }
+  FIRES        WORKFLOW on_refill_request_inbound
+  IDEMPOTENT   true
+}
+
+// ─── Pharmacy dispensing stance — the operator-judgment artifact ─────────────
+//
+// Controlled-substance dispensing under PDMP red flag, formulary substitution
+// stance, MME threshold beyond which the pharmacist initiates a prescriber
+// conversation, prior-auth pushback discipline. The judgment that survives
+// individual pharmacist turnover when encoded as a signed SKILLDOC.
+
+SKILLDOC pharmacy_dispensing_stance {
+  DESCRIPTION  "Pharmacy dispensing discipline — controlled-substance handling under PDMP red flag, formulary substitution thresholds, MME prescriber-conversation thresholds, prior-auth pushback, refill anchoring policy"
+  VERSION      "1.0.0"
+  DOMAIN       "pharmacy"
+  CONTENT      "skilldocs/pharmacy_dispensing_stance.md"
+  KEYWORDS     pharmacy, controlled_substance, pdmp, mme, formulary, prior_auth, refill
+  PRIORITY     30
+
+  GOVERNANCE {
+    SIGNED_BY      AccelerandoAuthority
+    REQUIRE        operator, pharmacy_certified
+    EXECUTE_ONLY   pharmacy_node
+    DISALLOW       export, redistribute, log_external
+    AUDIT          all_actions
+  }
+
+  COMPRESSION {
+    SEMANTIC_DENSITY     0.90
+    INTENT_PRESERVATION  0.98
+    TOKEN_EFFICIENCY     0.65
+  }
+}
+
+MUTATION_POLICY pharmacy_policy {
+  TARGETS [receive_prescription, query_pdmp, fill_prescription, initiate_prior_auth, process_refill,
+           on_refill_request_inbound]
+
+  TIER 1 rule_tuning {
+    SCOPE              [RULES_modify, SCORE_THRESHOLD]
+    AUTO_DEPLOY        true
+    REGRESSION_SUITE   24h_recent_workflows
+    NBVE_WINDOW        48h
+  }
+
+  TIER 3 structural {
+    SCOPE                [WORKFLOW_modify, WORKFLOW_add_step]
+    AUTO_DEPLOY          false
+    APPROVAL_AUTHORITY   [pharmacy_lead, medical_director, compliance_lead]
+  }
+
+  TIER 5 governance {
+    SCOPE                [MUTATION_POLICY_modify]
+    AUTO_DEPLOY          false
+    APPROVAL_AUTHORITY   ORDERED [cmo, cfo, cto, board_chair]
+  }
+
+  ANDON_RESPONDER       pharmacy_andon_handler
+  IMPROVEMENT_REASONER  pharmacy_safety_reasoner
+  LEDGER                AccelerandoBus
+}
+
+REASONER pharmacy_andon_handler {
+  DESCRIPTION  "Pharmacy reactive responder — diagnose PDMP misroutes, allergy-conflict bypass patterns, formulary edge cases. Proposes tier-tagged mutations"
+  INPUT        { CHANNEL prescription_inbound, refill_request_inbound, pdmp_high_risk_outbound  WINDOW "1d" }
+  USES         pharmacy_dispensing_stance
+  TIER         2
+  OUTPUT       { PACKET IntelligenceOpportunityPacket  CHANNEL intelligence_opportunity_spine }
+  SCHEDULE     on_demand
+}
+
 // ── WORKFLOWS ─────────────────────────────────────────────────────────────
 
 WORKFLOW receive_prescription {

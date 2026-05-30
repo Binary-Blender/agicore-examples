@@ -1084,6 +1084,809 @@ MODULE RosettaNetModule {
   }
 }
 
+// ═════════════════════════════════════════════════════════════════════════════
+// CROSS-ACCELERANDO PACKET SPINE
+//
+// Everything above this comment is *external* interchange — X12, HL7v2, FHIR,
+// EDIFACT, RosettaNet. The envelopes other companies hand us.
+//
+// Everything below is *internal* interchange — the cross-app spine the
+// Accelerando suite rides on. ERP emits a PurchaseOrderPacket on PO approval.
+// Billing consumes it, emits a ClaimAcceptedPacket. OIE consumes both and
+// emits an IntelligenceOpportunityPacket on its scheduled batch.
+//
+// This is the layer Cole Westerlund saw in the README at 11:31 AM Wednesday
+// in Carry, Ch 8. This is the layer Ana Vasquez mapped onto forty-three
+// million dollars of MrBeast SaaS rent at 2:47 AM Tuesday in Chocolate Wars,
+// Ch 7. One spine. Every vertical is a packet emitter and a packet consumer.
+//
+// The contract: every PACKET below is signed by AccelerandoAuthority, audited
+// to AccelerandoBus ledger, has provenance and lineage on, and carries the
+// originating tenant_id so row-level isolation holds end-to-end.
+//
+// Module .agi files reference the channel and packet names declared here.
+// They do not re-declare. The spine is the canonical schema.
+// ═════════════════════════════════════════════════════════════════════════════
+
+AUTHORITY AccelerandoAuthority {
+  DESCRIPTION "Trust chain for cross-Accelerando packets — every spine emission is signed and chain-verifiable"
+
+  LEVELS {
+    module:     "Module-level emission authority (ERP, Billing, OIE, etc.)"
+    operator:   "Human operator with module-scoped clearance"
+    reviewer:   "Cross-module reviewer (CoE, governance, compliance)"
+    executive:  "Executive override (CFO/CTO/board chair) — TIER 5 governance"
+  }
+
+  SIGNING {
+    REQUIRED       true
+    ALGORITHM      "sha256"
+    VERIFY_CHAIN   true
+  }
+
+  ADMISSIBILITY {
+    has_tenant:     tenant_id IS NOT NULL
+    has_origin:     source_module IS NOT NULL
+    within_ttl:     packet_age < ttl
+  }
+}
+
+// ─── Spine packet catalog ────────────────────────────────────────────────────
+// One PACKET per cross-module event class. Other modules import and emit
+// these shapes — they do not declare their own private copies.
+
+PACKET PurchaseOrderPacket {
+  DESCRIPTION "ERP-originated purchase order, emitted on PO approval, consumed by Billing + OIE + downstream X12 850 outbound"
+
+  PAYLOAD {
+    tenant_id:      string REQUIRED
+    source_module:  string REQUIRED
+    po_id:          string REQUIRED
+    po_number:      string REQUIRED
+    vendor_id:      string REQUIRED
+    total_amount:   float REQUIRED
+    currency:       string REQUIRED
+    line_count:     number REQUIRED
+    approved_by:    string REQUIRED
+    approved_at:    datetime REQUIRED
+    expected_delivery: datetime
+  }
+
+  METADATA {
+    PROVENANCE    true
+    LINEAGE       true
+    SIGNATURES    true
+    ADMISSIBILITY true
+    TTL           604800
+  }
+
+  VALIDATION {
+    has_vendor:    vendor_id IS NOT NULL
+    has_amount:    total_amount > 0
+    has_lines:     line_count > 0
+  }
+}
+
+PACKET InvoicePacket {
+  DESCRIPTION "ERP-originated customer or vendor invoice. Consumed by Billing for claim assembly (healthcare) or AR posting (enterprise) and by OIE for revenue-pattern reasoning"
+
+  PAYLOAD {
+    tenant_id:      string REQUIRED
+    source_module:  string REQUIRED
+    invoice_id:     string REQUIRED
+    invoice_number: string REQUIRED
+    party_id:       string REQUIRED
+    party_role:     string REQUIRED
+    invoice_type:   string REQUIRED
+    total_amount:   float REQUIRED
+    currency:       string REQUIRED
+    due_date:       datetime
+    related_po:     string
+    related_encounter: string
+  }
+
+  METADATA {
+    PROVENANCE    true
+    LINEAGE       true
+    SIGNATURES    true
+    ADMISSIBILITY true
+    TTL           2592000
+  }
+
+  VALIDATION {
+    has_party:     party_id IS NOT NULL
+    has_amount:    total_amount > 0
+    valid_type:    invoice_type != "unknown"
+  }
+}
+
+PACKET ClaimAcceptedPacket {
+  DESCRIPTION "Billing-originated acknowledgement that an X12 837 claim has been accepted by the payer. Closes the loop on InvoicePacket and feeds OIE collection-velocity reasoning"
+
+  PAYLOAD {
+    tenant_id:       string REQUIRED
+    source_module:   string REQUIRED
+    claim_id:        string REQUIRED
+    payer_id:        string REQUIRED
+    accepted_amount: float REQUIRED
+    submitted_amount: float REQUIRED
+    accepted_at:     datetime REQUIRED
+    related_invoice: string REQUIRED
+    payer_control_number: string
+  }
+
+  METADATA {
+    PROVENANCE    true
+    LINEAGE       true
+    SIGNATURES    true
+    ADMISSIBILITY true
+    TTL           7776000
+  }
+
+  VALIDATION {
+    has_invoice:   related_invoice IS NOT NULL
+    has_payer:     payer_id IS NOT NULL
+    valid_amount:  accepted_amount >= 0
+  }
+}
+
+PACKET PaymentRecordedPacket {
+  DESCRIPTION "Billing-originated record of a posted payment (X12 835 remittance, manual post, or patient pay). Lets ERP close the receivable and OIE track DSO"
+
+  PAYLOAD {
+    tenant_id:       string REQUIRED
+    source_module:   string REQUIRED
+    payment_id:      string REQUIRED
+    invoice_id:      string REQUIRED
+    amount:          float REQUIRED
+    currency:        string REQUIRED
+    posted_at:       datetime REQUIRED
+    payment_method:  string REQUIRED
+    payer_id:        string
+  }
+
+  METADATA {
+    PROVENANCE    true
+    LINEAGE       true
+    SIGNATURES    true
+    ADMISSIBILITY true
+    TTL           7776000
+  }
+
+  VALIDATION {
+    has_invoice:   invoice_id IS NOT NULL
+    has_amount:    amount > 0
+  }
+}
+
+PACKET IntelligenceOpportunityPacket {
+  DESCRIPTION "OIE-originated cross-domain finding. Surfaces patterns no human had time to see — the Beast Philanthropy-funded Hazelnut Cup correlation, the Midcontinent Stores margin anomaly. Consumed by Eliza, ES, and human dashboards"
+
+  PAYLOAD {
+    tenant_id:        string REQUIRED
+    source_module:    string REQUIRED
+    opportunity_id:   string REQUIRED
+    category:         string REQUIRED
+    scope:            string REQUIRED
+    title:            string REQUIRED
+    detail:           string REQUIRED
+    evidence:         json REQUIRED
+    confidence:       float REQUIRED
+    impact_score:     float REQUIRED
+    proposed_action:  string
+    target_modules:   string
+  }
+
+  METADATA {
+    PROVENANCE    true
+    LINEAGE       true
+    SIGNATURES    true
+    ADMISSIBILITY true
+    TTL           2592000
+  }
+
+  VALIDATION {
+    high_confidence: confidence >= 0.6
+    has_evidence:    evidence IS NOT NULL
+    valid_category:  category != "unknown"
+  }
+}
+
+PACKET EscalationPacket {
+  DESCRIPTION "Chatbot/Eliza/operator-originated escalation. Carries the human-attention signal across the spine — every escalation becomes telemetry for OIE pattern detection"
+
+  PAYLOAD {
+    tenant_id:       string REQUIRED
+    source_module:   string REQUIRED
+    escalation_id:   string REQUIRED
+    severity:        string REQUIRED
+    surface:         string REQUIRED
+    summary:         string REQUIRED
+    related_entity_type: string
+    related_entity_id:   string
+    requested_at:    datetime REQUIRED
+    requested_by:    string
+  }
+
+  METADATA {
+    PROVENANCE    true
+    LINEAGE       true
+    SIGNATURES    true
+    ADMISSIBILITY true
+    TTL           604800
+  }
+
+  VALIDATION {
+    has_summary:   summary IS NOT NULL
+    valid_severity: severity != "unknown"
+  }
+}
+
+// ─── Spine channels ──────────────────────────────────────────────────────────
+// One CHANNEL per spine PACKET. Naming convention: <packet_snake>_spine.
+// All FIFO, durable, signed. Modules subscribe to consume; modules publish to emit.
+
+CHANNEL purchase_order_spine {
+  DESCRIPTION "Spine channel for PurchaseOrderPacket — ERP publishes; Billing, OIE, Interchange-outbound consume"
+  PROTOCOL    fifo
+  DIRECTION   bidirectional
+  PACKET      PurchaseOrderPacket
+}
+
+CHANNEL invoice_spine {
+  DESCRIPTION "Spine channel for InvoicePacket — ERP (vendor) and Billing (claims) publish; OIE consumes"
+  PROTOCOL    fifo
+  DIRECTION   bidirectional
+  PACKET      InvoicePacket
+}
+
+CHANNEL claim_accepted_spine {
+  DESCRIPTION "Spine channel for ClaimAcceptedPacket — Billing publishes; ERP (AR), OIE consume"
+  PROTOCOL    fifo
+  DIRECTION   bidirectional
+  PACKET      ClaimAcceptedPacket
+}
+
+CHANNEL payment_recorded_spine {
+  DESCRIPTION "Spine channel for PaymentRecordedPacket — Billing publishes; ERP, OIE consume"
+  PROTOCOL    fifo
+  DIRECTION   bidirectional
+  PACKET      PaymentRecordedPacket
+}
+
+CHANNEL intelligence_opportunity_spine {
+  DESCRIPTION "Spine channel for IntelligenceOpportunityPacket — OIE publishes; Eliza, ES, operator dashboards consume"
+  PROTOCOL    fifo
+  DIRECTION   bidirectional
+  PACKET      IntelligenceOpportunityPacket
+}
+
+CHANNEL escalation_spine {
+  DESCRIPTION "Spine channel for EscalationPacket — Chatbot, Eliza publish; OIE, ES consume"
+  PROTOCOL    fifo
+  DIRECTION   bidirectional
+  PACKET      EscalationPacket
+}
+
+// ─── Routing discipline (taste artifact) ─────────────────────────────────────
+
+SKILLDOC accelerando_spine_routing {
+  DESCRIPTION  "Operating doctrine for cross-Accelerando packet routing. What gets a packet, what stays in-module, when a TRIGGER fires a REASONER, when a TRIGGER fires a WORKFLOW"
+  VERSION      "1.0.0"
+  DOMAIN       "operations"
+  CONTENT      "skilldocs/accelerando_spine_routing.md"
+  KEYWORDS     spine, routing, packet, channel, interchange, accelerando
+  PRIORITY     30
+
+  GOVERNANCE {
+    SIGNED_BY      AccelerandoAuthority
+    REQUIRE        reviewer
+    EXECUTE_ONLY   spine_router_node
+    DISALLOW       export, redistribute
+    AUDIT          all_actions
+  }
+
+  COMPRESSION {
+    SEMANTIC_DENSITY     0.85
+    INTENT_PRESERVATION  0.95
+    TOKEN_EFFICIENCY     0.7
+  }
+}
+
+// ─── Spine governance (Andon Loop applied to the spine itself) ───────────────
+//
+// The spine's own routing rules are mutable. The MUTATION_POLICY below is the
+// contract the fiction names verbatim in Carry Ch 8: TIER 1 NBVE shadow window
+// for low-stakes routing-table updates; TIER 3 reviewed deploy for new packet
+// or channel additions; TIER 5 ordered 3-of-3 (CFO, CTO, board chair) for any
+// change to the policy itself. AUTO_DEPLOY false at TIER 3 and TIER 5 means
+// every meaningful spine change earns its way to production.
+
+MUTATION_POLICY accelerando_spine_policy {
+  TARGETS [inbound_hl7_adt, inbound_hl7_orm, inbound_x12_850, inbound_x12_810,
+           inbound_x12_856, outbound_x12_837, inbound_x12_835,
+           inbound_edifact, inbound_rosettanet_pip]
+
+  TIER 1 routing_tuning {
+    SCOPE              [RULES_modify]
+    AUTO_DEPLOY        true
+    REGRESSION_SUITE   24h_recent_workflows
+    NBVE_WINDOW        24h
+  }
+
+  TIER 3 structural {
+    SCOPE                [WORKFLOW_modify, WORKFLOW_add_step]
+    AUTO_DEPLOY          false
+    APPROVAL_AUTHORITY   [interchange_lead, compliance_lead]
+  }
+
+  TIER 5 governance {
+    SCOPE                [MUTATION_POLICY_modify]
+    AUTO_DEPLOY          false
+    APPROVAL_AUTHORITY   ORDERED [cfo, cto, board_chair]
+  }
+
+  ANDON_RESPONDER       andon_handler
+  IMPROVEMENT_REASONER  weekly_spine_kaizen
+  LEDGER                AccelerandoBus
+}
+
+REASONER andon_handler {
+  DESCRIPTION  "Spine reactive responder — when a packet fails admissibility or a routing rule misfires, diagnose and propose a tier-tagged mutation"
+  INPUT        { CHANNEL purchase_order_spine, invoice_spine, claim_accepted_spine, payment_recorded_spine, escalation_spine  WINDOW "1d" }
+  USES         accelerando_spine_routing
+  TIER         2
+  OUTPUT       { PACKET IntelligenceOpportunityPacket  CHANNEL intelligence_opportunity_spine }
+  SCHEDULE     on_demand
+}
+
+REASONER weekly_spine_kaizen {
+  DESCRIPTION  "Weekly review of cross-Accelerando packet traffic — surfaces routing-rule refinements, channel-volume anomalies, packet-shape drift"
+  INPUT        { CHANNEL purchase_order_spine, invoice_spine, claim_accepted_spine, payment_recorded_spine, intelligence_opportunity_spine, escalation_spine  WINDOW "7d" }
+  USES         accelerando_spine_routing
+  TIER         2
+  OUTPUT       { PACKET IntelligenceOpportunityPacket  CHANNEL intelligence_opportunity_spine }
+  SCHEDULE     weekly
+
+  GOVERNANCE {
+    SIGNED_BY  AccelerandoAuthority
+    REQUIRE    reviewer
+    AUDIT      all_actions
+  }
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
+// EMR-STACK SPINE
+//
+// The six healthcare modules (scheduling / clinical / radiology / pharmacy /
+// population-health / patient-portal) exchange packets at clinical cadence —
+// orders flowing into pharmacy and radiology, results flowing back, care gaps
+// surfaced at encounter open, critical findings paged within minutes.
+//
+// The canonical PACKETs and CHANNELs below are the EMR-stack half of the
+// Accelerando spine. They sit alongside the enterprise spine above.
+// Same AccelerandoAuthority signs them. Same AccelerandoBus audits them.
+//
+// Per-module legacy declarations (clinical's local PrescriptionPacket etc.)
+// remain for backwards compatibility; new EMR modules adopt the canonical
+// shapes below and emit/consume through these channels.
+// ═════════════════════════════════════════════════════════════════════════════
+
+PACKET AppointmentConfirmedPacket {
+  DESCRIPTION "Scheduling-originated confirmation — emits to Clinical (pre-populate encounter), Billing (expected revenue), Patient Portal (calendar entry)"
+
+  PAYLOAD {
+    tenant_id:        string REQUIRED
+    source_module:    string REQUIRED
+    appointment_id:   string REQUIRED
+    patient_id:       string REQUIRED
+    provider_id:      string REQUIRED
+    appointment_at:   datetime REQUIRED
+    appointment_type: string REQUIRED
+    expected_amount:  float
+    confirmed_via:    string
+  }
+
+  METADATA {
+    PROVENANCE    true
+    LINEAGE       true
+    SIGNATURES    true
+    ADMISSIBILITY true
+    TTL           604800
+  }
+
+  VALIDATION {
+    has_patient:   patient_id IS NOT NULL
+    has_provider:  provider_id IS NOT NULL
+    has_time:      appointment_at IS NOT NULL
+  }
+}
+
+PACKET AppointmentRequestPacket {
+  DESCRIPTION "Patient-Portal-originated appointment request — consumed by Scheduling for triage and slot assignment"
+
+  PAYLOAD {
+    tenant_id:        string REQUIRED
+    source_module:    string REQUIRED
+    request_id:       string REQUIRED
+    patient_id:       string REQUIRED
+    preferred_provider: string
+    preferred_window: string REQUIRED
+    reason:           string REQUIRED
+    urgency:          string REQUIRED
+    requested_at:     datetime REQUIRED
+  }
+
+  METADATA {
+    PROVENANCE    true
+    LINEAGE       true
+    SIGNATURES    true
+    ADMISSIBILITY true
+    TTL           604800
+  }
+
+  VALIDATION {
+    has_patient:   patient_id IS NOT NULL
+    has_reason:    reason IS NOT NULL
+    valid_urgency: urgency != "unknown"
+  }
+}
+
+PACKET ImagingOrderPacket {
+  DESCRIPTION "Clinical-originated imaging order — consumed by Radiology RIS for modality worklist and scheduling"
+
+  PAYLOAD {
+    tenant_id:        string REQUIRED
+    source_module:    string REQUIRED
+    order_id:         string REQUIRED
+    patient_id:       string REQUIRED
+    ordering_provider: string REQUIRED
+    modality:         string REQUIRED
+    procedure_code:   string REQUIRED
+    body_part:        string
+    contrast:         bool
+    clinical_indication: string REQUIRED
+    priority:         string REQUIRED
+    ordered_at:       datetime REQUIRED
+  }
+
+  METADATA {
+    PROVENANCE    true
+    LINEAGE       true
+    SIGNATURES    true
+    ADMISSIBILITY true
+    TTL           2592000
+  }
+
+  VALIDATION {
+    has_patient:   patient_id IS NOT NULL
+    valid_modality: modality != "unknown"
+    has_indication: clinical_indication IS NOT NULL
+  }
+}
+
+PACKET FinalReportPacket {
+  DESCRIPTION "Radiology-originated final read — consumed by Clinical (chart) and Patient Portal (release after provider review)"
+
+  PAYLOAD {
+    tenant_id:        string REQUIRED
+    source_module:    string REQUIRED
+    report_id:        string REQUIRED
+    order_id:         string REQUIRED
+    patient_id:       string REQUIRED
+    reading_radiologist: string REQUIRED
+    impression:       string REQUIRED
+    findings:         string REQUIRED
+    recommendation:   string
+    finalized_at:     datetime REQUIRED
+    has_critical_finding: bool REQUIRED
+  }
+
+  METADATA {
+    PROVENANCE    true
+    LINEAGE       true
+    SIGNATURES    true
+    ADMISSIBILITY true
+    TTL           2592000
+  }
+
+  VALIDATION {
+    has_order:     order_id IS NOT NULL
+    has_impression: impression IS NOT NULL
+  }
+}
+
+PACKET CriticalFindingAlertPacket {
+  DESCRIPTION "Radiology- or Lab-originated critical finding — exactly_once delivery to Clinical (ordering provider) and Patient Portal (after acknowledgement). Joint Commission timed-alert tracking enabled"
+
+  PAYLOAD {
+    tenant_id:        string REQUIRED
+    source_module:    string REQUIRED
+    alert_id:         string REQUIRED
+    patient_id:       string REQUIRED
+    finding_category: string REQUIRED
+    severity:         string REQUIRED
+    detail:           string REQUIRED
+    ordering_provider: string REQUIRED
+    source_report_id: string
+    detected_at:      datetime REQUIRED
+    requires_acknowledgement_by: datetime
+  }
+
+  METADATA {
+    PROVENANCE    true
+    LINEAGE       true
+    SIGNATURES    true
+    ADMISSIBILITY true
+    TTL           604800
+  }
+
+  VALIDATION {
+    has_patient:   patient_id IS NOT NULL
+    has_provider:  ordering_provider IS NOT NULL
+    valid_severity: severity != "unknown"
+  }
+}
+
+PACKET PDMPHighRiskPacket {
+  DESCRIPTION "Pharmacy-originated PDMP query result flagging high-risk pattern (multiple prescribers, overlapping scripts, MME threshold). Consumed by Clinical"
+
+  PAYLOAD {
+    tenant_id:        string REQUIRED
+    source_module:    string REQUIRED
+    alert_id:         string REQUIRED
+    patient_id:       string REQUIRED
+    risk_category:    string REQUIRED
+    mme_daily:        float
+    prescriber_count_90d: number
+    pharmacy_count_90d: number
+    overlapping_controls: bool
+    detail:           string REQUIRED
+    queried_at:       datetime REQUIRED
+  }
+
+  METADATA {
+    PROVENANCE    true
+    LINEAGE       true
+    SIGNATURES    true
+    ADMISSIBILITY true
+    TTL           7776000
+  }
+
+  VALIDATION {
+    has_patient:   patient_id IS NOT NULL
+    valid_category: risk_category != "unknown"
+  }
+}
+
+PACKET DispenseConfirmationPacket {
+  DESCRIPTION "Pharmacy-originated confirmation that a prescription has been dispensed. Consumed by Clinical (med-rec), Billing (charge), Patient Portal (refill window)"
+
+  PAYLOAD {
+    tenant_id:        string REQUIRED
+    source_module:    string REQUIRED
+    dispense_id:      string REQUIRED
+    prescription_id:  string REQUIRED
+    patient_id:       string REQUIRED
+    drug_name:        string REQUIRED
+    quantity:         float REQUIRED
+    days_supply:      number REQUIRED
+    dispensed_at:     datetime REQUIRED
+    pharmacist_id:    string REQUIRED
+    ndc_code:         string
+  }
+
+  METADATA {
+    PROVENANCE    true
+    LINEAGE       true
+    SIGNATURES    true
+    ADMISSIBILITY true
+    TTL           2592000
+  }
+
+  VALIDATION {
+    has_prescription: prescription_id IS NOT NULL
+    has_patient:      patient_id IS NOT NULL
+    valid_quantity:   quantity > 0
+  }
+}
+
+PACKET RefillRequestPacket {
+  DESCRIPTION "Patient-Portal-originated refill request — consumed by Pharmacy for processing"
+
+  PAYLOAD {
+    tenant_id:        string REQUIRED
+    source_module:    string REQUIRED
+    request_id:       string REQUIRED
+    patient_id:       string REQUIRED
+    prescription_id:  string REQUIRED
+    requested_at:     datetime REQUIRED
+    preferred_pickup: string
+    notes:            string
+  }
+
+  METADATA {
+    PROVENANCE    true
+    LINEAGE       true
+    SIGNATURES    true
+    ADMISSIBILITY true
+    TTL           604800
+  }
+
+  VALIDATION {
+    has_prescription: prescription_id IS NOT NULL
+    has_patient:      patient_id IS NOT NULL
+  }
+}
+
+PACKET CareGapAlertPacket {
+  DESCRIPTION "Population-Health-originated care gap (HEDIS/MIPS measure not met) — consumed by Clinical at encounter open and Patient Portal for outreach"
+
+  PAYLOAD {
+    tenant_id:        string REQUIRED
+    source_module:    string REQUIRED
+    gap_id:           string REQUIRED
+    patient_id:       string REQUIRED
+    measure_id:       string REQUIRED
+    measure_label:    string REQUIRED
+    gap_type:         string REQUIRED
+    due_by:           datetime
+    intervention_options: string
+    detected_at:      datetime REQUIRED
+  }
+
+  METADATA {
+    PROVENANCE    true
+    LINEAGE       true
+    SIGNATURES    true
+    ADMISSIBILITY true
+    TTL           7776000
+  }
+
+  VALIDATION {
+    has_patient:   patient_id IS NOT NULL
+    has_measure:   measure_id IS NOT NULL
+  }
+}
+
+PACKET HCCRecapturePacket {
+  DESCRIPTION "Population-Health-originated HCC recapture alert — historical condition not yet captured in current year. Consumed by Clinical for documentation prompts"
+
+  PAYLOAD {
+    tenant_id:        string REQUIRED
+    source_module:    string REQUIRED
+    hcc_alert_id:     string REQUIRED
+    patient_id:       string REQUIRED
+    hcc_category:     string REQUIRED
+    icd10_codes:      string REQUIRED
+    last_documented:  datetime REQUIRED
+    confidence:       float REQUIRED
+    detected_at:      datetime REQUIRED
+  }
+
+  METADATA {
+    PROVENANCE    true
+    LINEAGE       true
+    SIGNATURES    true
+    ADMISSIBILITY true
+    TTL           31536000
+  }
+
+  VALIDATION {
+    has_patient:   patient_id IS NOT NULL
+    has_hcc:       hcc_category IS NOT NULL
+    high_confidence: confidence >= 0.6
+  }
+}
+
+PACKET HighRiskNoShowPacket {
+  DESCRIPTION "Population-Health- or Scheduling-originated alert that a confirmed appointment is at high no-show risk. Consumed by Scheduling (outreach), Clinical (transportation referral hooks)"
+
+  PAYLOAD {
+    tenant_id:        string REQUIRED
+    source_module:    string REQUIRED
+    risk_id:          string REQUIRED
+    appointment_id:   string REQUIRED
+    patient_id:       string REQUIRED
+    no_show_probability: float REQUIRED
+    contributing_factors: string
+    suggested_interventions: string
+    detected_at:      datetime REQUIRED
+  }
+
+  METADATA {
+    PROVENANCE    true
+    LINEAGE       true
+    SIGNATURES    true
+    ADMISSIBILITY true
+    TTL           604800
+  }
+
+  VALIDATION {
+    has_appointment: appointment_id IS NOT NULL
+    high_risk:       no_show_probability >= 0.4
+  }
+}
+
+// ─── EMR-stack spine channels ────────────────────────────────────────────────
+
+CHANNEL appointment_confirmed_spine {
+  DESCRIPTION "Spine channel for AppointmentConfirmedPacket — Scheduling publishes; Clinical, Billing, Patient Portal consume"
+  PROTOCOL    fifo
+  DIRECTION   bidirectional
+  PACKET      AppointmentConfirmedPacket
+}
+
+CHANNEL appointment_request_spine {
+  DESCRIPTION "Spine channel for AppointmentRequestPacket — Patient Portal publishes; Scheduling consumes"
+  PROTOCOL    fifo
+  DIRECTION   bidirectional
+  PACKET      AppointmentRequestPacket
+}
+
+CHANNEL imaging_order_spine {
+  DESCRIPTION "Spine channel for ImagingOrderPacket — Clinical publishes; Radiology consumes"
+  PROTOCOL    fifo
+  DIRECTION   bidirectional
+  PACKET      ImagingOrderPacket
+}
+
+CHANNEL final_report_spine {
+  DESCRIPTION "Spine channel for FinalReportPacket — Radiology publishes; Clinical, Patient Portal consume"
+  PROTOCOL    fifo
+  DIRECTION   bidirectional
+  PACKET      FinalReportPacket
+}
+
+CHANNEL critical_finding_spine {
+  DESCRIPTION "Spine channel for CriticalFindingAlertPacket — Radiology, Pharmacy publish; Clinical, Patient Portal consume. Exactly-once delivery, Joint Commission timed-alert ledger"
+  PROTOCOL    fifo
+  DIRECTION   bidirectional
+  PACKET      CriticalFindingAlertPacket
+}
+
+CHANNEL pdmp_high_risk_spine {
+  DESCRIPTION "Spine channel for PDMPHighRiskPacket — Pharmacy publishes; Clinical consumes"
+  PROTOCOL    fifo
+  DIRECTION   bidirectional
+  PACKET      PDMPHighRiskPacket
+}
+
+CHANNEL dispense_confirmation_spine {
+  DESCRIPTION "Spine channel for DispenseConfirmationPacket — Pharmacy publishes; Clinical, Billing, Patient Portal consume"
+  PROTOCOL    fifo
+  DIRECTION   bidirectional
+  PACKET      DispenseConfirmationPacket
+}
+
+CHANNEL refill_request_spine {
+  DESCRIPTION "Spine channel for RefillRequestPacket — Patient Portal publishes; Pharmacy consumes"
+  PROTOCOL    fifo
+  DIRECTION   bidirectional
+  PACKET      RefillRequestPacket
+}
+
+CHANNEL care_gap_spine {
+  DESCRIPTION "Spine channel for CareGapAlertPacket — Population Health publishes; Clinical, Patient Portal consume"
+  PROTOCOL    fifo
+  DIRECTION   bidirectional
+  PACKET      CareGapAlertPacket
+}
+
+CHANNEL hcc_recapture_spine {
+  DESCRIPTION "Spine channel for HCCRecapturePacket — Population Health publishes; Clinical consumes"
+  PROTOCOL    fifo
+  DIRECTION   bidirectional
+  PACKET      HCCRecapturePacket
+}
+
+CHANNEL high_risk_no_show_spine {
+  DESCRIPTION "Spine channel for HighRiskNoShowPacket — Population Health publishes; Scheduling, Clinical consume"
+  PROTOCOL    fifo
+  DIRECTION   bidirectional
+  PACKET      HighRiskNoShowPacket
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // WORKFLOWS — full inbound and outbound interchange sequences
 // ─────────────────────────────────────────────────────────────────────────────

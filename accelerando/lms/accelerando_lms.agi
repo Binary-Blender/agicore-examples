@@ -704,6 +704,124 @@ ACTION LogTrainingEvent {
   }
 }
 
+// ═══════════════════════════════════════════════════════════════════════════════
+// CROSS-ACCELERANDO SPINE — LMS adoption
+//
+// Cross-app integration narrative: "LMS ──→ ES (compliance scores feed
+// governance rules — low HIPAA score flags PHI access)." The spine wire
+// for that flow: ComplianceScorePacket emitted on every assessment cycle,
+// consumed by ES which can fire governance rules against the score.
+// ═══════════════════════════════════════════════════════════════════════════════
+
+PACKET ComplianceScorePacket {
+  DESCRIPTION "LMS-originated learner compliance score by domain — consumed by ES for governance-rule firing (e.g. block PHI access on low HIPAA score)"
+
+  PAYLOAD {
+    tenant_id:        string REQUIRED
+    source_module:    string REQUIRED
+    score_id:         string REQUIRED
+    learner_id:       string REQUIRED
+    domain:           string REQUIRED
+    score:            float REQUIRED
+    threshold:        float REQUIRED
+    status:           string REQUIRED
+    assessed_at:      datetime REQUIRED
+  }
+
+  METADATA {
+    PROVENANCE    true
+    LINEAGE       true
+    SIGNATURES    true
+    ADMISSIBILITY true
+    TTL           7776000
+  }
+
+  VALIDATION {
+    has_learner:   learner_id IS NOT NULL
+    has_score:     score >= 0.0
+    has_threshold: threshold >= 0.0
+  }
+}
+
+CHANNEL compliance_score_outbound {
+  DESCRIPTION "LMS publishes per-learner compliance scores to ES governance"
+  PROTOCOL    fifo
+  DIRECTION   outbound
+  PACKET      ComplianceScorePacket
+}
+
+ACTION EmitComplianceScorePacket {
+  INPUT   learner_id: string, domain: string, score: number, tenant_id: string
+  OUTPUT  emitted: bool, packet_id: string
+  IMPL    "build ComplianceScorePacket from learner + domain + score + tenant-configured threshold, sign with AccelerandoAuthority, publish to compliance_score_outbound"
+}
+
+WORKFLOW emit_compliance_score {
+  IDEMPOTENT true
+  STEP emit { ACTION EmitComplianceScorePacket  ON_FAIL retry }
+}
+
+SKILLDOC lms_curriculum_taste {
+  DESCRIPTION  "LMS curriculum and assessment discipline — question difficulty stratification, knowledge-decay reminder thresholds, role-based curriculum mapping, refresher cadence by domain criticality"
+  VERSION      "1.0.0"
+  DOMAIN       "learning"
+  CONTENT      "skilldocs/lms_curriculum_taste.md"
+  KEYWORDS     lms, curriculum, assessment, compliance, hipaa, refresher
+  PRIORITY     20
+
+  GOVERNANCE {
+    SIGNED_BY      AccelerandoAuthority
+    REQUIRE        operator
+    EXECUTE_ONLY   lms_node
+    DISALLOW       export, redistribute
+    AUDIT          all_actions
+  }
+
+  COMPRESSION {
+    SEMANTIC_DENSITY     0.85
+    INTENT_PRESERVATION  0.95
+    TOKEN_EFFICIENCY     0.70
+  }
+}
+
+MUTATION_POLICY lms_policy {
+  TARGETS [daily_assessment_cycle, onboard_new_employee, refresher_completion,
+           daily_reminders, weekly_compliance_rollup, generate_curriculum,
+           export_for_audit, emit_compliance_score]
+
+  TIER 1 rule_tuning {
+    SCOPE              [RULES_modify, SCORE_THRESHOLD]
+    AUTO_DEPLOY        true
+    REGRESSION_SUITE   24h_recent_workflows
+    NBVE_WINDOW        24h
+  }
+
+  TIER 3 structural {
+    SCOPE                [WORKFLOW_modify, WORKFLOW_add_step]
+    AUTO_DEPLOY          false
+    APPROVAL_AUTHORITY   [lms_lead, compliance_lead]
+  }
+
+  TIER 5 governance {
+    SCOPE                [MUTATION_POLICY_modify]
+    AUTO_DEPLOY          false
+    APPROVAL_AUTHORITY   ORDERED [cfo, cto, board_chair]
+  }
+
+  ANDON_RESPONDER       lms_andon_handler
+  IMPROVEMENT_REASONER  compliance_intelligence_reasoner
+  LEDGER                AccelerandoBus
+}
+
+REASONER lms_andon_handler {
+  DESCRIPTION  "LMS reactive responder — diagnose curriculum drift, low-score patterns by department, refresher non-completion"
+  INPUT        { CHANNEL compliance_score_outbound  WINDOW "1d" }
+  USES         lms_curriculum_taste
+  TIER         2
+  OUTPUT       { PACKET ComplianceScorePacket  CHANNEL compliance_score_outbound }
+  SCHEDULE     on_demand
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // WORKFLOWS
 // ─────────────────────────────────────────────────────────────────────────────

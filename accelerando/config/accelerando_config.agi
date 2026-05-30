@@ -744,6 +744,141 @@ MODULE IntegrationAdvisor {
   }
 }
 
+// ═══════════════════════════════════════════════════════════════════════════════
+// CROSS-ACCELERANDO SPINE — Config adoption
+//
+// Config is the self-configuration advisor — it generates and applies known
+// configuration packages to ERP and the rest of the suite. Per cross-app
+// integration: "Config ──→ ERP (template application updates ERP module
+// configuration)." Spine wire: ConfigurationAppliedPacket emitted on apply,
+// consumed by any module whose configuration changed.
+// ═══════════════════════════════════════════════════════════════════════════════
+
+PACKET ConfigurationAppliedPacket {
+  DESCRIPTION "Config-originated notice that a configuration template has been applied — consumed by every module whose configuration was touched"
+
+  PAYLOAD {
+    tenant_id:           string REQUIRED
+    source_module:       string REQUIRED
+    apply_id:            string REQUIRED
+    template_id:         string REQUIRED
+    template_name:       string REQUIRED
+    target_modules:      string REQUIRED
+    applied_by:          string REQUIRED
+    applied_at:          datetime REQUIRED
+    diff_summary:        string
+    rollback_token:      string
+  }
+
+  METADATA {
+    PROVENANCE    true
+    LINEAGE       true
+    SIGNATURES    true
+    ADMISSIBILITY true
+    TTL           7776000
+  }
+
+  VALIDATION {
+    has_template:  template_id IS NOT NULL
+    has_applier:   applied_by IS NOT NULL
+  }
+}
+
+CHANNEL configuration_applied_outbound {
+  DESCRIPTION "Config publishes apply events to every module whose configuration changed"
+  PROTOCOL    fifo
+  DIRECTION   outbound
+  PACKET      ConfigurationAppliedPacket
+}
+
+ACTION EmitConfigurationAppliedPacket {
+  INPUT   apply_id: string, template_id: string, target_modules: string, applied_by: string, tenant_id: string
+  OUTPUT  emitted: bool, packet_id: string
+  IMPL    "build ConfigurationAppliedPacket with diff_summary from the apply transaction, sign with AccelerandoAuthority, publish to configuration_applied_outbound"
+}
+
+WORKFLOW emit_configuration_applied {
+  IDEMPOTENT true
+  STEP emit { ACTION EmitConfigurationAppliedPacket  ON_FAIL retry }
+}
+
+SKILLDOC config_advisor_taste {
+  DESCRIPTION  "Configuration advisor discipline — template matching from setup interview signals, configuration drift detection thresholds, profile-application order discipline, rollback decision criteria"
+  VERSION      "1.0.0"
+  DOMAIN       "configuration"
+  CONTENT      "skilldocs/config_advisor_taste.md"
+  KEYWORDS     config, template, profile, drift, rollback, intake
+  PRIORITY     25
+
+  GOVERNANCE {
+    SIGNED_BY      AccelerandoAuthority
+    REQUIRE        operator, ops_certified
+    EXECUTE_ONLY   config_node
+    DISALLOW       export, redistribute
+    AUDIT          all_actions
+  }
+
+  COMPRESSION {
+    SEMANTIC_DENSITY     0.85
+    INTENT_PRESERVATION  0.95
+    TOKEN_EFFICIENCY     0.70
+  }
+}
+
+MUTATION_POLICY config_policy {
+  TARGETS [initial_configuration, apply_manufacturing_profile, apply_saas_profile,
+           apply_sox_compliance, apply_government_compliance,
+           apply_growth_small_to_medium, apply_growth_medium_to_large,
+           scan_and_remediate_compliance, emit_configuration_applied]
+
+  TIER 1 rule_tuning {
+    SCOPE              [RULES_modify, SCORE_THRESHOLD]
+    AUTO_DEPLOY        true
+    REGRESSION_SUITE   24h_recent_workflows
+    NBVE_WINDOW        72h
+  }
+
+  TIER 3 structural {
+    SCOPE                [WORKFLOW_modify, WORKFLOW_add_step]
+    AUTO_DEPLOY          false
+    APPROVAL_AUTHORITY   [config_lead, ops_lead, compliance_lead]
+  }
+
+  TIER 5 governance {
+    SCOPE                [MUTATION_POLICY_modify]
+    AUTO_DEPLOY          false
+    APPROVAL_AUTHORITY   ORDERED [cfo, cto, board_chair]
+  }
+
+  ANDON_RESPONDER       config_andon_handler
+  IMPROVEMENT_REASONER  config_weekly_kaizen
+  LEDGER                AccelerandoBus
+}
+
+REASONER config_andon_handler {
+  DESCRIPTION  "Config reactive responder — diagnose template-mismatch patterns, drift from applied configurations, rollback-rate anomalies"
+  INPUT        { CHANNEL configuration_applied_outbound  WINDOW "1d" }
+  USES         config_advisor_taste
+  TIER         2
+  OUTPUT       { PACKET ConfigurationAppliedPacket  CHANNEL configuration_applied_outbound }
+  SCHEDULE     on_demand
+}
+
+REASONER config_weekly_kaizen {
+  DESCRIPTION  "Weekly review of configuration patterns — proposes new templates from observed bespoke configurations, surfaces drift, scores template fit"
+  INPUT        { CHANNEL configuration_applied_outbound  WINDOW "7d" }
+  USES         config_advisor_taste
+  TIER         2
+  OUTPUT       { PACKET ConfigurationAppliedPacket  CHANNEL configuration_applied_outbound }
+  SCHEDULE     weekly
+
+  GOVERNANCE {
+    SIGNED_BY  AccelerandoAuthority
+    REQUIRE    operator
+    AUDIT      all_actions
+  }
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // WORKFLOWS — configuration application sequences
 // Each applies a known configuration package deterministically.

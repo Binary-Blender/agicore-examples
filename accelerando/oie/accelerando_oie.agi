@@ -439,6 +439,109 @@ REASONER personal_coach_reasoner {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
+// CROSS-ACCELERANDO SPINE REASONER — the cross-domain opportunity surfacer
+//
+// This is the reasoner the fiction names directly. From Chocolate Wars Ch 9:
+// "the Feastables Hazelnut Cup buyer base is forty-three percent more likely
+// to donate to school-funding campaigns than the milk-chocolate buyer base —
+// recommend separating philanthropy CTA at SKU level."
+//
+// In Accelerando terms: this REASONER reads the cross-module spine channels
+// (PO, invoice, claim-accepted, payment-recorded, escalation) over a 7-day
+// window and emits IntelligenceOpportunityPackets nobody had time to see.
+//
+// The PACKET, CHANNELs, and AccelerandoAuthority used here are declared
+// canonically in accelerando_interchange.agi.
+// ═══════════════════════════════════════════════════════════════════════════════
+
+REASONER cross_module_opportunity_reasoner {
+  DESCRIPTION "Cross-domain pattern surfacer: reads the spine, emits IntelligenceOpportunityPackets nobody had time to find"
+
+  INPUT {
+    CHANNEL  purchase_order_spine, invoice_spine, claim_accepted_spine, payment_recorded_spine, escalation_spine
+    WINDOW   "7d"
+  }
+
+  USES       oie_insight_standards
+  TIER       3
+
+  OUTPUT {
+    PACKET   IntelligenceOpportunityPacket
+    CHANNEL  intelligence_opportunity_spine
+  }
+
+  SCHEDULE   daily
+
+  GOVERNANCE {
+    SIGNED_BY    AccelerandoAuthority
+    REQUIRE      reviewer
+    EXECUTE_ONLY analytics_node
+    AUDIT        all_actions
+  }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// OIE MUTATION POLICY — the Andon Loop applied to organizational intelligence
+//
+// TIER 1 — REASONER cadence tuning, window-size tweaks, SKILLDOC priority
+//          adjustments. NBVE shadow window before promote.
+// TIER 3 — adding or removing a REASONER, changing its CHANNEL bindings.
+//          Reviewed by ops + analytics lead.
+// TIER 5 — modifying the policy itself. Ordered 3-of-3.
+//
+// The leash loosens on a curve the regression data justifies. The system
+// earns autonomy by being right under sandbox for 30 consecutive days.
+// (Chocolate Wars Ch 10, Move 4.)
+// ═══════════════════════════════════════════════════════════════════════════════
+
+MUTATION_POLICY oie_policy {
+  TARGETS [daily_org_reasoner, weekly_trend_reasoner, on_demand_summary,
+           personal_coach_reasoner, cross_module_opportunity_reasoner]
+
+  TIER 1 cadence_tuning {
+    SCOPE              [RULES_modify, SCORE_THRESHOLD]
+    AUTO_DEPLOY        true
+    REGRESSION_SUITE   24h_recent_workflows
+    NBVE_WINDOW        24h
+  }
+
+  TIER 3 structural {
+    SCOPE                [WORKFLOW_modify, WORKFLOW_add_step]
+    AUTO_DEPLOY          false
+    APPROVAL_AUTHORITY   [ops_lead, analytics_lead]
+  }
+
+  TIER 5 governance {
+    SCOPE                [MUTATION_POLICY_modify]
+    AUTO_DEPLOY          false
+    APPROVAL_AUTHORITY   ORDERED [cfo, cto, board_chair]
+  }
+
+  ANDON_RESPONDER       oie_andon_handler
+  IMPROVEMENT_REASONER  weekly_trend_reasoner
+  LEDGER                AccelerandoBus
+}
+
+REASONER oie_andon_handler {
+  DESCRIPTION  "OIE reactive responder — when a reasoner misfires or an evidence chain breaks, diagnose and propose a tier-tagged mutation"
+
+  INPUT {
+    CHANNEL  telemetry_ingress, intelligence_opportunity_spine
+    WINDOW   "1d"
+  }
+
+  USES         oie_insight_standards
+  TIER         2
+
+  OUTPUT {
+    PACKET   InsightPacket
+    CHANNEL  insight_channel
+  }
+
+  SCHEDULE     on_demand
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
 // ACTIONS
 // ═══════════════════════════════════════════════════════════════════════════════
 

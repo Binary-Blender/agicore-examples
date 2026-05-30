@@ -542,6 +542,126 @@ REASONER radiology_quality_reasoner {
     }
   }
 
+// ═══════════════════════════════════════════════════════════════════════════════
+// CROSS-ACCELERANDO SPINE — Radiology as packet emitter and consumer
+//
+// Local PACKETs above (ModalityWorklistPacket, CriticalFindingAlertPacket,
+// FinalReportPacket, DoseAlertPacket) remain in service.
+// Spine additions: imaging_order_inbound canonical packet from Clinical,
+// the TRIGGER catalog, the operator-taste SKILLDOC, MUTATION_POLICY, Andon REASONER.
+//
+// Radiology on the spine:
+//   CONSUMES on  imaging_order_inbound      → run schedule_imaging workflow
+//   EMITS on     final_report_outbound      → existing (matches final_report_spine)
+//                critical_finding_outbound  → existing (matches critical_finding_spine)
+//                dose_alert_outbound        → existing (to ES governance)
+// ═══════════════════════════════════════════════════════════════════════════════
+
+PACKET ImagingOrderPacket {
+    order_id:             string   REQUIRED
+    patient_id:           string   REQUIRED
+    ordering_provider:    string   REQUIRED
+    modality:             string   REQUIRED
+    procedure_code:       string   REQUIRED
+    body_part:            string
+    contrast:             boolean
+    clinical_indication:  string   REQUIRED
+    priority:             string   REQUIRED
+    ordered_at:           string   REQUIRED
+    SIGNATURE "accelerando_clinical"
+  }
+
+CHANNEL imaging_order_inbound {
+    PACKET ImagingOrderPacket
+    CONSUMERS ["accelerando_radiology"]
+    DELIVERY exactly_once
+  }
+
+ACTION HandleInboundImagingOrder {
+  INPUT   order_payload: json, tenant_id: string
+  OUTPUT  study_id: string, scheduled: bool
+  IMPL    "read ImagingOrderPacket, validate modality availability, run protocol-engine selection from clinical_indication, queue to schedule_imaging workflow, return study_id"
+}
+
+WORKFLOW on_imaging_order_inbound {
+  IDEMPOTENT true
+  STEPS {
+    STEP handle { ACTION HandleInboundImagingOrder  ON_FAIL stop }
+  }
+}
+
+TRIGGER radiology_consume_imaging_order {
+  DESCRIPTION "When Clinical orders imaging on the spine, run intake and schedule on the modality"
+  WHEN {
+    CHANNEL  imaging_order_inbound
+    PACKET   ImagingOrderPacket
+  }
+  FIRES        WORKFLOW on_imaging_order_inbound
+  IDEMPOTENT   true
+}
+
+// ─── Radiology reading discipline — the load-bearing judgment surface ────────
+
+SKILLDOC radiology_reading_discipline {
+  DESCRIPTION  "Radiology reading and quality discipline — peer-review sampling targets, critical-finding communication cadence and re-page policy, dose stewardship thresholds, protocol selection priors by indication"
+  VERSION      "1.0.0"
+  DOMAIN       "radiology"
+  CONTENT      "skilldocs/radiology_reading_discipline.md"
+  KEYWORDS     radiology, peer_review, critical_finding, dose, protocol, sampling
+  PRIORITY     30
+
+  GOVERNANCE {
+    SIGNED_BY      AccelerandoAuthority
+    REQUIRE        operator, radiology_certified
+    EXECUTE_ONLY   radiology_node
+    DISALLOW       export, redistribute, log_external
+    AUDIT          all_actions
+  }
+
+  COMPRESSION {
+    SEMANTIC_DENSITY     0.90
+    INTENT_PRESERVATION  0.98
+    TOKEN_EFFICIENCY     0.65
+  }
+}
+
+MUTATION_POLICY radiology_policy {
+  TARGETS [schedule_imaging, complete_study, sign_report, peer_review_assignment,
+           communicate_critical_finding, on_imaging_order_inbound]
+
+  TIER 1 rule_tuning {
+    SCOPE              [RULES_modify, SCORE_THRESHOLD]
+    AUTO_DEPLOY        true
+    REGRESSION_SUITE   24h_recent_workflows
+    NBVE_WINDOW        48h
+  }
+
+  TIER 3 structural {
+    SCOPE                [WORKFLOW_modify, WORKFLOW_add_step]
+    AUTO_DEPLOY          false
+    APPROVAL_AUTHORITY   [radiology_lead, medical_director, compliance_lead]
+  }
+
+  TIER 5 governance {
+    SCOPE                [MUTATION_POLICY_modify]
+    AUTO_DEPLOY          false
+    APPROVAL_AUTHORITY   ORDERED [cmo, cfo, cto, board_chair]
+  }
+
+  ANDON_RESPONDER       radiology_andon_handler
+  IMPROVEMENT_REASONER  radiology_quality_reasoner
+  LEDGER                AccelerandoBus
+}
+
+REASONER radiology_andon_handler {
+  DESCRIPTION  "Radiology reactive responder — diagnose critical-finding routing failures, peer-review sampling drift, dose-alert overrides. Proposes tier-tagged mutations"
+  INPUT        { CHANNEL imaging_order_inbound, critical_finding_outbound, dose_alert_outbound  WINDOW "1d" }
+  USES         radiology_reading_discipline
+  TIER         2
+  OUTPUT       { PACKET IntelligenceOpportunityPacket  CHANNEL intelligence_opportunity_spine }
+  SCHEDULE     on_demand
+}
+
 // ── WORKFLOWS ─────────────────────────────────────────────────────────────
 
 WORKFLOW schedule_imaging {

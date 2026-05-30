@@ -1042,6 +1042,171 @@ MODULE PatternIntelligence {
   }
 }
 
+// ═══════════════════════════════════════════════════════════════════════════════
+// CROSS-ACCELERANDO SPINE — Billing as packet emitter and consumer
+//
+// PACKET shapes, CHANNELs, and AUTHORITY are canonical in
+// accelerando_interchange.agi. Billing's responsibilities on the spine:
+//
+//   EMITS on   invoice_spine          → InvoicePacket (every assembled claim)
+//              claim_accepted_spine   → ClaimAcceptedPacket (every payer accept)
+//              payment_recorded_spine → PaymentRecordedPacket (every posting)
+//
+//   CONSUMES on invoice_spine          → start claim from inbound ERP invoice
+//                                        when invoice_type == "patient_responsibility"
+//
+// This is the wire that makes "Feastables sells a bar → ledger funds a
+// school-day → counter ticks" (Chocolate Wars Ch 9) literal in the DSL.
+// ═══════════════════════════════════════════════════════════════════════════════
+
+ACTION EmitInvoicePacketFromClaim {
+  INPUT   claim_id: string, tenant_id: string
+  OUTPUT  emitted: bool, packet_id: string
+  IMPL    "load Claim + ServiceLines, build InvoicePacket payload (party_role=patient/payer based on responsibility), sign with AccelerandoAuthority, publish to invoice_spine"
+}
+
+ACTION EmitClaimAcceptedPacket {
+  INPUT   claim_id: string, payer_control_number: string, accepted_amount: float, tenant_id: string
+  OUTPUT  emitted: bool, packet_id: string
+  IMPL    "build ClaimAcceptedPacket payload, sign with AccelerandoAuthority, publish to claim_accepted_spine"
+}
+
+ACTION EmitPaymentRecordedPacket {
+  INPUT   payment_id: string, invoice_id: string, amount: float, payment_method: string, tenant_id: string
+  OUTPUT  emitted: bool, packet_id: string
+  IMPL    "build PaymentRecordedPacket payload, sign with AccelerandoAuthority, publish to payment_recorded_spine"
+}
+
+ACTION StartClaimFromInvoicePacket {
+  INPUT   invoice_payload: json, tenant_id: string
+  OUTPUT  claim_id: string
+  IMPL    "read InvoicePacket payload from spine, locate or create Claim shell scoped to tenant_id, return claim_id for downstream pre_submission_claim_edit"
+}
+
+WORKFLOW emit_invoice_packet {
+  IDEMPOTENT true
+  STEP emit { ACTION EmitInvoicePacketFromClaim  ON_FAIL retry }
+}
+
+WORKFLOW emit_claim_accepted_packet {
+  IDEMPOTENT true
+  STEP emit { ACTION EmitClaimAcceptedPacket     ON_FAIL retry }
+}
+
+WORKFLOW emit_payment_recorded_packet {
+  IDEMPOTENT true
+  STEP emit { ACTION EmitPaymentRecordedPacket   ON_FAIL retry }
+}
+
+WORKFLOW start_claim_from_inbound_invoice {
+  IDEMPOTENT true
+  STEP start_claim { ACTION StartClaimFromInvoicePacket  ON_FAIL stop }
+}
+
+TRIGGER billing_consume_inbound_invoice {
+  DESCRIPTION "When ERP emits an InvoicePacket flagged for patient/payer billing, start the claim assembly pipeline"
+  WHEN {
+    CHANNEL  invoice_spine
+    PACKET   InvoicePacket
+    FILTER   "invoice_type == \"patient_responsibility\" OR invoice_type == \"third_party_payer\""
+  }
+  FIRES        WORKFLOW start_claim_from_inbound_invoice
+  IDEMPOTENT   true
+}
+
+// ─── Collections stance — operator-signed taste artifact ─────────────────────
+//
+// What level of follow-up does this organization make on an aging receivable?
+// When does an unpaid balance get written off vs sent to collections vs
+// renegotiated? The collections stance is one of the highest-judgment
+// surfaces in billing; it is also one of the most-litigated. Signed.
+
+SKILLDOC billing_collections_stance {
+  DESCRIPTION  "Collections judgment — escalation timing, write-off thresholds, payment-plan eligibility, hardship discounts, sensitive-population carve-outs"
+  VERSION      "1.0.0"
+  DOMAIN       "billing"
+  CONTENT      "skilldocs/billing_collections_stance.md"
+  KEYWORDS     billing, collections, denial, appeal, receivable, write_off, hardship
+  PRIORITY     25
+
+  GOVERNANCE {
+    SIGNED_BY      AccelerandoAuthority
+    REQUIRE        operator, compliance_certified
+    EXECUTE_ONLY   billing_node
+    DISALLOW       export, redistribute, log_external
+    AUDIT          all_actions
+  }
+
+  COMPRESSION {
+    SEMANTIC_DENSITY     0.85
+    INTENT_PRESERVATION  0.95
+    TOKEN_EFFICIENCY     0.7
+  }
+}
+
+// ─── Billing mutation policy ─────────────────────────────────────────────────
+//
+// TIER 1 — denial-code routing rules, payer-specific edit thresholds.
+//          Shadow window 24h before promote.
+// TIER 3 — workflow restructuring (e.g. add a step to appeal pipeline).
+//          Reviewed by billing lead + compliance lead.
+// TIER 5 — touching the policy. Ordered: CFO → CTO → board chair.
+
+MUTATION_POLICY billing_policy {
+  TARGETS [pre_service_eligibility, pre_submission_claim_edit, submit_claim_837,
+           track_claim_status, post_remittance_835, process_denial, appeal_denial,
+           update_fee_schedule, parse_payer_contract, analyze_and_update_rules,
+           emit_invoice_packet, emit_claim_accepted_packet, emit_payment_recorded_packet,
+           start_claim_from_inbound_invoice]
+
+  TIER 1 routing_tuning {
+    SCOPE              [RULES_modify, SCORE_THRESHOLD]
+    AUTO_DEPLOY        true
+    REGRESSION_SUITE   24h_recent_workflows
+    NBVE_WINDOW        24h
+  }
+
+  TIER 3 structural {
+    SCOPE                [WORKFLOW_modify, WORKFLOW_add_step]
+    AUTO_DEPLOY          false
+    APPROVAL_AUTHORITY   [billing_lead, compliance_lead]
+  }
+
+  TIER 5 governance {
+    SCOPE                [MUTATION_POLICY_modify]
+    AUTO_DEPLOY          false
+    APPROVAL_AUTHORITY   ORDERED [cfo, cto, board_chair]
+  }
+
+  ANDON_RESPONDER       billing_andon_handler
+  IMPROVEMENT_REASONER  billing_weekly_kaizen
+  LEDGER                AccelerandoBus
+}
+
+REASONER billing_andon_handler {
+  DESCRIPTION  "Billing reactive responder — diagnose denial patterns, propose tier-tagged mutations to claim-edit rules"
+  INPUT        { CHANNEL claim_accepted_spine, payment_recorded_spine  WINDOW "1d" }
+  USES         billing_collections_stance
+  TIER         2
+  OUTPUT       { PACKET IntelligenceOpportunityPacket  CHANNEL intelligence_opportunity_spine }
+  SCHEDULE     on_demand
+}
+
+REASONER billing_weekly_kaizen {
+  DESCRIPTION  "Weekly review of denial patterns, payer-acceptance velocity, DSO trends — propose claim-edit refinements and surface payer-contract drift"
+  INPUT        { CHANNEL claim_accepted_spine, payment_recorded_spine, invoice_spine  WINDOW "7d" }
+  USES         billing_collections_stance
+  TIER         2
+  OUTPUT       { PACKET IntelligenceOpportunityPacket  CHANNEL intelligence_opportunity_spine }
+  SCHEDULE     weekly
+
+  GOVERNANCE {
+    SIGNED_BY  AccelerandoAuthority
+    REQUIRE    operator
+    AUDIT      all_actions
+  }
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // WORKFLOWS — full claim lifecycle from eligibility to remittance
 // ─────────────────────────────────────────────────────────────────────────────

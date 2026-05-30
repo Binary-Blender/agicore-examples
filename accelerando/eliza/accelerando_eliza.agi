@@ -601,6 +601,139 @@ MODULE FinanceEliza {
   }
 }
 
+// ═══════════════════════════════════════════════════════════════════════════════
+// CROSS-ACCELERANDO SPINE — Eliza as packet emitter
+//
+// Eliza is the operator-facing intent surface. Every macro the operator fires
+// is recorded as a MacroPacket on the spine — that's the "every operator
+// action is telemetry" wire the ACCELERANDO.md cross-app integration narrative
+// names. OIE consumes the stream; ES watches for macro-pattern governance.
+// ═══════════════════════════════════════════════════════════════════════════════
+
+PACKET MacroPacket {
+  DESCRIPTION "Operator-fired macro recording — what was invoked, what entity changed, what intent the operator stated"
+
+  PAYLOAD {
+    tenant_id:        string REQUIRED
+    source_module:    string REQUIRED
+    macro_id:         string REQUIRED
+    operator_id:      string REQUIRED
+    macro_name:       string REQUIRED
+    intent_phrase:    string REQUIRED
+    target_entity_type: string
+    target_entity_id: string
+    parameters:       json
+    success:          bool REQUIRED
+    fired_at:         datetime REQUIRED
+    duration_ms:      number
+  }
+
+  METADATA {
+    PROVENANCE    true
+    LINEAGE       true
+    SIGNATURES    true
+    ADMISSIBILITY true
+    TTL           604800
+  }
+
+  VALIDATION {
+    has_operator:  operator_id IS NOT NULL
+    has_macro:     macro_name IS NOT NULL
+  }
+}
+
+CHANNEL macro_telemetry_outbound {
+  DESCRIPTION "Outbound stream of every operator macro fire — OIE and ES consume"
+  PROTOCOL    fifo
+  DIRECTION   outbound
+  PACKET      MacroPacket
+}
+
+ACTION EmitMacroPacket {
+  INPUT   macro_id: string, operator_id: string, macro_name: string, intent_phrase: string, tenant_id: string
+  OUTPUT  emitted: bool, packet_id: string
+  IMPL    "build MacroPacket from macro context (target entity, parameters, success, duration), sign with AccelerandoAuthority, publish to macro_telemetry_outbound"
+}
+
+WORKFLOW emit_macro_packet {
+  IDEMPOTENT true
+  STEP emit { ACTION EmitMacroPacket  ON_FAIL retry }
+}
+
+SKILLDOC eliza_operator_taste {
+  DESCRIPTION  "Operator intent discipline — what counts as a confirmed macro, when to refuse a macro that would breach an ES governance decision, escalation routing on ambiguous intent, multi-step confirmation thresholds"
+  VERSION      "1.0.0"
+  DOMAIN       "operator_interface"
+  CONTENT      "skilldocs/eliza_operator_taste.md"
+  KEYWORDS     eliza, macro, operator, intent, confirmation, refusal
+  PRIORITY     25
+
+  GOVERNANCE {
+    SIGNED_BY      AccelerandoAuthority
+    REQUIRE        operator
+    EXECUTE_ONLY   eliza_node
+    DISALLOW       export, redistribute
+    AUDIT          all_actions
+  }
+
+  COMPRESSION {
+    SEMANTIC_DENSITY     0.85
+    INTENT_PRESERVATION  0.96
+    TOKEN_EFFICIENCY     0.70
+  }
+}
+
+MUTATION_POLICY eliza_policy {
+  TARGETS [emit_macro_packet]
+
+  TIER 1 rule_tuning {
+    SCOPE              [RULES_modify, SCORE_THRESHOLD]
+    AUTO_DEPLOY        true
+    REGRESSION_SUITE   24h_recent_workflows
+    NBVE_WINDOW        24h
+  }
+
+  TIER 3 structural {
+    SCOPE                [WORKFLOW_modify, WORKFLOW_add_step]
+    AUTO_DEPLOY          false
+    APPROVAL_AUTHORITY   [eliza_lead, ops_lead]
+  }
+
+  TIER 5 governance {
+    SCOPE                [MUTATION_POLICY_modify]
+    AUTO_DEPLOY          false
+    APPROVAL_AUTHORITY   ORDERED [cfo, cto, board_chair]
+  }
+
+  ANDON_RESPONDER       eliza_andon_handler
+  IMPROVEMENT_REASONER  eliza_weekly_kaizen
+  LEDGER                AccelerandoBus
+}
+
+REASONER eliza_andon_handler {
+  DESCRIPTION  "Eliza reactive responder — diagnose macro misfires, intent ambiguity escalations, governance-refusal patterns"
+  INPUT        { CHANNEL macro_telemetry_outbound  WINDOW "1d" }
+  USES         eliza_operator_taste
+  TIER         2
+  OUTPUT       { PACKET MacroPacket  CHANNEL macro_telemetry_outbound }
+  SCHEDULE     on_demand
+}
+
+REASONER eliza_weekly_kaizen {
+  DESCRIPTION  "Weekly review of operator macro patterns — proposes new macros for repeated multi-step intents, surfaces undertrained surfaces"
+  INPUT        { CHANNEL macro_telemetry_outbound  WINDOW "7d" }
+  USES         eliza_operator_taste
+  TIER         2
+  OUTPUT       { PACKET MacroPacket  CHANNEL macro_telemetry_outbound }
+  SCHEDULE     weekly
+
+  GOVERNANCE {
+    SIGNED_BY  AccelerandoAuthority
+    REQUIRE    operator
+    AUDIT      all_actions
+  }
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // WORKFLOWS — the deterministic multi-step sequences Eliza executes.
 // Each is a named recipe. PATTERN matching identifies which one to run.

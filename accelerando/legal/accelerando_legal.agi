@@ -1050,6 +1050,75 @@ ACTION LogLegalEvent {
   }
 }
 
+// ═══════════════════════════════════════════════════════════════════════════════
+// CROSS-ACCELERANDO SPINE — Legal adoption
+//
+// Legal already emits LegalHoldNoticePacket and HygieneAlertPacket on its
+// outbound channels. ERP listens for LegalHoldNoticePacket and suspends
+// record deletion (per ACCELERANDO.md cross-app integration).
+// Spine additions: the four-contract pattern.
+// ═══════════════════════════════════════════════════════════════════════════════
+
+SKILLDOC legal_hold_discipline {
+  DESCRIPTION  "Legal-hold and eDiscovery judgment — custodian scope under matter type, privilege-review thresholds, hygiene-alert escalation, hold-release criteria, production-format standards"
+  VERSION      "1.0.0"
+  DOMAIN       "legal"
+  CONTENT      "skilldocs/legal_hold_discipline.md"
+  KEYWORDS     legal_hold, ediscovery, privilege, hygiene, production
+  PRIORITY     35
+
+  GOVERNANCE {
+    SIGNED_BY      AccelerandoAuthority
+    REQUIRE        reviewer, legal_certified
+    EXECUTE_ONLY   legal_node
+    DISALLOW       export, redistribute, log_external, modify
+    AUDIT          all_actions
+  }
+
+  COMPRESSION {
+    SEMANTIC_DENSITY     0.90
+    INTENT_PRESERVATION  0.98
+    TOKEN_EFFICIENCY     0.65
+  }
+}
+
+MUTATION_POLICY legal_policy {
+  TARGETS [trigger_legal_hold, collect_and_process, privilege_review_and_production,
+           release_hold, legal_hygiene_scan, weekly_legal_risk_assessment, onboard_connector]
+
+  TIER 1 rule_tuning {
+    SCOPE              [RULES_modify, SCORE_THRESHOLD]
+    AUTO_DEPLOY        true
+    REGRESSION_SUITE   24h_recent_workflows
+    NBVE_WINDOW        72h
+  }
+
+  TIER 3 structural {
+    SCOPE                [WORKFLOW_modify, WORKFLOW_add_step]
+    AUTO_DEPLOY          false
+    APPROVAL_AUTHORITY   [legal_lead, general_counsel, compliance_lead]
+  }
+
+  TIER 5 governance {
+    SCOPE                [MUTATION_POLICY_modify]
+    AUTO_DEPLOY          false
+    APPROVAL_AUTHORITY   ORDERED [general_counsel, cfo, cto, board_chair]
+  }
+
+  ANDON_RESPONDER       legal_andon_handler
+  IMPROVEMENT_REASONER  legal_risk_reasoner
+  LEDGER                AccelerandoBus
+}
+
+REASONER legal_andon_handler {
+  DESCRIPTION  "Legal reactive responder — diagnose hold-scope drift, hygiene-alert false positives, privilege-review escapes"
+  INPUT        { CHANNEL hygiene_alert_outbound, hold_notice_outbound  WINDOW "1d" }
+  USES         legal_hold_discipline
+  TIER         3
+  OUTPUT       { PACKET HygieneAlertPacket  CHANNEL hygiene_alert_outbound }
+  SCHEDULE     on_demand
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // WORKFLOWS
 // ─────────────────────────────────────────────────────────────────────────────

@@ -802,6 +802,188 @@ CHANNEL oie_telemetry_out {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
+// CROSS-ACCELERANDO SPINE — packet emit/consume against the interchange backbone
+//
+// The PACKET shapes, CHANNELs, and AUTHORITY are declared canonically in
+// accelerando_interchange.agi. ERP imports them by name. ERP emits when a
+// purchase order is approved or an invoice posts; ERP consumes when Billing
+// reports a payment posted (close the receivable) or Interchange relays an
+// inbound X12 850 from a customer (open a sales order).
+//
+// This is the layer the fiction names: Reese's seven-PACKET schema discussion
+// with Cole in Carry Ch 8, Ana's mapping of forty-three million in MrBeast
+// SaaS rent in Chocolate Wars Ch 7. ERP stops being its own island.
+// ═══════════════════════════════════════════════════════════════════════════════
+
+ACTION EmitPurchaseOrderPacket {
+  INPUT   po_id: string, tenant_id: string
+  OUTPUT  emitted: bool, packet_id: string
+  IMPL    "load PurchaseOrder + POLines, build PurchaseOrderPacket payload, sign with AccelerandoAuthority, publish to purchase_order_spine, return packet_id"
+}
+
+ACTION EmitInvoicePacket {
+  INPUT   invoice_id: string, tenant_id: string
+  OUTPUT  emitted: bool, packet_id: string
+  IMPL    "load Invoice, build InvoicePacket payload (party_role inferred from invoice_type), sign with AccelerandoAuthority, publish to invoice_spine, return packet_id"
+}
+
+ACTION ClosePayableOnPayment {
+  INPUT   payment_payload: json, tenant_id: string
+  OUTPUT  invoice_id: string, posted: bool
+  IMPL    "read PaymentRecordedPacket payload, locate Invoice by invoice_id, post Payment, transition Invoice status toward paid if amount reconciles"
+}
+
+ACTION OpenSalesOrderFromInboundPO {
+  INPUT   po_packet_payload: json, tenant_id: string
+  OUTPUT  sales_order_id: string
+  IMPL    "read PurchaseOrderPacket (inbound from customer side via Interchange X12 850), create SalesOrder + SalesOrderLines under tenant_id, return sales_order_id"
+}
+
+WORKFLOW on_purchase_order_approved {
+  IDEMPOTENT true
+  STEP emit_spine_packet {
+    ACTION EmitPurchaseOrderPacket
+    ON_FAIL retry
+  }
+}
+
+WORKFLOW on_invoice_approved {
+  IDEMPOTENT true
+  STEP emit_spine_packet {
+    ACTION EmitInvoicePacket
+    ON_FAIL retry
+  }
+}
+
+WORKFLOW on_payment_recorded_inbound {
+  IDEMPOTENT true
+  STEP close_receivable {
+    ACTION ClosePayableOnPayment
+    ON_FAIL stop
+  }
+}
+
+WORKFLOW on_customer_po_inbound {
+  IDEMPOTENT true
+  STEP open_sales_order {
+    ACTION OpenSalesOrderFromInboundPO
+    ON_FAIL stop
+  }
+}
+
+TRIGGER erp_consume_payment_recorded {
+  DESCRIPTION "When Billing posts a payment, close the matching ERP receivable"
+  WHEN {
+    CHANNEL  payment_recorded_spine
+    PACKET   PaymentRecordedPacket
+  }
+  FIRES        WORKFLOW on_payment_recorded_inbound
+  IDEMPOTENT   true
+}
+
+TRIGGER erp_consume_inbound_customer_po {
+  DESCRIPTION "When Interchange relays an inbound X12 850 from a customer, open a sales order"
+  WHEN {
+    CHANNEL  purchase_order_spine
+    PACKET   PurchaseOrderPacket
+    FILTER   "source_module == \"interchange\""
+  }
+  FIRES        WORKFLOW on_customer_po_inbound
+  IDEMPOTENT   true
+}
+
+// ─── Procurement taste — the Sunday-afternoon-with-Tyler artifact ────────────
+//
+// What makes a "good vendor pick" a good vendor pick at this tenant? What is
+// the price/lead-time/concentration tradeoff this organization actually makes?
+// This is the SKILLDOC that lets the AI propose POs the operator would accept.
+
+SKILLDOC erp_procurement_taste {
+  DESCRIPTION  "Procurement decision discipline — vendor selection, lead-time risk, concentration limits, total-cost-of-ownership over unit-price"
+  VERSION      "1.0.0"
+  DOMAIN       "procurement"
+  CONTENT      "skilldocs/erp_procurement_taste.md"
+  KEYWORDS     procurement, vendor, purchase_order, supply_chain, sourcing
+  PRIORITY     20
+
+  GOVERNANCE {
+    SIGNED_BY      AccelerandoAuthority
+    REQUIRE        operator
+    EXECUTE_ONLY   erp_node
+    DISALLOW       export, redistribute
+    AUDIT          all_actions
+  }
+
+  COMPRESSION {
+    SEMANTIC_DENSITY     0.85
+    INTENT_PRESERVATION  0.95
+    TOKEN_EFFICIENCY     0.7
+  }
+}
+
+// ─── ERP mutation policy ─────────────────────────────────────────────────────
+//
+// The Andon Loop applied to the ERP business workflows:
+//   TIER 1 — auto-tune approval thresholds, score weights, replenishment
+//            triggers. NBVE shadow window before promote.
+//   TIER 3 — add or restructure a workflow step (e.g. new approval gate on
+//            high-value POs). Reviewed by ops + finance lead.
+//   TIER 5 — touching the mutation policy itself. Ordered 3-of-3.
+
+MUTATION_POLICY erp_policy {
+  TARGETS [high_value_invoice_review, deal_closed_won, low_inventory_replenishment,
+           on_purchase_order_approved, on_invoice_approved,
+           on_payment_recorded_inbound, on_customer_po_inbound]
+
+  TIER 1 threshold_tuning {
+    SCOPE              [RULES_modify, SCORE_THRESHOLD]
+    AUTO_DEPLOY        true
+    REGRESSION_SUITE   24h_recent_workflows
+    NBVE_WINDOW        24h
+  }
+
+  TIER 3 structural {
+    SCOPE                [WORKFLOW_modify, WORKFLOW_add_step]
+    AUTO_DEPLOY          false
+    APPROVAL_AUTHORITY   [ops_lead, finance_lead]
+  }
+
+  TIER 5 governance {
+    SCOPE                [MUTATION_POLICY_modify]
+    AUTO_DEPLOY          false
+    APPROVAL_AUTHORITY   ORDERED [cfo, cto, board_chair]
+  }
+
+  ANDON_RESPONDER       erp_andon_handler
+  IMPROVEMENT_REASONER  erp_weekly_kaizen
+  LEDGER                AccelerandoBus
+}
+
+REASONER erp_andon_handler {
+  DESCRIPTION  "ERP reactive responder — diagnose workflow failures and propose tier-tagged mutations"
+  INPUT        { CHANNEL oie_telemetry_out  WINDOW "1d" }
+  USES         erp_procurement_taste
+  TIER         2
+  OUTPUT       { PACKET TelemetryPacket }
+  SCHEDULE     on_demand
+}
+
+REASONER erp_weekly_kaizen {
+  DESCRIPTION  "Weekly kaizen over ERP telemetry — propose threshold tunings, surface vendor concentration risks, flag aging receivables"
+  INPUT        { CHANNEL oie_telemetry_out  WINDOW "7d" }
+  USES         erp_procurement_taste
+  TIER         2
+  OUTPUT       { PACKET TelemetryPacket }
+  SCHEDULE     weekly
+
+  GOVERNANCE {
+    SIGNED_BY  AccelerandoAuthority
+    REQUIRE    operator
+    AUDIT      all_actions
+  }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
 // WORKFLOWS — automated responses to business events
 // ═══════════════════════════════════════════════════════════════════════════════
 

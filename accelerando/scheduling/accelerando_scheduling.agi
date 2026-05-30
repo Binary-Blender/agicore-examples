@@ -399,6 +399,181 @@ MODULE NoShowEngine {
 
   }
 
+// ═══════════════════════════════════════════════════════════════════════════════
+// CROSS-ACCELERANDO SPINE — Scheduling as packet emitter and consumer
+//
+// Local PACKETs above (AppointmentConfirmedPacket, AppointmentCancelledPacket,
+// RecallDuePacket, NoShowAlertPacket) remain in service.
+// Spine integration adds two inbound canonical packets:
+//
+//   CONSUMES on  appointment_request_spine → triage + slot assignment from portal
+//                high_risk_no_show_spine   → proactive outreach + transportation
+//
+// AND publishes existing AppointmentConfirmedPacket onto the canonical
+// appointment_confirmed_spine channel name (declared in interchange) — every
+// Accelerando module subscribing to that channel sees the confirmation.
+// ═══════════════════════════════════════════════════════════════════════════════
+
+PACKET AppointmentRequestPacket {
+    request_id:       string   REQUIRED
+    patient_id:       string   REQUIRED
+    preferred_provider: string
+    preferred_window: string   REQUIRED
+    reason:           string   REQUIRED
+    urgency:          string   REQUIRED
+    requested_at:     string   REQUIRED
+    SIGNATURE "accelerando_scheduling"
+  }
+
+PACKET HighRiskNoShowPacket {
+    risk_id:          string   REQUIRED
+    appointment_id:   string   REQUIRED
+    patient_id:       string   REQUIRED
+    no_show_probability: number REQUIRED
+    contributing_factors: string
+    suggested_interventions: string
+    detected_at:      string   REQUIRED
+    SIGNATURE "accelerando_population_health"
+  }
+
+CHANNEL appointment_request_inbound {
+    PACKET AppointmentRequestPacket
+    CONSUMERS ["accelerando_scheduling"]
+    DELIVERY at_least_once
+  }
+
+CHANNEL high_risk_no_show_inbound {
+    PACKET HighRiskNoShowPacket
+    CONSUMERS ["accelerando_scheduling"]
+    DELIVERY at_least_once
+  }
+
+ACTION TriageAppointmentRequest {
+  INPUT   request_payload: json, tenant_id: string
+  OUTPUT  triage_decision: string, suggested_slot_id: string
+  IMPL    "read AppointmentRequestPacket payload, classify urgency, query open slots matching preferred_provider + preferred_window, return suggested_slot_id or escalation_reason"
+}
+
+ACTION ProactiveOutreachForHighRiskNoShow {
+  INPUT   risk_payload: json, tenant_id: string
+  OUTPUT  outreach_dispatched: bool, outreach_id: string
+  IMPL    "read HighRiskNoShowPacket, dispatch SMS + portal nudge using suggested_interventions, log outreach against appointment_id for Population Health feedback loop"
+}
+
+WORKFLOW on_appointment_request_inbound {
+  IDEMPOTENT true
+  STEPS {
+    STEP triage { ACTION TriageAppointmentRequest  ON_FAIL stop }
+  }
+}
+
+WORKFLOW on_high_risk_no_show_inbound {
+  IDEMPOTENT true
+  STEPS {
+    STEP outreach { ACTION ProactiveOutreachForHighRiskNoShow  ON_FAIL skip }
+  }
+}
+
+TRIGGER scheduling_consume_appointment_request {
+  DESCRIPTION "When Patient Portal submits a request, triage it for slot assignment"
+  WHEN {
+    CHANNEL  appointment_request_inbound
+    PACKET   AppointmentRequestPacket
+  }
+  FIRES        WORKFLOW on_appointment_request_inbound
+  IDEMPOTENT   true
+}
+
+TRIGGER scheduling_consume_high_risk_no_show {
+  DESCRIPTION "When Population Health flags a high no-show risk, dispatch proactive outreach"
+  WHEN {
+    CHANNEL  high_risk_no_show_inbound
+    PACKET   HighRiskNoShowPacket
+    FILTER   "no_show_probability >= 0.4"
+  }
+  FIRES        WORKFLOW on_high_risk_no_show_inbound
+  RATE_LIMIT   "60/min"
+  IDEMPOTENT   true
+}
+
+// ─── Scheduling discipline — the load-bearing judgment surface ───────────────
+
+SKILLDOC scheduling_discipline {
+  DESCRIPTION  "Scheduling judgment — slot allocation under provider capacity, urgency triage from portal requests, recall escalation cadence, no-show intervention thresholds, room/resource conflict resolution"
+  VERSION      "1.0.0"
+  DOMAIN       "scheduling"
+  CONTENT      "skilldocs/scheduling_discipline.md"
+  KEYWORDS     scheduling, triage, capacity, recall, no_show, urgency
+  PRIORITY     25
+
+  GOVERNANCE {
+    SIGNED_BY      AccelerandoAuthority
+    REQUIRE        operator
+    EXECUTE_ONLY   scheduling_node
+    DISALLOW       export, redistribute
+    AUDIT          all_actions
+  }
+
+  COMPRESSION {
+    SEMANTIC_DENSITY     0.85
+    INTENT_PRESERVATION  0.95
+    TOKEN_EFFICIENCY     0.7
+  }
+}
+
+MUTATION_POLICY scheduling_policy {
+  TARGETS [book_appointment, cancel_appointment, reschedule_appointment,
+           recall_outreach, process_no_show, waitlist_fill,
+           on_appointment_request_inbound, on_high_risk_no_show_inbound]
+
+  TIER 1 rule_tuning {
+    SCOPE              [RULES_modify, SCORE_THRESHOLD]
+    AUTO_DEPLOY        true
+    REGRESSION_SUITE   24h_recent_workflows
+    NBVE_WINDOW        24h
+  }
+
+  TIER 3 structural {
+    SCOPE                [WORKFLOW_modify, WORKFLOW_add_step]
+    AUTO_DEPLOY          false
+    APPROVAL_AUTHORITY   [scheduling_lead, ops_lead]
+  }
+
+  TIER 5 governance {
+    SCOPE                [MUTATION_POLICY_modify]
+    AUTO_DEPLOY          false
+    APPROVAL_AUTHORITY   ORDERED [cfo, cto, board_chair]
+  }
+
+  ANDON_RESPONDER       scheduling_andon_handler
+  IMPROVEMENT_REASONER  scheduling_weekly_kaizen
+  LEDGER                AccelerandoBus
+}
+
+REASONER scheduling_andon_handler {
+  DESCRIPTION  "Scheduling reactive responder — diagnose triage misfires, recall non-response patterns, capacity overflow"
+  INPUT        { CHANNEL appointment_request_inbound, high_risk_no_show_inbound  WINDOW "1d" }
+  USES         scheduling_discipline
+  TIER         2
+  OUTPUT       { PACKET IntelligenceOpportunityPacket  CHANNEL intelligence_opportunity_spine }
+  SCHEDULE     on_demand
+}
+
+REASONER scheduling_weekly_kaizen {
+  DESCRIPTION  "Weekly review of slot utilization, no-show patterns, recall response rates, urgency-triage accuracy"
+  INPUT        { CHANNEL appointment_request_inbound, high_risk_no_show_inbound  WINDOW "7d" }
+  USES         scheduling_discipline
+  TIER         2
+  OUTPUT       { PACKET IntelligenceOpportunityPacket  CHANNEL intelligence_opportunity_spine }
+  SCHEDULE     weekly
+
+  GOVERNANCE {
+    SIGNED_BY  AccelerandoAuthority
+    REQUIRE    operator
+    AUDIT      all_actions
+  }
+}
+
 // ── WORKFLOWS ─────────────────────────────────────────────────────────────
 
 WORKFLOW book_appointment {

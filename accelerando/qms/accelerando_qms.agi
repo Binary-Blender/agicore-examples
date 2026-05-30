@@ -866,6 +866,73 @@ ACTION LogQMSEvent {
   }
 }
 
+// ═══════════════════════════════════════════════════════════════════════════════
+// CROSS-ACCELERANDO SPINE — QMS adoption
+//
+// QMS already emits CAPAToPICoEPacket and AuditReadinessPacket, and consumes
+// NCRFromPICoEPacket from PI CoE. Spine additions: the four-contract pattern.
+// ═══════════════════════════════════════════════════════════════════════════════
+
+SKILLDOC qms_root_cause_discipline {
+  DESCRIPTION  "QMS discipline — NCR severity scoring, root-cause investigation depth, CAPA effectiveness criteria, audit readiness thresholds, management-review escalation"
+  VERSION      "1.0.0"
+  DOMAIN       "quality"
+  CONTENT      "skilldocs/qms_root_cause_discipline.md"
+  KEYWORDS     qms, iso9001, ncr, capa, root_cause, audit, management_review
+  PRIORITY     30
+
+  GOVERNANCE {
+    SIGNED_BY      AccelerandoAuthority
+    REQUIRE        operator, quality_certified
+    EXECUTE_ONLY   qms_node
+    DISALLOW       export, redistribute, log_external, modify
+    AUDIT          all_actions
+  }
+
+  COMPRESSION {
+    SEMANTIC_DENSITY     0.90
+    INTENT_PRESERVATION  0.97
+    TOKEN_EFFICIENCY     0.65
+  }
+}
+
+MUTATION_POLICY qms_policy {
+  TARGETS [ncr_to_capa, capa_effectiveness_check, internal_audit, management_review,
+           handle_customer_complaint, annual_audit_planning, pre_audit_readiness]
+
+  TIER 1 rule_tuning {
+    SCOPE              [RULES_modify, SCORE_THRESHOLD]
+    AUTO_DEPLOY        true
+    REGRESSION_SUITE   24h_recent_workflows
+    NBVE_WINDOW        72h
+  }
+
+  TIER 3 structural {
+    SCOPE                [WORKFLOW_modify, WORKFLOW_add_step]
+    AUTO_DEPLOY          false
+    APPROVAL_AUTHORITY   [qms_lead, quality_director, compliance_lead]
+  }
+
+  TIER 5 governance {
+    SCOPE                [MUTATION_POLICY_modify]
+    AUTO_DEPLOY          false
+    APPROVAL_AUTHORITY   ORDERED [quality_director, cfo, cto, board_chair]
+  }
+
+  ANDON_RESPONDER       qms_andon_handler
+  IMPROVEMENT_REASONER  quality_intelligence_reasoner
+  LEDGER                AccelerandoBus
+}
+
+REASONER qms_andon_handler {
+  DESCRIPTION  "QMS reactive responder — diagnose CAPA non-effectiveness patterns, NCR root-cause shallowness, audit-readiness drift"
+  INPUT        { CHANNEL capa_to_pi_coe, audit_readiness_outbound  WINDOW "1d" }
+  USES         qms_root_cause_discipline
+  TIER         3
+  OUTPUT       { PACKET CAPAToPICoEPacket  CHANNEL capa_to_pi_coe }
+  SCHEDULE     on_demand
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // WORKFLOWS
 // ─────────────────────────────────────────────────────────────────────────────

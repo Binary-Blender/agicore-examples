@@ -458,6 +458,179 @@ REASONER population_intelligence_reasoner {
     }
   }
 
+// ═══════════════════════════════════════════════════════════════════════════════
+// CROSS-ACCELERANDO SPINE — Population Health as packet emitter and consumer
+//
+// Local PACKETs above (CareGapOpenedPacket, HighRiskPatientPacket,
+// QualityMeasureReportPacket, HCCRecapturePacket) remain in service.
+// Spine additions: canonical CareGapAlertPacket + HighRiskNoShowPacket
+// channels, inbound encounter-data trigger, the four-contract pattern.
+//
+// Population Health on the spine:
+//   EMITS on    care_gap_outbound       → matches care_gap_spine (Clinical, Portal)
+//                hcc_recapture_outbound  → matches hcc_recapture_spine (Clinical)
+//                high_risk_outbound      → to ES/Governance
+//                quality_measure_outbound → to ES/Reporting
+//                no_show_risk_outbound   → matches high_risk_no_show_spine (Scheduling)
+//   CONSUMES on  encounter_inbound        → from Clinical (registry updates)
+//                no_show_signal_inbound   → from Scheduling (risk scoring input)
+// ═══════════════════════════════════════════════════════════════════════════════
+
+PACKET HighRiskNoShowPacket {
+    risk_id:                 string   REQUIRED
+    appointment_id:          string   REQUIRED
+    patient_id:              string   REQUIRED
+    no_show_probability:     number   REQUIRED
+    contributing_factors:    string
+    suggested_interventions: string
+    detected_at:             string   REQUIRED
+    SIGNATURE "accelerando_population_health"
+  }
+
+PACKET InboundEncounterSignalPacket {
+    encounter_id:    string   REQUIRED
+    patient_id:      string   REQUIRED
+    provider_id:     string   REQUIRED
+    encounter_date:  string   REQUIRED
+    encounter_type:  string   REQUIRED
+    SIGNATURE "accelerando_clinical"
+  }
+
+PACKET InboundNoShowSignalPacket {
+    appointment_id:    string   REQUIRED
+    patient_id:        string   REQUIRED
+    provider_id:       string   REQUIRED
+    no_show_date:      string   REQUIRED
+    no_show_count_ytd: number   REQUIRED
+    SIGNATURE "accelerando_scheduling"
+  }
+
+CHANNEL no_show_risk_outbound {
+    PACKET HighRiskNoShowPacket
+    CONSUMERS ["accelerando_scheduling", "accelerando_clinical"]
+    DELIVERY at_least_once
+  }
+
+CHANNEL encounter_inbound {
+    PACKET InboundEncounterSignalPacket
+    CONSUMERS ["accelerando_population_health"]
+    DELIVERY at_least_once
+  }
+
+CHANNEL no_show_signal_inbound {
+    PACKET InboundNoShowSignalPacket
+    CONSUMERS ["accelerando_population_health"]
+    DELIVERY at_least_once
+  }
+
+ACTION UpdateRegistriesFromEncounter {
+  INPUT   encounter_payload: json, tenant_id: string
+  OUTPUT  registries_updated: bool, gap_recalc_triggered: bool
+  IMPL    "read InboundEncounterSignalPacket, update disease registries, recompute care gaps for the patient, queue HCC recapture re-evaluation"
+}
+
+ACTION ScoreNoShowRiskFromSignal {
+  INPUT   no_show_payload: json, tenant_id: string
+  OUTPUT  scored: bool, risk_score: number
+  IMPL    "read InboundNoShowSignalPacket, feed history into risk model, persist updated patient risk profile for next scheduling cycle"
+}
+
+WORKFLOW on_encounter_inbound {
+  IDEMPOTENT true
+  STEPS {
+    STEP update_registries { ACTION UpdateRegistriesFromEncounter  ON_FAIL retry }
+  }
+}
+
+WORKFLOW on_no_show_signal_inbound {
+  IDEMPOTENT true
+  STEPS {
+    STEP score_risk { ACTION ScoreNoShowRiskFromSignal  ON_FAIL retry }
+  }
+}
+
+TRIGGER pophealth_consume_encounter {
+  DESCRIPTION "When Clinical opens or closes an encounter, refresh registries and recompute care gaps"
+  WHEN {
+    CHANNEL  encounter_inbound
+    PACKET   InboundEncounterSignalPacket
+  }
+  FIRES        WORKFLOW on_encounter_inbound
+  DEBOUNCE     "5s"
+  IDEMPOTENT   true
+}
+
+TRIGGER pophealth_consume_no_show {
+  DESCRIPTION "When Scheduling records a no-show, update the patient's risk score"
+  WHEN {
+    CHANNEL  no_show_signal_inbound
+    PACKET   InboundNoShowSignalPacket
+  }
+  FIRES        WORKFLOW on_no_show_signal_inbound
+  IDEMPOTENT   true
+}
+
+SKILLDOC population_health_attribution {
+  DESCRIPTION  "Population-health discipline — measure-attribution rules under HEDIS/MIPS, care-gap surfacing priorities, HCC recapture cadence, risk stratification thresholds, outreach targeting under equity constraints"
+  VERSION      "1.0.0"
+  DOMAIN       "population_health"
+  CONTENT      "skilldocs/population_health_attribution.md"
+  KEYWORDS     population_health, hedis, mips, hcc, risk_stratification, care_gap, equity
+  PRIORITY     30
+
+  GOVERNANCE {
+    SIGNED_BY      AccelerandoAuthority
+    REQUIRE        operator, quality_certified
+    EXECUTE_ONLY   analytics_node
+    DISALLOW       export, redistribute
+    AUDIT          all_actions
+  }
+
+  COMPRESSION {
+    SEMANTIC_DENSITY     0.88
+    INTENT_PRESERVATION  0.97
+    TOKEN_EFFICIENCY     0.68
+  }
+}
+
+MUTATION_POLICY population_health_policy {
+  TARGETS [identify_care_gaps, stratify_risk, compute_quality_measures,
+           outreach_campaign, enroll_care_management, hcc_recapture,
+           on_encounter_inbound, on_no_show_signal_inbound]
+
+  TIER 1 rule_tuning {
+    SCOPE              [RULES_modify, SCORE_THRESHOLD]
+    AUTO_DEPLOY        true
+    REGRESSION_SUITE   24h_recent_workflows
+    NBVE_WINDOW        48h
+  }
+
+  TIER 3 structural {
+    SCOPE                [WORKFLOW_modify, WORKFLOW_add_step]
+    AUTO_DEPLOY          false
+    APPROVAL_AUTHORITY   [pophealth_lead, medical_director, compliance_lead]
+  }
+
+  TIER 5 governance {
+    SCOPE                [MUTATION_POLICY_modify]
+    AUTO_DEPLOY          false
+    APPROVAL_AUTHORITY   ORDERED [cmo, cfo, cto, board_chair]
+  }
+
+  ANDON_RESPONDER       pophealth_andon_handler
+  IMPROVEMENT_REASONER  population_intelligence_reasoner
+  LEDGER                AccelerandoBus
+}
+
+REASONER pophealth_andon_handler {
+  DESCRIPTION  "Population Health reactive responder — diagnose care-gap surface misfires, HCC over/under-prompting, risk-stratification drift"
+  INPUT        { CHANNEL encounter_inbound, no_show_signal_inbound, care_gap_outbound  WINDOW "1d" }
+  USES         population_health_attribution
+  TIER         2
+  OUTPUT       { PACKET IntelligenceOpportunityPacket  CHANNEL intelligence_opportunity_spine }
+  SCHEDULE     on_demand
+}
+
 // ── WORKFLOWS ─────────────────────────────────────────────────────────────
 
 WORKFLOW identify_care_gaps {
